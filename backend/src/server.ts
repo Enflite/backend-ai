@@ -103,12 +103,18 @@ export async function buildServer(): Promise<FastifyInstance> {
 
 const __filename = fileURLToPath(import.meta.url);
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename)) {
-  const server = await buildServer();
-  try {
-    await server.listen({ port: config.PORT, host: '0.0.0.0' });
-    console.log(`Server listening on 0.0.0.0:${config.PORT}`);
-  } catch (err) {
-    server.log.error(err);
-    process.exit(1);
-  }
+  buildServer()
+    .then(async (server) => {
+      try {
+        await server.listen({ port: config.PORT, host: '0.0.0.0' });
+        console.log(`Server listening on 0.0.0.0:${config.PORT}`);
+      } catch (err) {
+        server.log.error(err);
+        process.exit(1);
+      }
+    })
+    .catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
 }

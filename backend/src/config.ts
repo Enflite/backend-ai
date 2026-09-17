@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+try {
+  // Built-in in Node 20.12+ / 22+
+  process.loadEnvFile?.();
+} catch {
+  // .env file does not exist or environment variables already set
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(8080),
