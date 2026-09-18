@@ -161,6 +161,15 @@ const envSchema = z.object({
   MALWARE_SCAN_MODE: z.enum(['http', 'disabled-development']).default('disabled-development'),
   SYTELINE_BASE_URL: z.string().url().optional(),
   SYTELINE_API_TOKEN: z.string().optional().default(''),
+  // Per-request timeout for SyteLine adapter calls. Sits inside
+  // runToolCall's AI_TOOL_TIMEOUT_MS execution deadline: a hung upstream
+  // must not hold a chat turn or worker slot indefinitely.
+  SYTELINE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(15000),
+  // Row cap for list fields in SyteLine results (order lines, purchase
+  // orders, work orders, BOM components, inventory transactions). The
+  // adapter truncates longer lists and marks them `truncated: true` so the
+  // model knows the result is partial instead of reasoning as if it saw all.
+  SYTELINE_MAX_ROWS: z.coerce.number().int().min(1).max(1000).default(100),
   // ---------------------------------------------------------------------------
   // Observability (backend/src/observability/). /metrics is public in dev and
   // test for easy scraping; in production it defaults to hidden (404) and

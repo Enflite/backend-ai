@@ -226,6 +226,12 @@ export function createSseSender(raw: SseRawSocket, options: SseSenderOptions = {
 function buildProviderTools(auth: AuthContext, classification: Classification): ProviderToolDefinition[] {
   if (!auth.permissions.includes('tool:use')) return [];
   return toolRegistry
+    // Per-tool permission is enforced in application code here, at offer
+    // time, and again inside runToolCall at execution time: the model can
+    // never talk the server into running a tool the user couldn't run
+    // directly (e.g. syteline:read-gated ERP tools for a caller who only
+    // has generic tool:use).
+    .filter((tool) => auth.permissions.includes(tool.permission ?? 'tool:use'))
     .filter((tool) => canModelProcess(classification, tool.allowedClassifications).allowed)
     .map((tool) => ({
       type: 'function' as const,
@@ -344,6 +350,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       modelName: model.name,
       modelVersion: model.version,
       toolsAvailable: providerTools.length > 0,
+      sytelineToolsAvailable: providerTools.some((tool) => tool.function.name.startsWith('syteline.')),
     });
 
     // Context-window management: sliding window that always keeps the system
@@ -523,7 +530,11 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
             roundContextWindow = event.contextWindow;
             // Keep the pinned prompt honest about which model is serving: the
             // fallback's registry version is unknown here, so name only.
-            roundSystemPrompt = buildSystemPrompt({ modelName: event.modelName, toolsAvailable: providerTools.length > 0 });
+            roundSystemPrompt = buildSystemPrompt({
+              modelName: event.modelName,
+              toolsAvailable: providerTools.length > 0,
+              sytelineToolsAvailable: providerTools.some((tool) => tool.function.name.startsWith('syteline.')),
+            });
             if (!(await send('notice', { code: 'MODEL_FAILOVER', message: `Primary model unavailable; continued with ${event.modelName}`, model: { id: event.modelId, name: event.modelName } }))) {
               sendFailed = true;
               break;

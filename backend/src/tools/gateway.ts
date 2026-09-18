@@ -1,11 +1,12 @@
 import { z } from 'zod';
-import { AuthContext, Classification } from '../authz/permissions.js';
+import { AuthContext, Classification, Permission } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
 import { tenantQuery } from '../db/pool.js';
 import { recordAudit, sanitizeReason } from '../audit/audit.js';
 import { config } from '../config.js';
 import { Errors } from '../errors.js';
 import { canModelProcess } from '../policy/engine.js';
+import { getSyteLineAdapter } from './syteline.js';
 
 export interface ToolDefinition<T = unknown> {
   name: string;
@@ -13,32 +14,27 @@ export interface ToolDefinition<T = unknown> {
   action: string;
   destructive: boolean;
   allowedClassifications: Classification[];
+  /**
+   * Permission required to run this tool, checked in application code by
+   * authorizeTool. Defaults to 'tool:use'. The SyteLine read tools require
+   * 'syteline:read' so ERP access can be granted or revoked independently of
+   * other tool use.
+   */
+  permission?: Permission;
   schema: z.ZodType<T>;
   execute(input: T, signal: AbortSignal): Promise<unknown>;
 }
 
-export interface SyteLineAdapter {
-  getItem(input: { item: string; site: string }, signal: AbortSignal): Promise<unknown>;
-}
+// Identifier shapes accepted by the SyteLine tools. Strict character
+// classes keep model-supplied values from becoming injection vectors at
+// the adapter layer; the adapter itself only ever interpolates them as
+// URL query parameters.
+const sytelineItemId = () => z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9._/-]+$/);
+const sytelineOrderId = () => z.string().trim().min(1).max(40).regex(/^[A-Za-z0-9._/-]+$/);
+const sytelineCustomerId = () => z.string().trim().min(1).max(40).regex(/^[A-Za-z0-9._-]+$/);
+const sytelineSiteId = () => z.string().trim().min(1).max(40).regex(/^[A-Za-z0-9_-]+$/);
 
-export class HttpSyteLineAdapter implements SyteLineAdapter {
-  async getItem(input: { item: string; site: string }, signal: AbortSignal): Promise<unknown> {
-    if (!config.SYTELINE_BASE_URL || !config.SYTELINE_API_TOKEN) {
-      throw Errors.internal('SyteLine adapter is not configured', undefined, 'SYTELINE_NOT_CONFIGURED');
-    }
-    const url = new URL('/api/items', config.SYTELINE_BASE_URL);
-    url.searchParams.set('item', input.item);
-    url.searchParams.set('site', input.site);
-    const response = await fetch(url, {
-      headers: { authorization: `Bearer ${config.SYTELINE_API_TOKEN}`, accept: 'application/json' },
-      signal,
-    });
-    if (!response.ok) throw Errors.internal('SyteLine request failed', { status: response.status }, 'SYTELINE_UPSTREAM_ERROR');
-    return response.json();
-  }
-}
-
-const syteLine = new HttpSyteLineAdapter();
+const SYTELINE_CLASSIFICATIONS: Classification[] = ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'PROPRIETARY'];
 
 export const toolRegistry: readonly ToolDefinition<any>[] = [
   {
@@ -46,12 +42,127 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
     description: 'Retrieve an item from the configured internal SyteLine site',
     action: 'read',
     destructive: false,
-    allowedClassifications: ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'PROPRIETARY'],
+    permission: 'syteline:read',
+    allowedClassifications: SYTELINE_CLASSIFICATIONS,
     schema: z.object({
-      item: z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9._/-]+$/),
-      site: z.string().trim().min(1).max(40).regex(/^[A-Za-z0-9_-]+$/),
+      item: sytelineItemId(),
+      site: sytelineSiteId(),
     }).strict(),
-    execute: (input, signal) => syteLine.getItem(input, signal),
+    execute: (input, signal) => getSyteLineAdapter().getItem(input, signal),
+  },
+  {
+    name: 'syteline.getSalesOrder',
+    description:
+      'Look up a SyteLine sales order by order number (returns header plus ' +
+      'order lines), or list open orders for a customer by customerNumber. ' +
+      'Start of a late-order investigation: the lines tell you which items ' +
+      'to check with syteline.getItemAvailability.',
+    action: 'read',
+    destructive: false,
+    permission: 'syteline:read',
+    allowedClassifications: SYTELINE_CLASSIFICATIONS,
+    schema: z.object({
+      orderNumber: sytelineOrderId().optional(),
+      customerNumber: sytelineCustomerId().optional(),
+      site: sytelineSiteId().optional(),
+      status: z.enum(['open', 'closed', 'all']).optional(),
+    }).strict(),
+    execute: (input: { orderNumber?: string; customerNumber?: string; site?: string; status?: string }, signal) => {
+      if (!input.orderNumber && !input.customerNumber) {
+        throw Errors.badRequest('MISSING_REQUIRED_PARAMETER', 'Provide orderNumber or customerNumber');
+      }
+      return getSyteLineAdapter().getSalesOrder(input, signal);
+    },
+  },
+  {
+    name: 'syteline.getItemAvailability',
+    description:
+      'On-hand, allocated, and available-to-promise quantities for an item ' +
+      'at a site, plus recent inventory transactions (receipts, issues, ' +
+      'adjustments) for forensics. Use after syteline.getSalesOrder to test ' +
+      'whether each open line is covered.',
+    action: 'read',
+    destructive: false,
+    permission: 'syteline:read',
+    allowedClassifications: SYTELINE_CLASSIFICATIONS,
+    schema: z.object({
+      item: sytelineItemId(),
+      site: sytelineSiteId(),
+    }).strict(),
+    execute: (input, signal) => getSyteLineAdapter().getItemAvailability(input, signal),
+  },
+  {
+    name: 'syteline.getOpenPurchaseOrders',
+    description:
+      'Open purchase orders for an item, with promised dates, receipt ' +
+      'status, and supplier. Use when syteline.getItemAvailability shows a ' +
+      'shortage to see what supply is inbound and whether it is late.',
+    action: 'read',
+    destructive: false,
+    permission: 'syteline:read',
+    allowedClassifications: SYTELINE_CLASSIFICATIONS,
+    schema: z.object({
+      item: sytelineItemId(),
+      site: sytelineSiteId().optional(),
+    }).strict(),
+    execute: (input, signal) => getSyteLineAdapter().getOpenPurchaseOrders(input, signal),
+  },
+  {
+    name: 'syteline.getWorkOrders',
+    description:
+      'Look up work orders by work order number, or find work orders ' +
+      'building an item. Returns status, quantities, and schedule dates. ' +
+      'Use when the finished good is short but components are covered — ' +
+      'the delay may be on the shop floor rather than in supply.',
+    action: 'read',
+    destructive: false,
+    permission: 'syteline:read',
+    allowedClassifications: SYTELINE_CLASSIFICATIONS,
+    schema: z.object({
+      workOrderNumber: sytelineOrderId().optional(),
+      item: sytelineItemId().optional(),
+      site: sytelineSiteId().optional(),
+      status: z.string().trim().min(1).max(40).optional(),
+    }).strict(),
+    execute: (input: { workOrderNumber?: string; item?: string; site?: string; status?: string }, signal) => {
+      if (!input.workOrderNumber && !input.item) {
+        throw Errors.badRequest('MISSING_REQUIRED_PARAMETER', 'Provide workOrderNumber or item');
+      }
+      return getSyteLineAdapter().getWorkOrders(input, signal);
+    },
+  },
+  {
+    name: 'syteline.getBom',
+    description:
+      'Explode the bill of materials for a manufactured item into its ' +
+      'components (quantity-per, level, lead time). Use when a manufactured ' +
+      'item is short: check syteline.getItemAvailability for each component ' +
+      'to find the blocking one.',
+    action: 'read',
+    destructive: false,
+    permission: 'syteline:read',
+    allowedClassifications: SYTELINE_CLASSIFICATIONS,
+    schema: z.object({
+      item: sytelineItemId(),
+      site: sytelineSiteId().optional(),
+      levels: z.number().int().min(1).max(5).default(3),
+    }).strict(),
+    execute: (input, signal) => getSyteLineAdapter().getBom(input, signal),
+  },
+  {
+    name: 'syteline.getCustomer',
+    description:
+      'Look up a SyteLine customer record by customer number (name, ' +
+      'status, credit hold). Pairs with syteline.getSalesOrder by ' +
+      'customerNumber for backlog questions.',
+    action: 'read',
+    destructive: false,
+    permission: 'syteline:read',
+    allowedClassifications: SYTELINE_CLASSIFICATIONS,
+    schema: z.object({
+      customerNumber: sytelineCustomerId(),
+    }).strict(),
+    execute: (input, signal) => getSyteLineAdapter().getCustomer(input, signal),
   },
 ];
 
@@ -69,7 +180,11 @@ export function authorizeTool(
   confirmed: boolean,
 ): { definition: ToolDefinition<any>; input: unknown } {
   const definition = getTool(name);
-  if (!auth.permissions.includes('tool:use')) throw Errors.forbidden('TOOL_FORBIDDEN', 'Tool permission required');
+  // Per-tool permission, enforced in application code — never by the model.
+  // SyteLine tools require 'syteline:read' so ERP access is granted and
+  // revoked independently of generic tool use.
+  const requiredPermission = definition.permission ?? 'tool:use';
+  if (!auth.permissions.includes(requiredPermission)) throw Errors.forbidden('TOOL_FORBIDDEN', 'Tool permission required');
   // The caller must be cleared for the classification the tool will process:
   // otherwise a PUBLIC-cleared user could run tools over CUI-labeled data by
   // simply asserting a higher classification in the request.

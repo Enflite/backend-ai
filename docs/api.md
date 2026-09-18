@@ -113,6 +113,28 @@ audited as `RAG_ACCESS_DENIED`.
 Direct execution is primarily for admin/debug use — the chat loop calls the
 same `runToolCall` path internally.
 
+### SyteLine read-only tools (Phase 5)
+
+The flagship agentic surface (see `docs/syteline-vision.md`): typed,
+parameterized, bounded ERP reads. Every call is authorized in application
+code against the caller's permissions (each tool requires `syteline:read`
+in addition to `tool:use`), audited with tenant/user/tool/args/result
+size, timeout-bounded (`SYTELINE_TIMEOUT_MS`), and result-size-capped
+(`SYTELINE_MAX_ROWS`; truncated lists carry `truncated: true`). No
+free-form SQL; the model never touches SyteLine directly. Dependent
+chaining (output of one call feeding the next) runs inside the chat
+agentic loop's existing iteration budget (`AI_MAX_TOOL_ITERATIONS`).
+
+| Tool | Purpose |
+|---|---|
+| `syteline.getItem` | Item record by item + site |
+| `syteline.getSalesOrder` | Sales order header + lines by order number, or open orders by customer |
+| `syteline.getItemAvailability` | On-hand / allocated / available-to-promise + recent inventory transactions |
+| `syteline.getOpenPurchaseOrders` | Open POs for an item, with promised dates, receipt status, supplier |
+| `syteline.getWorkOrders` | Work orders by number or by built item, with status and schedule dates |
+| `syteline.getBom` | BOM explosion for a manufactured item (components, qty-per, lead time) |
+| `syteline.getCustomer` | Customer record by customer number |
+
 ## Models & admin
 
 | Method | Path | Auth / Permission | Purpose |

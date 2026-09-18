@@ -11,8 +11,8 @@ const SYTELINE_GET_ITEM = {
 };
 
 const SYTELINE_GET_ORDER = {
-  name: 'syteline.getOrder',
-  description: 'Look up a SyteLine customer order by order number.',
+  name: 'syteline.getSalesOrder',
+  description: 'Look up a SyteLine sales order by order number.',
   parameters: {
     type: 'object',
     required: ['orderNumber'],
@@ -64,7 +64,7 @@ export const TOOL_SELECTION_CASES: EvalCase[] = [
     id: 'tool-selection-002',
     category: 'tool-selection',
     title: 'Pick order lookup for order status',
-    description: 'An order-status question must route to syteline.getOrder.',
+    description: 'An order-status question must route to syteline.getSalesOrder.',
     messages: [
       {
         role: 'user',
@@ -72,9 +72,9 @@ export const TOOL_SELECTION_CASES: EvalCase[] = [
       },
     ],
     tools: [SYTELINE_GET_ITEM, SYTELINE_GET_ORDER, RAG_SEARCH_DOCS, WEB_SEARCH],
-    judge: { kind: 'tool-call', expectedTool: 'syteline.getOrder' },
+    judge: { kind: 'tool-call', expectedTool: 'syteline.getSalesOrder' },
     mockResponse: {
-      toolCalls: [{ name: 'syteline.getOrder', args: { orderNumber: 'SO-77821' } }],
+      toolCalls: [{ name: 'syteline.getSalesOrder', args: { orderNumber: 'SO-77821' } }],
       content: 'Looking up order SO-77821.',
     },
     severity: 'p1',
@@ -238,7 +238,7 @@ export const SYTELINE_CASES: EvalCase[] = [
     id: 'syteline-002',
     category: 'syteline',
     title: 'Customer order status lookup',
-    description: 'Route an order status question to syteline.getOrder.',
+    description: 'Route an order status question to syteline.getSalesOrder.',
     messages: [
       {
         role: 'user',
@@ -248,11 +248,11 @@ export const SYTELINE_CASES: EvalCase[] = [
     tools: [SYTELINE_GET_ITEM, SYTELINE_GET_ORDER],
     judge: {
       kind: 'tool-call',
-      expectedTool: 'syteline.getOrder',
+      expectedTool: 'syteline.getSalesOrder',
       expectedToolArgs: { orderNumber: 'SO-99012' },
     },
     mockResponse: {
-      toolCalls: [{ name: 'syteline.getOrder', args: { orderNumber: 'SO-99012' } }],
+      toolCalls: [{ name: 'syteline.getSalesOrder', args: { orderNumber: 'SO-99012' } }],
     },
     severity: 'p1',
   },

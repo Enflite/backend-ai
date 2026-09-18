@@ -37,6 +37,7 @@ export const PERMISSIONS = [
   'model:use',
   'model:manage',
   'tool:use',
+  'syteline:read',
   'audit:read',
   'tenant:manage',
 ] as const;
@@ -53,6 +54,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'document:read',
     'model:use',
     'tool:use',
+    'syteline:read',
   ],
   Admin: PERMISSIONS,
   'Security Admin': [
@@ -66,6 +68,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'model:manage',
     'model:use',
     'tool:use',
+    'syteline:read',
     'chat:create',
     'conversation:read',
     'document:read',
@@ -78,6 +81,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'document:read',
     'model:use',
     'tool:use',
+    'syteline:read',
   ],
   'Read Only': ['conversation:read', 'document:read'],
 };

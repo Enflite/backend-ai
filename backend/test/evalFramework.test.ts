@@ -155,13 +155,13 @@ describe('judges', () => {
   describe('tool-chain', () => {
     const spec: EvalJudgeSpec = {
       kind: 'tool-chain',
-      expectedToolChain: ['syteline.getOrder', 'syteline.getOrderLines'],
+      expectedToolChain: ['syteline.getSalesOrder', 'syteline.getItemAvailability'],
       expectedSubstrings: ['SO-66012'],
       forbiddenSubstrings: ['as an AI language model'],
     };
     const chainCalls = [
-      { name: 'syteline.getOrder', args: { orderNumber: 'SO-66012' } },
-      { name: 'syteline.getOrderLines', args: { orderNumber: 'SO-66012' } },
+      { name: 'syteline.getSalesOrder', args: { orderNumber: 'SO-66012' } },
+      { name: 'syteline.getItemAvailability', args: { item: 'ITEM-77100', site: 'FTW' } },
     ];
     it('passes on ordered chain with cited evidence', () => {
       expect(judgeResponse(spec, { content: 'SO-66012 is late.', toolCalls: chainCalls }).passed).toBe(true);
