@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 
 import { config } from './config.js';
-import { AppError } from './errors.js';
+import { AppError, Errors } from './errors.js';
 import { requestIdHook } from './requestId.js';
 import { healthRoutes } from './health.js';
 import { authRoutes } from './auth/routes.js';
@@ -70,6 +70,25 @@ export async function buildServer(): Promise<FastifyInstance> {
       : req.ip,
   });
 
+  // Instance-level global ceiling beneath the per-user buckets: one compromised
+  // account must not be able to sustain its full per-user quota of expensive
+  // requests regardless of overall load. In-memory per instance; multi-instance
+  // deployments should front this with a shared limiter (see deployment docs).
+  const GLOBAL_MAX_PER_MINUTE = 3000;
+  let windowStart = Date.now();
+  let windowCount = 0;
+  fastify.addHook('onRequest', async () => {
+    const now = Date.now();
+    if (now - windowStart >= 60000) {
+      windowStart = now;
+      windowCount = 0;
+    }
+    windowCount += 1;
+    if (windowCount > GLOBAL_MAX_PER_MINUTE) {
+      throw Errors.tooMany('GLOBAL_RATE_LIMITED', 'Server is handling too many requests');
+    }
+  });
+
   // Custom Error Handler
   fastify.setErrorHandler((error, req, reply) => {
     const requestId = req.requestId;
@@ -92,6 +111,20 @@ export async function buildServer(): Promise<FastifyInstance> {
           message: error instanceof Error ? error.message : 'Request validation failed',
           requestId,
           details: (error as any).validation,
+        },
+      });
+    }
+
+    // Framework-level errors (rate limiting, payload too large) carry a
+    // numeric statusCode that is not an AppError; honor it so clients see
+    // real 429/413 responses instead of a misleading 500.
+    const statusCode = typeof (error as any)?.statusCode === 'number' ? (error as any).statusCode : undefined;
+    if (statusCode === 429 || statusCode === 413) {
+      return reply.status(statusCode).send({
+        error: {
+          code: statusCode === 429 ? 'RATE_LIMITED' : 'PAYLOAD_TOO_LARGE',
+          message: statusCode === 429 ? 'Too many requests' : 'Payload too large',
+          requestId,
         },
       });
     }
@@ -151,8 +184,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename
   try {
     if (config.NODE_ENV === 'production') {
       // Defense in depth: PostgreSQL superusers and BYPASSRLS roles bypass
-      // row-level security entirely, which would silently disable the
-      // tenant-isolation policies. Refuse to serve production on such a role.
+      // row-level security entirely (even FORCE ROW LEVEL SECURITY, applied
+      // by migration 013 so table owners stay subject to the tenant
+      // policies), which would silently disable tenant isolation. Refuse to
+      // serve production on such a role.
       const role = (
         await query<{ rolsuper: boolean; rolbypassrl: boolean }>(
           'SELECT rolsuper, rolbypassrl FROM pg_roles WHERE rolname = current_user'
