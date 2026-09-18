@@ -167,7 +167,7 @@ export default function MessageBubble({ message, onCopy, onRegenerate }: Message
             : { background: 'var(--accent)', color: 'var(--accent-foreground)' }
         }
       >
-        {isUser ? 'JD' : 'AI'}
+        {isUser ? 'U' : 'AI'}
       </div>
 
       {/* Content */}
@@ -178,7 +178,7 @@ export default function MessageBubble({ message, onCopy, onRegenerate }: Message
           </div>
         ) : (
           <div className="max-w-full">
-            {message.isStreaming ? (
+            {message.isStreaming && !message.content ? (
               <div className="flex items-center gap-1.5 py-2">
                 <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--accent)' }} />
                 <span className="w-1.5 h-1.5 rounded-full animate-pulse [animation-delay:0.2s]" style={{ background: 'var(--accent)' }} />
@@ -194,6 +194,7 @@ export default function MessageBubble({ message, onCopy, onRegenerate }: Message
                   )
                 )}
                 {message.citations && <CitationsBlock citations={message.citations} />}
+                {message.isStreaming && <span aria-label="Streaming" className="inline-block w-1.5 h-4 ml-1 animate-pulse" style={{ background: 'var(--accent)' }} />}
               </>
             )}
           </div>

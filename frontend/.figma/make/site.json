@@ -1,5 +1,6 @@
 {
-  "description": "Streamline project management with this web app that enhances collaboration, task tracking, and productivity for teams and individuals.",
+  "title": "Enflite Private AI",
+  "description": "Secure access to Enflite's approved internal AI models and enterprise knowledge.",
   "robots": {
     "index": false
   },

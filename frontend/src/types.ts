@@ -1,12 +1,14 @@
 export type MessageRole = 'user' | 'assistant' | 'system';
 
-export type DataClassification = 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'PROPRIETARY' | 'CUI';
+export type DataClassification = 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'PROPRIETARY' | 'CUI' | 'UNKNOWN';
 
 export interface Citation {
   id: number;
   title: string;
-  section: string;
+  section?: string;
   page?: number;
+  documentId?: string;
+  chunkId?: string;
 }
 
 export interface Message {
@@ -33,7 +35,7 @@ export interface Conversation {
 export interface Model {
   id: string;
   name: string;
-  provider: 'local' | 'external';
+  provider: string;
   description: string;
   classificationMax: DataClassification;
   contextLength: number;
@@ -46,4 +48,15 @@ export interface UploadedFile {
   size: number;
   type: string;
   status: 'uploading' | 'processing' | 'ready' | 'error';
+  file?: File;
+}
+
+export interface AuthUser {
+  userId: string;
+  email: string;
+  displayName: string;
+  roleName: string;
+  clearance: DataClassification;
+  tenantId: string;
+  permissions: string[];
 }
