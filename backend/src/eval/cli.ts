@@ -69,7 +69,7 @@ async function main(): Promise<void> {
   console.log(`Eval mode: ${provider === 'mock' ? 'MOCK (scripted, CI-safe)' : `LIVE via ${provider}`}`);
   console.log(`Corpus: ${seed ? 'seed (14 cases, smoke)' : `full (${EVAL_CORPUS.length} cases)`}`);
 
-  const chatFn = live
+  const baseChatFn = live
     ? (await import('./live.js')).gatewayChatFn(
         modelId ?? '',
         {
@@ -79,6 +79,12 @@ async function main(): Promise<void> {
         }
       )
     : mockChatFn(corpus);
+  // Routing cases are judged against the real deterministic classifier, not a
+  // scripted response and not a live model: routing is platform behavior, so
+  // the wrapper intercepts routing-category messages in every mode and
+  // delegates everything else to the underlying chatFn.
+  const { routingClassifyChatFn } = await import('./cases/routing.js');
+  const chatFn = routingClassifyChatFn(baseChatFn);
 
   if (!noStore && !modelId) {
     console.error('Missing --model <id>. (Or pass --no-store to run without persisting results.)');

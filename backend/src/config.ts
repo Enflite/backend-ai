@@ -62,6 +62,17 @@ const envSchema = z.object({
   // may execute several tool calls in parallel; the cap bounds total provider
   // round-trips and prevents runaway loops.
   AI_MAX_TOOL_ITERATIONS: z.coerce.number().int().min(0).max(10).default(5),
+  // Phase 6 capability routing: classify each unpinned turn by task and serve
+  // the admin-configured model for that capability. Default on; set to false
+  // as an operator escape hatch — the router then always resolves the 'chat'
+  // default (legacy behavior). The undefined-preserving preprocess keeps the
+  // .default(true) reachable (a plain preprocess would map unset → false).
+  ROUTING_ENABLED: z
+    .preprocess(
+      (val) => (val === undefined || val === null || val === '' ? undefined : val === true || val === 'true' || val === '1'),
+      z.boolean()
+    )
+    .default(true),
   // Tool outputs are untrusted external data; truncate each result before it
   // enters model context so one huge response cannot evict the conversation.
   AI_TOOL_OUTPUT_MAX_CHARS: z.coerce.number().int().min(256).max(100000).default(8000),

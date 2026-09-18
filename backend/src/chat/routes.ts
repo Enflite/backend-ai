@@ -7,8 +7,8 @@ import { requirePermission } from '../authz/middleware.js';
 import { CLASSIFICATIONS, Classification, AuthContext } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
 import { gatewayStream, applyContextWindow, GatewayTelemetry, ChatMessage, ProviderToolDefinition, streamMetadata } from '../ai/gateway/gateway.js';
-import { getApprovedModelForUser, listApprovedModelsForUser } from '../ai/gateway/modelRegistry.js';
-import { resolveServingModel } from '../ai/gateway/modelLifecycle.js';
+import { getApprovedModelForUser } from '../ai/gateway/modelRegistry.js';
+import { resolveChatModel, type TaskCapability } from '../ai/routing/router.js';
 import { retrieveAuthorizedContext } from '../rag/retrieval.js';
 import { recordAudit } from '../audit/audit.js';
 import { toolRegistry, runToolCall, zodToJsonSchema } from '../tools/gateway.js';
@@ -259,35 +259,63 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     if (!parsed.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid chat request body', parsed.error.format());
 
     let conversationId = parsed.data.conversationId;
-    let modelId = parsed.data.modelId;
+    // Model already pinned on the conversation (null when the conversation
+    // was created without one — the router classifies and pins below).
+    let pinnedModelId: string | null = null;
     // Clearance-aware default for newly created conversations: a PUBLIC caller
     // omitting classification gets PUBLIC, not INTERNAL (which they are not
     // cleared for). Existing conversations keep their stored classification.
     let classification = (parsed.data.classification ?? (auth.clearance === 'PUBLIC' ? 'PUBLIC' : 'INTERNAL')) as Classification;
     if (conversationId) {
       const conversation = (
-        await tenantQuery<{ model: string; classification: Classification }>(
+        await tenantQuery<{ modelId: string | null; classification: Classification }>(
           auth.tenantId,
-          `SELECT COALESCE(model_id, (SELECT id FROM models WHERE name = conversations.model))::text AS model,
+          `SELECT COALESCE(model_id::text, (SELECT id::text FROM models WHERE name = conversations.model)) AS "modelId",
                   classification FROM conversations WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
           [conversationId, auth.tenantId, auth.userId]
         )
       ).rows[0];
       if (!conversation) throw Errors.notFound('CONVERSATION_NOT_FOUND', 'Conversation not found');
-      modelId ??= conversation.model;
+      pinnedModelId = conversation.modelId;
       classification = conversation.classification;
     }
     // A caller may not self-assert a classification above their clearance, even
     // for a conversation they own (clearances can be lowered after creation).
     assertClassificationAllowed(auth.clearance, classification);
-    if (!modelId) {
-      // Admin-configured serving default first (re-verified servable and
-      // authorized on every resolution); legacy first-approved fallback.
-      modelId =
-        (await resolveServingModel(auth.tenantId, auth.userId, auth.roleId, 'chat'))?.id ??
-        (await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId))[0]?.id;
+    // Tool offer is model-independent (permissions + classification only), so
+    // it is built before model resolution: the capability router needs to
+    // know whether syteline.* tools will be offered this turn.
+    const providerTools = buildProviderTools(auth, classification);
+    const sytelineToolsOffered = providerTools.some((tool) => tool.function.name.startsWith('syteline.'));
+    // Phase 6 capability routing: no explicit modelId and no pinned model →
+    // classify the turn by task and serve the capability's model. An explicit
+    // modelId is honored untouched; a pinned model keeps the conversation's
+    // voice stable across turns. Approval/tenant/classification policy are
+    // re-verified by getApprovedModelForUser below, exactly as before.
+    const route = await resolveChatModel({
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      roleId: auth.roleId,
+      explicitModelId: parsed.data.modelId,
+      pinnedModelId,
+      content: parsed.data.content,
+      documentIds: parsed.data.documentIds,
+      sytelineToolsOffered,
+    });
+    const modelId = route.modelId;
+    const routing: { capability: TaskCapability; reasons: string[] } | undefined = route.routing;
+    if (routing) {
+      await recordAudit({
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        requestId: req.requestId,
+        action: 'MODEL_ROUTED',
+        resource: 'model',
+        resourceId: modelId,
+        success: true,
+        metadata: { capability: routing.capability, reasons: routing.reasons },
+      });
     }
-    if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
     const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
 
     if (!conversationId) {
@@ -299,6 +327,15 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           [auth.tenantId, auth.userId, parsed.data.content.slice(0, 80), model.name, modelId, classification]
         )
       ).rows[0]!.id;
+    } else if (!pinnedModelId && routing) {
+      // The conversation existed without a pinned model (legacy or created
+      // model-less): pin the routed model so later turns stay on it.
+      await tenantQuery(
+        auth.tenantId,
+        `UPDATE conversations SET model = $1, model_id = $2, updated_at = NOW()
+         WHERE id = $3 AND tenant_id = $4 AND user_id = $5`,
+        [model.name, modelId, conversationId, auth.tenantId, auth.userId]
+      );
     }
 
     const history = (
@@ -347,7 +384,6 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     // only — never secrets). The gateway pins it at index 0 of every
     // provider call and re-adds it after each truncation round, so it is
     // never dropped no matter how long the history grows.
-    const providerTools = buildProviderTools(auth, classification);
     const chatSystemPrompt = buildSystemPrompt({
       modelName: model.name,
       modelVersion: model.version,
@@ -451,7 +487,16 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
         abortController.abort();
       }
     }, HEARTBEAT_INTERVAL_MS);
-    if (!(await send('meta', { conversationId, model: { id: model.id, name: model.name }, citations, contextDropped: windowed.dropped }))) {
+    if (!(await send('meta', {
+      conversationId,
+      model: { id: model.id, name: model.name },
+      citations,
+      contextDropped: windowed.dropped,
+      // Present only when capability routing classified this turn: which
+      // capability served it and why. Lets clients show (or hide) the
+      // routing decision without ever exposing model plumbing.
+      ...(routing ? { routing } : {}),
+    }))) {
       // Nobody is listening; skip straight to persistence/cleanup.
       abortController.abort();
     }

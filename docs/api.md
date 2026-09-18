@@ -49,7 +49,11 @@ The response is `text/event-stream`, parsed client-side with `fetch()` +
 manual SSE frame parsing (see ADR-003 — this is **not** `EventSource`).
 Events:
 
-- `meta` — `{ conversationId, model: { id, name }, citations, contextDropped }`
+- `meta` — `{ conversationId, model: { id, name }, citations, contextDropped, routing? }`.
+  `routing` is present only when Phase 6 capability routing classified the turn:
+  `{ capability: 'chat' | 'syteline' | 'coding' | 'rag', reasons: string[] }`.
+  An explicit client `modelId` or a pinned conversation model skips routing (no
+  `routing` field, no `MODEL_ROUTED` audit).
 - `delta` — `{ content }` (token chunks)
 - `notice` — `{ code, message, … }` (e.g. `MODEL_FAILOVER`, `TOOL_CALLS`)
 - `done` — final message record

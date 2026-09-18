@@ -177,6 +177,51 @@ Quoted from the roadmap's own status section; these are the next feature phases.
 
 ---
 
+## P2 — Phase 6: advanced AI (capability routing)
+
+The user talks to the assistant; the platform picks the model by task. No
+model plumbing in the UX. Security decisions stay outside the model
+(ADR-004): routing only selects among models the caller is already approved
+to use.
+
+- [x] **[P2-6a] Deterministic capability router (backend)**
+  New `backend/src/ai/routing/`: rule-based `classifyTask` (precedence:
+  explicit `documentIds` → code signals → SyteLine investigation language
+  gated on the `syteline.*` tool offer → `chat` default; total, zero-latency,
+  explainable reason codes) and `resolveChatModel` (explicit `modelId`
+  honored untouched; pinned conversation model kept; otherwise capability
+  serving default → `chat` default → first approved model; ungranted
+  capability defaults fall through; `ROUTING_ENABLED=false` escape hatch
+  restores legacy behavior). `POST /chat` integration: `MODEL_ROUTED`
+  audit, `meta.routing` in SSE, routed-model pinning for model-less
+  conversations. `rag` added to known capabilities. Eval: 12-case `routing`
+  corpus category executed against the real classifier by `npm run eval`
+  (`routingClassifyChatFn`); unit + route integration tests in
+  `backend/test/routing.test.ts`. Docs: `docs/capability-routing.md`,
+  `docs/api.md` meta field, `ROUTING_ENABLED` in `.env.example`.
+  *Acceptance:* backend typecheck clean; full suite green (622 tests);
+  eval 138/138 deterministic pass; 12/12 routing cases pass against the
+  live classifier.
+- [ ] **[P2-6b] Invisible model plumbing (frontend)**
+  Remove the model picker from the UX: stop sending `modelId` (backend
+  routes), show the assistant identity instead of the model name, surface
+  the routed capability subtly from `meta.routing` (or hide it — invisible
+  infrastructure). Keep the `/models` fetch only to detect "no approved
+  model available".
+  *Acceptance:* frontend typecheck + build green; new-conversation flow
+  creates via `/chat` so the first message is classified; no `modelId`
+  sent by the UI.
+- [ ] **[P2-6c] Routing quality loop**
+  Track routing decisions per capability (audit-backed), review
+  mis-routed turns from the eval corpus, and extend the classifier's
+  patterns only with eval cases proving the change. Consider per-turn
+  re-classification signals (explicit user correction) as a follow-up —
+  deliberately out of 6a/6b scope to keep conversation voice stable.
+  *Acceptance:* routing decision counts queryable from audits; any
+  classifier change ships with new corpus cases.
+
+---
+
 ## P3 — Future / out of current scope
 
 - [ ] **[P3-a] Fine-tuning support** — dataset curation from tenant corpora,

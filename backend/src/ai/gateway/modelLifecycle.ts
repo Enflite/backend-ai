@@ -179,7 +179,7 @@ export async function transitionModel(input: TransitionModelInput): Promise<Tran
  * capabilities don't need a migration; these are the slots the platform
  * resolves today.
  */
-export const KNOWN_CAPABILITIES = ['chat', 'syteline', 'coding', 'embeddings'] as const;
+export const KNOWN_CAPABILITIES = ['chat', 'syteline', 'coding', 'rag', 'embeddings'] as const;
 
 export interface ServingDefault {
   tenantId: string;
