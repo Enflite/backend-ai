@@ -1,0 +1,430 @@
+%% =====================================================================
+%% architecture.mmd — End-to-end architecture of the private AI platform
+%% Repo: Enflite/backend-ai. Baseline: main after PR #4.
+%% Multiple diagrams in one file, separated by %% section headers.
+%%
+%% LIFECYCLE CONVENTION (applies to every diagram):
+%%   [CURRENT] — implemented and in use on main.
+%%   [PARTIAL] — implemented but incomplete, behind config, or scale-limited.
+%%   [FUTURE]  — planned; does NOT exist yet. No code path depends on it.
+%%   Nodes without an explicit tag are [CURRENT].
+%%
+%% Conventions: node labels cite the real source file implementing them.
+%% =====================================================================
+
+%% ---------------------------------------------------------------------
+%% (a) SYSTEM CONTEXT
+%% Who talks to what. The Fastify API is the only component that touches
+%% PII-bearing stores; every external integration is a replaceable boundary.
+%% ---------------------------------------------------------------------
+flowchart TB
+    User(["End user<br/>(browser)"])
+    Admin(["Tenant admin<br/>(browser)"])
+
+    subgraph Client["Client"]
+        SPA["[CURRENT] React SPA<br/>frontend/src<br/>chat, documents, model selector"]
+    end
+
+    subgraph API["Backend — Fastify (backend/src/server.ts)"]
+        MW["Middleware pipeline<br/>(see diagram b)"]
+        Auth["Auth + sessions<br/>backend/src/auth/"]
+        AuthZ["RBAC + classification<br/>backend/src/authz/"]
+        Chat["Chat SSE + agentic loop<br/>backend/src/chat/routes.ts"]
+        GW["AI gateway<br/>backend/src/ai/gateway/"]
+        RAG["RAG retrieval<br/>backend/src/rag/retrieval.ts"]
+        Docs["Documents API + ingestion<br/>backend/src/documents/"]
+        Tools["Tool gateway<br/>backend/src/tools/"]
+        Audit["Audit<br/>backend/src/audit/audit.ts"]
+    end
+
+    subgraph Data["Data plane"]
+        PG[("[CURRENT] PostgreSQL 16 + pgvector<br/>14 migrations<br/>backend/src/db/migrations/")]
+        S3[("[CURRENT] S3-compatible storage<br/>MinIO (dev)<br/>backend/src/storage/storage.ts")]
+    end
+
+    subgraph AIInfra["AI infrastructure (external boundaries)"]
+        vLLM["[CURRENT] vLLM OpenAI-compatible<br/>/chat/completions<br/>backend/src/ai/gateway/vllmProvider.ts"]
+        Embed["[CURRENT] Embedding provider<br/>backend/src/documents/ingestion.ts<br/>internalEmbeddingProvider"]
+        Rerank["[CURRENT] Reranker hook<br/>injected via setReranker()<br/>default: passthrough (no external service)"]
+    end
+
+    subgraph Ext["External integrations (boundaries)"]
+        Scan["[PARTIAL] Malware scanner boundary<br/>MALWARE_SCAN_MODE=http | disabled-development<br/>backend/src/documents/malware.ts"]
+        Syte["[CURRENT] SyteLine ERP (read-only)<br/>HttpSyteLineAdapter :: getItem<br/>backend/src/tools/gateway.ts"]
+        IdP["[FUTURE] External IdP<br/>backend/src/auth/identityProvider.ts<br/>(P2-e)"]
+    end
+
+    subgraph Planned["[FUTURE] Planned capabilities (see TODO.md)"]
+        direction TB
+        FW["Dedicated ingestion worker (P2-a)"]
+        FOTel["OpenTelemetry exporter (P2-b)"]
+        FDLP["DLP (P2-f)"]
+        FTools["Destructive-tool approval (P3-b)"]
+        FFT["Fine-tuning (P3-a)"]
+        FMR["Multi-region (P3-c)"]
+    end
+
+    User --> SPA
+    Admin --> SPA
+    SPA -->|"HTTPS /api/v1<br/>JWT session cookie"| MW
+    MW --> Auth
+    MW --> AuthZ
+    AuthZ --> Chat
+    AuthZ --> Docs
+    AuthZ --> Tools
+    Chat --> GW
+    Chat --> RAG
+    GW -->|"model allowlist only<br/>endpoint origin allowlist"| vLLM
+    GW -->|"failover events"| Chat
+    RAG --> PG
+    RAG -.->|"optional, untrusted output"| Rerank
+    Docs --> S3
+    Docs --> PG
+    Docs -->|"ingestion queue"| Embed
+    Embed --> PG
+    Docs --> Scan
+    Tools --> Syte
+    Auth -.-> IdP
+    Chat --> Audit
+    Docs --> Audit
+    Tools --> Audit
+    Auth --> Audit
+    Auth --> PG
+
+%% ---------------------------------------------------------------------
+%% (b) HTTP MIDDLEWARE PIPELINE — backend/src/server.ts :: buildServer()
+%% Order matters. Every request flows left to right before reaching a route.
+%% ---------------------------------------------------------------------
+flowchart LR
+    Req(["Incoming request"]) --> RID["1. requestId hook<br/>backend/src/requestId.ts<br/>x-request-id / x-trace-id"]
+    RID --> Helmet["2. @fastify/helmet<br/>security headers"]
+    Helmet --> Cookie["3. @fastify/cookie<br/>session cookie parsing"]
+    Cookie --> CORS["4. @fastify/cors<br/>explicit origin list<br/>CORS_ORIGIN, credentials"]
+    CORS --> MP["5. @fastify/multipart<br/>1 file, ≤ MAX_UPLOAD_BYTES"]
+    MP --> RL["6. @fastify/rate-limit<br/>300/min, keyed by<br/>sha256(session token) or IP"]
+    RL --> GC["7. Global ceiling hook<br/>3000 req/min per instance<br/>[CURRENT] in-memory;<br/>[FUTURE] shared limiter<br/>for multi-instance"]
+    GC --> Router["8. Router — /api/v1<br/>health, auth, audit, models,<br/>conversations, chat,<br/>documents, tools"]
+    Router --> Handler["Route handler<br/>preHandler: requireAuth<br/>+ requirePermission(...)"]
+    Handler --> ErrH["9. serverErrorHandler<br/>AppError → its status<br/>validation → 400<br/>429 / 413 honored<br/>else generic 500<br/>never leaks internals"]
+    ErrH --> Resp(["Response"])
+    Router -.->|"onResponse hook"| Log["Structured access log<br/>requestId, traceId,<br/>tenantId, userId,<br/>route, status, latencyMs"]
+
+%% ---------------------------------------------------------------------
+%% (c) AUTH / SESSION FLOW
+%% Sessions are server-side; the JWT is short-lived (15m). Refresh tokens are
+%% opaque, stored hashed, and rotated with reuse detection.
+%% ---------------------------------------------------------------------
+sequenceDiagram
+    autonumber
+    participant C as React SPA
+    participant R as POST /api/v1/auth/login<br/>backend/src/auth/routes.ts
+    participant A as auth/* (password.ts<br/>argon2 verify)
+    participant S as sessions table<br/>003_enterprise_platform.sql
+    participant F as POST /api/v1/auth/refresh<br/>rotateRefreshToken()
+
+    C->>R: email + password
+    R->>A: verify credentials
+    A-->>R: ok (constant-time)
+    R->>S: INSERT session<br/>(refresh_token_hash, expires_at,<br/>ip, user_agent)
+    R-->>C: 15m access JWT (httpOnly cookie)<br/>+ opaque refresh token
+    Note over C,F: Later — access token expired
+    C->>F: refresh token
+    F->>S: lookup by hash
+    alt hash in previous_refresh_token_hashes (GIN @>)
+        F->>S: REUSE DETECTED — revoke all<br/>sessions for user
+        F-->>C: 401 (typed InvalidRefreshSessionError)
+    else valid current hash
+        F->>S: rotate: new hash current,<br/>old hash → previous_refresh_token_hashes
+        F-->>C: new JWT + new refresh token
+    end
+    Note over C,F: AbortError / signing errors are never<br/>misclassified as reuse (no mass revoke).
+
+%% ---------------------------------------------------------------------
+%% (d) CHAT SSE FLOW + AGENTIC TOOL LOOP — backend/src/chat/routes.ts
+%% The model's output, retrieved chunks, and tool results are all UNTRUSTED
+%% and are delimited/escaped before entering the next prompt or the client.
+%% ---------------------------------------------------------------------
+sequenceDiagram
+    autonumber
+    participant C as React SPA (fetch streaming)
+    participant H as POST /api/v1/chat<br/>chat/routes.ts
+    participant Z as authz (requireAuth<br/>+ chat:create + clearance)
+    participant W as applyContextWindow<br/>gateway.ts
+    participant R as retrieveAuthorizedContext()<br/>rag/retrieval.ts
+    participant G as gatewayStream()<br/>ai/gateway/gateway.ts
+    participant MR as modelRegistry<br/>getApprovedModelForUser
+    participant V as vllmProvider<br/>OpenAI-compatible /chat/completions
+    participant T as runToolCall()<br/>tools/gateway.ts
+    participant DB as PostgreSQL
+    participant AU as recordAudit()
+
+    C->>H: { conversationId?, content ≤32k,<br/>modelId?, classification?, documentIds? }
+    Note over C,H: fetch() POST, accept: text/event-stream.<br/>Client reads the streaming response body<br/>and parses SSE frames manually<br/>(frontend/src/api.ts :: streamChat).<br/>Not native EventSource (GET-only).<br/>401 → refresh → single retry.
+    H->>Z: authenticate → authorize →<br/>assertClassificationAllowed
+    H->>DB: load conversation, verify ownership<br/>+ tenant scope
+    H->>DB: load history
+    H->>W: truncate oldest turns to model.context_window<br/>(dropped count surfaced, never silent)
+    H->>R: tenant-isolated hybrid retrieval<br/>(see diagram f) → citations
+    H->>H: build system prompt;<br/>user input + RAG chunks delimited<br/>as untrusted (escapeUntrusted)
+    H->>G: gatewayStream(messages, modelId)
+    G->>MR: resolve approved model for user<br/>(id, endpoint, context_window,<br/>allowed_classifications)
+    G->>G: check endpoint origin ∈<br/>AI_PROVIDER_ALLOWED_ORIGINS
+    G->>G: canModelProcess(classification)
+    G->>V: stream POST /chat/completions
+    alt provider fails (not caller-cancelled)
+        G->>V: failover to configured fallback model
+        G-->>C: SSE notice MODEL_FAILOVER
+    end
+    G-->>C: SSE meta { conversationId, model,<br/>citations, contextDropped }
+    loop agentic loop (≤ AI_MAX_TOOL_ITERATIONS)
+        V-->>C: SSE delta { content } chunks
+        V-->>H: tool_calls proposed
+        H->>T: runToolCall(name, args)
+        T->>T: registry lookup → zod schema<br/>validate → assert caller clearance<br/>→ Promise.race timeout
+        T->>DB: INSERT tool_executions<br/>(audited)
+        T-->>AU: TOOL_EXECUTED (sanitized reason;<br/>generic client-safe message)
+        T-->>H: result (delimited as untrusted,<br/>size-capped)
+        H->>V: continue with tool result
+    end
+    V-->>C: SSE done { telemetry:<br/>tokens, latency, iterations }
+    alt stream errored mid-way
+        H->>H: markStreamInterrupted() →<br/>STREAM_INTERRUPTED_MARKER<br/>(P0-a: move to messages.metadata)
+        H-->>C: SSE error { code, requestId }
+    end
+    H->>DB: persist user + assistant messages,<br/>citations, token counts
+    H->>AU: CHAT_COMPLETED with<br/>GatewayTelemetry
+    Note over C,H: Heartbeat ': ping' every 15s.<br/>Hijacked response tracked so<br/>shutdown can end it (P0-b: backpressure).
+
+%% ---------------------------------------------------------------------
+%% (e) DOCUMENT INGESTION PIPELINE — backend/src/documents/
+%% Upload is synchronous through validation + enqueue; everything after the
+%% queue is asynchronous. Job states: PENDING → PROCESSING →
+%% SUCCEEDED | FAILED. Document status adds QUARANTINED.
+%% Architectural boundary: the API owns request/authorization/enqueue;
+%% long-running processing belongs in workers. The document_ingestion_jobs
+%% table is the contract between them.
+%% ---------------------------------------------------------------------
+flowchart TB
+    subgraph API["[CURRENT] Fastify API — owns upload, authz, enqueue"]
+        direction TB
+        UP(["POST /api/v1/documents<br/>multipart, 1 file"]) --> FV["fileValidation.ts<br/>allowlisted MIME ↔ extension,<br/>magic bytes, size ≤ MAX_UPLOAD_BYTES<br/>(client pre-checks 25 MB)"]
+        FV -->|"invalid"| R400(["400, nothing stored"])
+        FV -->|"valid"| CS["checksum sha256"]
+        CS -->|"duplicate checksum"| R409(["409 CONFLICT"])
+        CS --> CL["resolveUploadClassification()<br/>uploadClassification.ts<br/>requested label ∩ caller clearance"]
+        CL --> INS["INSERT documents<br/>status='PENDING'<br/>documents/routes.ts"]
+        INS --> PUT["S3 putObject<br/>storage.ts (MinIO dev)"]
+        PUT --> SCAN["malware.ts<br/>MALWARE_SCAN_MODE=<br/>disabled-development | http"]
+        SCAN -->|"threat"| QUAR["status='QUARANTINED'<br/>audit DOCUMENT_QUARANTINED"]
+        SCAN -->|"clean"| ENQ["enqueueIngestion()<br/>INSERT document_ingestion_jobs<br/>status='PENDING'"]
+    end
+
+    JOBS[("document_ingestion_jobs<br/>[CURRENT] the contract:<br/>API enqueues → worker claims")]
+
+    subgraph WORKER["[PARTIAL] in-process worker today (queue.ts)<br/>[FUTURE] dedicated worker replicas (P2-a)"]
+        direction TB
+        Q["claim: UPDATE … WHERE<br/>status='PENDING' → PROCESSING<br/>MAX_CONCURRENT_JOBS=2"] --> EXT["extraction.ts<br/>pdf / xlsx / docx / txt<br/>real local extractors<br/>page + sheet/row metadata"]
+        EXT --> CH["chunking<br/>overlapping windows"]
+        CH --> EMB["embeddings<br/>internalEmbeddingProvider<br/>provenance recorded"]
+        EMB --> VEC[("INSERT document_chunks<br/>embedding vector(pgvector)<br/>tenant_id, document_id,<br/>classification")]
+        VEC --> OK["jobs → SUCCEEDED<br/>documents → READY<br/>audit DOCUMENT_INGESTION_COMPLETED"]
+        Q -->|"exception"| FAIL["jobs → FAILED<br/>(error_code, attempts)<br/>audit DOCUMENT_INGESTION_FAILED"]
+    end
+
+    RETRY["POST /documents/:id/retry<br/>owner-only, FAILED/QUARANTINED"]
+
+    ENQ --> JOBS --> Q
+    FAIL --> RETRY
+    RETRY --> ENQ
+    QUAR --> RETRY
+
+%% ---------------------------------------------------------------------
+%% (f) RAG RETRIEVAL PIPELINE — backend/src/rag/retrieval.ts
+%% Authorization runs BEFORE scoring/threshold: the model can never see a
+%% chunk the caller may not read. The reranker is untrusted by construction.
+%% ---------------------------------------------------------------------
+flowchart LR
+    Q(["User query<br/>(≤8000 chars,<br/>DocumentsPanel search)"]) --> EMB["embed(query)<br/>same provider as<br/>ingestion (provenance)"]
+    EMB --> VS[("pgvector HNSW<br/>filtered cosine search<br/>WHERE tenant_id = $1<br/>AND classification ≤ clearance<br/>AND (owner OR grant)<br/>ef_search=200")]
+    VS --> CAND["authorized candidates<br/>{ chunkId, text, score }"]
+    CAND --> HYB["hybrid score<br/>85% vector cosine<br/>+ 15% lexical overlap<br/>(terms ≥3 chars)"]
+    HYB --> THR["similarity threshold<br/>ragThreshold tests"]
+    THR --> RR{"reranker hook<br/>setReranker()"}
+    RR -->|"default passthrough"| TOP["top-k"]
+    RR -->|"external reranker"| VAL["validate: reorder only,<br/>scores clamped;<br/>rebuild every result from<br/>canonical candidate map<br/>by chunkId — reranker text/<br/>doc/citation fields discarded"]
+    VAL --> TOP
+    TOP --> CIT["citations[]<br/>{ documentId, documentName,<br/>chunkId, page?, section? }<br/>every citation grounded<br/>in the retrieved set"]
+    CIT --> CTX["context string<br/>chunks escaped<br/>(escapeUntrusted)"]
+    CTX --> PROMPT(["injected into chat<br/>system prompt as<br/>delimited untrusted<br/>context (diagram d)"])
+    THR -->|"no candidates"| EMPTY(["no-context path:<br/>model answers without<br/>doc grounding — must not<br/>hallucinate citations"])
+
+%% ---------------------------------------------------------------------
+%% (g) DATA MODEL — key tables (backend/src/db/migrations/001–014)
+%% Key tables only — not a complete database ERD.
+%% Tenant isolation: every tenant-owned row carries tenant_id; RLS policies
+%% enforced (013_force_rls). Classification labels gate reads.
+%% ---------------------------------------------------------------------
+erDiagram
+    organizations ||--o{ tenants : has
+    tenants ||--o{ users : has
+    tenants ||--o{ memberships : has
+    users ||--o{ memberships : has
+    roles ||--o{ memberships : "via role_id"
+    roles ||--o{ role_permissions : has
+    permissions ||--o{ role_permissions : has
+    tenants ||--o{ departments : has
+    tenants ||--o{ security_groups : has
+    users ||--o{ department_memberships : has
+    users ||--o{ security_group_memberships : has
+    tenants ||--o{ sessions : has
+    users ||--o{ sessions : owns
+    tenants ||--o{ conversations : has
+    users ||--o{ conversations : owns
+    conversations ||--o{ messages : contains
+    tenants ||--o{ models : "registry"
+    tenants ||--o{ model_access : "per-user/role grants"
+    users ||--o{ model_access : granted
+    tenants ||--o{ documents : has
+    users ||--o{ documents : owns
+    documents ||--o{ document_permissions : grants
+    documents ||--o{ document_chunks : "embedded"
+    documents ||--o{ document_ingestion_jobs : processed_by
+    tenants ||--o{ tool_executions : has
+    users ||--o{ tool_executions : invoked
+    tenants ||--o{ audit_events : scoped
+
+    tenants {
+        uuid id PK
+        uuid organization_id FK
+        text name
+    }
+    users {
+        uuid id PK
+        uuid tenant_id FK
+        text email
+        text password_hash
+        text clearance
+    }
+    sessions {
+        uuid id PK
+        uuid tenant_id FK
+        uuid user_id FK
+        text refresh_token_hash
+        text previous_refresh_token_hashes "text array"
+        timestamptz expires_at
+    }
+    conversations {
+        uuid id PK
+        uuid tenant_id FK
+        uuid user_id FK
+        text classification
+    }
+    messages {
+        uuid id PK
+        uuid conversation_id FK
+        uuid tenant_id FK
+        text role
+        text content
+        text model
+        integer prompt_tokens
+        integer completion_tokens
+    }
+    models {
+        uuid id PK
+        text name
+        text endpoint
+        text model_identifier
+        integer context_window
+        text status
+    }
+    documents {
+        uuid id PK
+        uuid tenant_id FK
+        uuid owner_id FK
+        text filename
+        text mime_type
+        text checksum_sha256
+        text object_key
+        text classification
+        text status
+    }
+    document_chunks {
+        uuid id PK
+        uuid tenant_id FK
+        uuid document_id FK
+        text content
+        vector embedding
+        text classification
+        integer page
+    }
+    document_ingestion_jobs {
+        uuid id PK
+        uuid tenant_id FK
+        uuid document_id FK
+        text status
+        integer attempts
+        text error_code
+    }
+    audit_events {
+        uuid id PK
+        uuid tenant_id FK
+        uuid user_id FK
+        text action
+        text resource
+        boolean success
+        jsonb metadata
+    }
+
+%% ---------------------------------------------------------------------
+%% (h) DEPLOYMENT TOPOLOGY — docker-compose.yml (development)
+%% Production deltas are documented inline and in docs/deployment.md.
+%% ---------------------------------------------------------------------
+flowchart TB
+    subgraph Host["Docker Compose (dev)"]
+        PG[("[CURRENT] postgres<br/>pgvector/pgvector:0.8.4-pg16<br/>127.0.0.1:5432<br/>volume pgdata<br/>healthcheck pg_isready")]
+        BE["[CURRENT] backend (build ./backend, target dev)<br/>:8080<br/>depends_on postgres (healthy)<br/>+ minio-init (completed)<br/>npm ci → migrate → dev"]
+        MINIO[("[CURRENT] minio<br/>quay.io/minio/minio:RELEASE.2025-09-07<br/>127.0.0.1:9000 / :9001<br/>volume objectdata")]
+        INIT["[CURRENT] minio-init (mc)<br/>creates bucket<br/>${OBJECT_STORAGE_BUCKET:-enflite-ai-documents}"]
+        VLLM["[CURRENT] vllm (profile: gpu)<br/>vllm/vllm-openai:v0.15.1<br/>:8000<br/>--model ${VLLM_MODEL:-<br/>meta-llama/Meta-Llama-3.1-8B-Instruct}"]
+    end
+    FE(["[CURRENT] React frontend<br/>VITE_API_URL → :8080<br/>built by Vite separately"])
+
+    BE -->|"DATABASE_URL"| PG
+    BE -->|"S3 API"| MINIO
+    INIT --> MINIO
+    BE -->|"AI provider endpoint<br/>(model registry)"| VLLM
+    FE -->|"HTTPS :8080/api/v1"| BE
+
+    PROD["[FUTURE] Production deltas (docs/deployment.md):<br/>• NODE_ENV=production, COOKIE_SECURE=true<br/>• JWT_SECRET ≥32 chars from secret manager (never committed)<br/>• MALWARE_SCAN_MODE=http + MALWARE_SCANNER_ENDPOINT<br/>• explicit CORS_ORIGIN<br/>• migrations via npm run migrate (014 .sql files copied to dist)<br/>• [FUTURE] shared rate limiter in front of multi-instance backend<br/>• [FUTURE] P2-a: dedicated ingestion worker replicas<br/>• P1-a: verify pgvector ≥0.7.0 + ALTER EXTENSION vector UPDATE"]
+    PROD -.-> Host
+
+%% ---------------------------------------------------------------------
+%% (i) EGRESS CONTROL PLANE
+%% Core security property: the platform has NO arbitrary internet access.
+%% Every outbound call from AI/tool code paths targets an allowlisted
+%% origin; anything else is denied and must never be reachable.
+%% See TODO.md [P2-i].
+%% ---------------------------------------------------------------------
+flowchart TB
+    GW2["[CURRENT] AI gateway<br/>backend/src/ai/gateway/"]
+
+    subgraph Allowed["[CURRENT] Allowed egress — allowlist only"]
+        direction TB
+        M["Approved model endpoints<br/>endpoint origin ∈ AI_PROVIDER_ALLOWED_ORIGINS<br/>gateway.ts origin check before every call"]
+        E["Approved embedding endpoints<br/>backend/src/documents/ingestion.ts"]
+        T["Approved tool adapters<br/>tool registry + zod schema validation<br/>per-tool timeouts + output caps<br/>backend/src/tools/gateway.ts"]
+        S["Approved malware scanner<br/>MALWARE_SCANNER_ENDPOINT<br/>backend/src/documents/malware.ts"]
+    end
+
+    NET(["Arbitrary internet<br/>✕ DENIED"])
+
+    GW2 --> M
+    GW2 --> E
+    GW2 --> T
+    GW2 --> S
+    M -.->|"✕"| NET
+    E -.->|"✕"| NET
+    T -.->|"✕"| NET
+    S -.->|"✕"| NET
+
+    FP2i["[FUTURE] P2-i: explicit egress policy tests<br/>deny-by-default — prove no AI/tool code path<br/>can reach an unlisted origin; violations<br/>audited and blocked"]
