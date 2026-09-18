@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Errors } from '../src/errors.js';
 
-const { tenantQuery, withTx } = vi.hoisted(() => ({
+const { tenantQuery, withTenantTx } = vi.hoisted(() => ({
   tenantQuery: vi.fn(),
-  withTx: vi.fn(async (fn: (client: any) => Promise<unknown>) => fn({ query: tenantQuery })),
+  withTenantTx: vi.fn(async (_tenantId: string, fn: (client: any) => Promise<unknown>) => fn({ query: tenantQuery })),
 }));
 const { recordAudit, recordAuditInTx } = vi.hoisted(() => ({
   recordAudit: vi.fn(),
@@ -13,7 +14,7 @@ const { listApprovedModelsForUser } = vi.hoisted(() => ({
   listApprovedModelsForUser: vi.fn(),
 }));
 
-vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTx }));
+vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenantTx }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit, recordAuditInTx }));
 vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({
   resolveServingModel,
@@ -113,9 +114,10 @@ describe('resolveCapabilityModel', () => {
 
   it('falls back to chat when the capability default is stale, audited once, before streaming', async () => {
     mockDefaultPolicy();
-    // SyteLine default throws (e.g. model deprecated); chat default is fine.
+    // SyteLine default went stale (model deprecated / grant revoked): the
+    // registry throws MODEL_NOT_APPROVED and the router falls back to chat.
     resolveServingModel.mockImplementation(async (_t: string, _u: string, _r: string, cap: string) => {
-      if (cap === 'syteline') throw new Error('model sy-1 is deprecated');
+      if (cap === 'syteline') throw Errors.forbidden('MODEL_NOT_APPROVED', 'Model is not approved for this user and tenant');
       return chatModel;
     });
     const res = await resolveCapabilityModel({
@@ -125,7 +127,7 @@ describe('resolveCapabilityModel', () => {
       requested: 'syteline',
       resolved: 'chat',
       fallbackUsed: true,
-      fallbackReason: 'model sy-1 is deprecated',
+      fallbackReason: 'Model is not approved for this user and tenant',
     });
     expect(res.model.id).toBe('chat-1');
     // Exactly one fallback audit, before streaming begins.
@@ -136,6 +138,18 @@ describe('resolveCapabilityModel', () => {
       resourceId: 'chat-1',
       metadata: { capability: 'syteline', fallbackModelId: 'chat-1' },
     });
+  });
+
+  it('propagates unexpected resolution errors instead of falling back', async () => {
+    mockDefaultPolicy();
+    // A database outage (or any non-MODEL_NOT_APPROVED throw) must surface,
+    // not masquerade as a healthy chat fallback.
+    resolveServingModel.mockRejectedValueOnce(new Error('connection refused'));
+    await expect(
+      resolveCapabilityModel({ tenantId: 't1', userId: 'u1', roleId: 'r1', capability: 'syteline', requestId: 'req-10' })
+    ).rejects.toThrow('connection refused');
+    const fallbacks = recordAudit.mock.calls.map((c) => c[0]).filter((e) => e.action === 'MODEL_CAPABILITY_FALLBACK');
+    expect(fallbacks).toHaveLength(0);
   });
 
   it('fails closed when the tenant disabled fallback', async () => {

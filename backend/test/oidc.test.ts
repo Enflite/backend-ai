@@ -95,6 +95,15 @@ describe('oidc discovery', () => {
     await expect(oidc.discoverIssuer()).rejects.toMatchObject({ code: 'OIDC_ISSUER_MISMATCH' });
   });
 
+  it('rejects a discovery document with a plain-HTTP endpoint', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...DISCOVERY, token_endpoint: 'http://idp.example.com/token' }),
+    });
+    await expect(oidc.discoverIssuer()).rejects.toMatchObject({ code: 'OIDC_INSECURE_ENDPOINT' });
+  });
+
   it('appends the well-known path to an issuer with a path (realm-style issuers)', async () => {
     const { config } = await import('../src/config.js');
     const originalIssuer = config.OIDC_ISSUER;
@@ -246,6 +255,60 @@ describe('oidc ID token verification', () => {
       .sign(privateKey);
     await expect(oidc.verifyIdToken(idToken)).rejects.toMatchObject({ code: 'OIDC_INVALID_ID_TOKEN' });
   });
+
+  it('refreshes the JWKS cache exactly once on key rotation and retries verification', async () => {
+    // The IdP rotated its signing key: the first JWKS fetch returns the
+    // stale (cached) key set, so verification fails with
+    // ERR_JWKS_NO_MATCHING_KEY; the refresh returns the rotated set.
+    const { publicKey: newPublic, privateKey: newPrivate } = await generateKeyPair('RS256');
+    const rotatedJwks = { keys: [{ ...(await exportJWK(newPublic)), kid: 'rotated', alg: 'RS256', use: 'sig' }] };
+    let jwksFetches = 0;
+    fetchMock.mockImplementation(async (url: unknown) => {
+      const target = String(url);
+      if (target.includes('/.well-known/openid-configuration')) {
+        return { ok: true, status: 200, json: async () => DISCOVERY };
+      }
+      if (target.includes('/.well-known/jwks.json')) {
+        jwksFetches += 1;
+        return { ok: true, status: 200, json: async () => (jwksFetches === 1 ? jwksJson : rotatedJwks) };
+      }
+      throw new Error(`unexpected fetch: ${target}`);
+    });
+    const idToken = await new SignJWT({ sub: 'user-123', nonce: 'nonce-1' })
+      .setProtectedHeader({ alg: 'RS256', kid: 'rotated' })
+      .setIssuer('https://idp.example.com')
+      .setAudience('enflite-client')
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .sign(newPrivate);
+    const claims = await oidc.verifyIdToken(idToken, 'nonce-1');
+    expect(claims.sub).toBe('user-123');
+    expect(jwksFetches).toBe(2); // initial fetch + exactly one refresh
+  });
+
+  it('fails closed without a refresh loop when the refreshed JWKS still has no matching key', async () => {
+    const { privateKey } = await generateKeyPair('RS256'); // never published in the JWKS
+    let jwksFetches = 0;
+    fetchMock.mockImplementation(async (url: unknown) => {
+      const target = String(url);
+      if (target.includes('/.well-known/openid-configuration')) {
+        return { ok: true, status: 200, json: async () => DISCOVERY };
+      }
+      if (target.includes('/.well-known/jwks.json')) {
+        jwksFetches += 1;
+        return { ok: true, status: 200, json: async () => jwksJson };
+      }
+      throw new Error(`unexpected fetch: ${target}`);
+    });
+    const idToken = await new SignJWT({ sub: 'x' })
+      .setProtectedHeader({ alg: 'RS256', kid: 'unknown' })
+      .setIssuer('https://idp.example.com')
+      .setAudience('enflite-client')
+      .setExpirationTime('5m')
+      .sign(privateKey);
+    await expect(oidc.verifyIdToken(idToken)).rejects.toMatchObject({ code: 'OIDC_INVALID_ID_TOKEN' });
+    expect(jwksFetches).toBe(2); // initial fetch + one refresh; no retry loop
+  });
 });
 
 describe('oidc userinfo fallback', () => {
@@ -295,6 +358,17 @@ describe('oidc userinfo fallback', () => {
 describe('oidc role mapping', () => {
   it('parses the group→role mapping from config', () => {
     expect(oidc.parseRoleMapping()).toEqual({ 'sso-admins': 'Admin', 'sso-ghosts': 'Ghost Role' });
+  });
+
+  it('rejects an array mapping defensively (boot already refuses it)', async () => {
+    const { config } = await import('../src/config.js');
+    const original = config.OIDC_ROLE_MAPPING;
+    (config as Record<string, unknown>).OIDC_ROLE_MAPPING = '["sso-admins"]';
+    try {
+      expect(oidc.parseRoleMapping()).toEqual({});
+    } finally {
+      (config as Record<string, unknown>).OIDC_ROLE_MAPPING = original;
+    }
   });
 
   it('resolves a mapped group to a real internal role', async () => {

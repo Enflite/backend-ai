@@ -557,7 +557,8 @@ function printSummary(s) {
   console.log(`  p95 latency:     ${f(s.p95LatencyMs)}`);
   console.log(`  max latency:     ${f(s.maxLatencyMs)}`);
   console.log(`  outcomes:        ${JSON.stringify(s.byOutcome)}`);
-  console.log(`  5xx errors:      ${s.errors5xx} (${(s.errorRate * 100).toFixed(2)}% failure rate)`);
+  console.log(`  5xx errors:      ${s.errors5xx}`);
+  console.log(`  failed requests: ${s.failed} (${(s.errorRate * 100).toFixed(2)}% failure rate)`);
   console.log(`  429 graceful:    ${s.rateLimited} (${(s.rate429 * 100).toFixed(2)}%)`);
 }
 

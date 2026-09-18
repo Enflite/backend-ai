@@ -38,7 +38,7 @@ flowchart TB
     end
 
     subgraph Data["Data plane"]
-        PG[("[CURRENT] PostgreSQL 16 + pgvector<br/>14 migrations<br/>backend/src/db/migrations/")]
+        PG[("[CURRENT] PostgreSQL 16 + pgvector<br/>25 migrations<br/>backend/src/db/migrations/")]
         S3[("[CURRENT] S3-compatible storage<br/>MinIO (dev)<br/>backend/src/storage/storage.ts")]
     end
 
@@ -59,7 +59,6 @@ flowchart TB
         FW["Dedicated ingestion worker (P2-a)"]
         FOTel["OpenTelemetry exporter (P2-b)"]
         FDLP["DLP (P2-f)"]
-        FTools["Destructive-tool approval (P3-b)"]
         FFT["Fine-tuning (P3-a)"]
         FMR["Multi-region (P3-c)"]
     end
@@ -268,7 +267,7 @@ flowchart LR
     THR -->|"no candidates"| EMPTY(["no-context path:<br/>model answers without<br/>doc grounding — must not<br/>hallucinate citations"])
 
 %% ---------------------------------------------------------------------
-%% (g) DATA MODEL — key tables (backend/src/db/migrations/001–014)
+%% (g) DATA MODEL — key tables (backend/src/db/migrations/001–025)
 %% Key tables only — not a complete database ERD.
 %% Tenant isolation: every tenant-owned row carries tenant_id; RLS policies
 %% enforced (013_force_rls). Classification labels gate reads.
@@ -404,7 +403,7 @@ flowchart TB
     BE -->|"AI provider endpoint<br/>(model registry)"| VLLM
     FE -->|"HTTPS :8080/api/v1"| BE
 
-    PROD["[FUTURE] Production deltas (docs/deployment.md):<br/>• NODE_ENV=production, COOKIE_SECURE=true<br/>• JWT_SECRET ≥32 chars from secret manager (never committed)<br/>• MALWARE_SCAN_MODE=http + MALWARE_SCANNER_ENDPOINT<br/>• explicit CORS_ORIGIN<br/>• migrations via npm run migrate (014 .sql files copied to dist)<br/>• [FUTURE] shared rate limiter in front of multi-instance backend<br/>• [FUTURE] P2-a: dedicated ingestion worker replicas<br/>• P1-a: verify pgvector ≥0.7.0 + ALTER EXTENSION vector UPDATE"]
+    PROD["[FUTURE] Production deltas (docs/deployment.md):<br/>• NODE_ENV=production, COOKIE_SECURE=true<br/>• JWT_SECRET ≥32 chars from secret manager (never committed)<br/>• MALWARE_SCAN_MODE=http + MALWARE_SCANNER_ENDPOINT<br/>• explicit CORS_ORIGIN<br/>• migrations via npm run migrate (025 .sql files copied to dist)<br/>• [FUTURE] shared rate limiter in front of multi-instance backend<br/>• [FUTURE] P2-a: dedicated ingestion worker replicas<br/>• P1-a: verify pgvector ≥0.7.0 + ALTER EXTENSION vector UPDATE"]
     PROD -.-> Host
 
 %% ---------------------------------------------------------------------

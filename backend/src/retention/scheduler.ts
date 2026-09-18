@@ -27,7 +27,8 @@ async function runOnce(): Promise<void> {
       `Retention purge sweep: ${result.tenants} tenant(s), ` +
         `${result.counts.conversations} conversations, ${result.counts.messages} messages, ` +
         `${result.counts.auditEvents} audit events purged` +
-        (result.failed.length > 0 ? `; ${result.failed.length} tenant(s) failed` : '')
+        (result.failed.length > 0 ? `; ${result.failed.length} tenant(s) failed` : '') +
+        (result.globalAuditPurgeError ? '; platform-global audit purge failed' : '')
     );
   } catch (error) {
     console.error('Retention purge sweep failed', error);

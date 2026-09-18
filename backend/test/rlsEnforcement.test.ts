@@ -176,7 +176,6 @@ describe('static: raw query() is never used on tenant tables', () => {
   //    session writes go through tenantQuery.
   //  - documents/queue.ts: `SELECT id FROM tenants` to fan out per-tenant
   //    ingestion; all tenant-table work uses tenantQuery(tenant.id, ...).
-  //  - health.ts: `SELECT 1` liveness probe.
   //  - server.ts: startup pg_roles check that REFUSES superuser/BYPASSRLS
   //    roles (a BYPASSRLS role would silently defeat even FORCE RLS).
   //  - eval/store.ts: eval_runs / eval_case_results are platform-level tables
@@ -197,7 +196,6 @@ describe('static: raw query() is never used on tenant tables', () => {
     'auth/oidc.ts',
     'auth/oidcRoutes.ts',
     'documents/queue.ts',
-    'health.ts',
     'server.ts',
     'eval/store.ts',
     'retention/purge.ts',

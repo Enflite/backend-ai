@@ -167,6 +167,17 @@ let wakeResolve: (() => void) | null = null;
 let inFlight = 0;
 const drainWaiters: Array<() => void> = [];
 
+/**
+ * Job ids currently held by this process's workers. The reclaim sweep must
+ * never reset these: a long-running job's lease can legitimately expire
+ * mid-execution, and only this process knows the job is still alive.
+ */
+const activeJobIds = new Set<string>();
+
+/** Minimum gap between periodic reclaim-and-reseed sweeps (also the PROCESSING lease). */
+const SWEEP_INTERVAL_MS = 60_000;
+let lastSweepAt = 0;
+
 /** Idle poll interval when no job is due; enqueue/retry notify wakes earlier. */
 const IDLE_POLL_MS = 5000;
 
@@ -248,6 +259,12 @@ export async function stopIngestionWorkers(): Promise<void> {
 
 async function pumpLoop(): Promise<void> {
   while (poolState === 'running') {
+    // Periodic healing, throttled internally: reclaim PROCESSING leases whose
+    // worker died after boot (a fast restart can strand a job with a fresh
+    // lease) and reseed tenants whose PENDING work never entered the
+    // process-local fairness set. Best-effort: a database blip is logged,
+    // never thrown — the sweep must not crash the pump.
+    await sweepStaleIngestionWork();
     const release = await semaphore.acquire();
     if (poolState !== 'running') {
       release();
@@ -272,18 +289,91 @@ async function pumpLoop(): Promise<void> {
     // Fire-and-forget: the permit is held until the job settles, which bounds
     // concurrency; the pump loops immediately to fill the next permit.
     void (async () => {
+      activeJobIds.add(job.id);
       try {
         await executeJob(job);
       } catch (error) {
         // executeJob handles job-level failures itself; this is the last-
         // resort net for status-update/audit outages. The job stays
-        // PROCESSING and startup recovery reclaims it via the lock timeout.
+        // PROCESSING and the periodic sweep reclaims it via the lock timeout.
         console.error(`Ingestion job ${job.id} errored outside its handler:`, error);
       } finally {
+        activeJobIds.delete(job.id);
         release();
         notifyIngestionWorkers();
       }
     })();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Periodic reclaim-and-reseed sweep
+// ---------------------------------------------------------------------------
+
+export interface SweepOptions {
+  /** Bypass the throttle (used by startup recovery). */
+  force?: boolean;
+  /** Restrict the sweep to these tenants; default: every tenant in the database. */
+  tenantIds?: string[];
+}
+
+/**
+ * Reclaim stranded PROCESSING leases and reseed the fairness set. Exported
+ * for tests and for startup recovery (which delegates its reclaim-and-seed
+ * halves here so boot and runtime cannot drift apart).
+ *
+ * Startup recovery alone is not enough: a fast restart can strand a
+ * PROCESSING job whose lease is still fresh, and PENDING jobs created by
+ * other means may never enter the process-local pendingTenants set — both
+ * would sit unclaimed until the next restart. The pump runs this sweep
+ * periodically instead.
+ *
+ * - A crashed PROCESSING job is safe to retry: chunks are replaced before
+ *   READY, and the lock timeout proves the worker is gone. A pending cancel
+ *   request survives the reclaim: the next claim observes cancel_requested
+ *   and marks the job CANCELED instead of running it.
+ * - Jobs this process is actively executing are never reclaimed: a
+ *   long-running job's lease can legitimately expire mid-execution.
+ * - Poison handling stays with the failure path (handleJobFailure
+ *   quarantines at runtime; startup recovery quarantines once at boot) so a
+ *   reclaimed job that fails again is still bounded by INGEST_MAX_ATTEMPTS.
+ * - Tenants with nothing claimable are pruned by claimNextJob, so reseeding
+ *   on mere PENDING presence is self-correcting.
+ *
+ * Best-effort: a database blip is logged, never thrown.
+ */
+export async function sweepStaleIngestionWork(options: SweepOptions = {}): Promise<void> {
+  const now = Date.now();
+  if (!options.force && now - lastSweepAt < SWEEP_INTERVAL_MS) return;
+  lastSweepAt = now;
+  try {
+    const tenantIds = options.tenantIds
+      ?? (await query<{ id: string }>('SELECT id FROM tenants')).rows.map((row) => row.id);
+    let reseeded = false;
+    for (const tenantId of tenantIds) {
+      await tenantQuery(
+        tenantId,
+        `UPDATE document_ingestion_jobs
+         SET status = 'PENDING', locked_at = NULL, next_attempt_at = NOW(), updated_at = NOW()
+         WHERE status = 'PROCESSING' AND locked_at < NOW() - INTERVAL '5 minutes'
+           AND NOT (id = ANY($1))`,
+        [[...activeJobIds]]
+      );
+      // Seed the fairness set: tenants with PENDING work are claim candidates.
+      if (!pendingTenants.has(tenantId)) {
+        const pending = await tenantQuery<{ id: string }>(
+          tenantId,
+          `SELECT id FROM document_ingestion_jobs WHERE status = 'PENDING' LIMIT 1`
+        );
+        if ((pending.rowCount ?? 0) !== 0) {
+          pendingTenants.add(tenantId);
+          reseeded = true;
+        }
+      }
+    }
+    if (reseeded) notifyIngestionWorkers();
+  } catch (error) {
+    console.error('Ingestion sweep failed:', error);
   }
 }
 
@@ -754,16 +844,9 @@ export async function recoverIngestionJobs(options: RecoverOptions = {}): Promis
   const maxAttempts = config.INGEST_MAX_ATTEMPTS;
   const tenants = await query<{ id: string }>('SELECT id FROM tenants');
   for (const tenant of tenants.rows) {
-    // A crashed PROCESSING job is safe to retry: chunks are replaced before
-    // READY. The lock timeout proves the worker is gone. A pending cancel
-    // request survives the crash: the next claim observes cancel_requested
-    // and marks the job CANCELED instead of running it.
-    await tenantQuery(
-      tenant.id,
-      `UPDATE document_ingestion_jobs
-       SET status = 'PENDING', locked_at = NULL, next_attempt_at = NOW(), updated_at = NOW()
-       WHERE status = 'PROCESSING' AND locked_at < NOW() - INTERVAL '5 minutes'`
-    );
+    // Reclaim-and-reseed is shared with the periodic pump sweep (forced here,
+    // not throttled) so boot and runtime healing cannot drift apart.
+    await sweepStaleIngestionWork({ force: true, tenantIds: [tenant.id] });
     // Poison handling runs BEFORE orphan healing: a job that crashed
     // maxAttempts+ times without ever succeeding is QUARANTINED (terminal,
     // never auto-retried) instead of being retried forever. The crash counter
@@ -847,13 +930,6 @@ export async function recoverIngestionJobs(options: RecoverOptions = {}): Promis
         );
       }
     }
-    // Seed the fairness set: tenants with PENDING work are claim candidates
-    // from the first pump iteration.
-    const pending = await tenantQuery<{ id: string }>(
-      tenant.id,
-      `SELECT id FROM document_ingestion_jobs WHERE status = 'PENDING' LIMIT 1`
-    );
-    if (pending.rowCount !== 0) pendingTenants.add(tenant.id);
   }
   // Boot is complete: start the dedicated worker pool (idempotent). The pool
   // picks up PENDING work via claimNextJob; nothing is dispatched inline here.

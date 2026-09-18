@@ -186,8 +186,16 @@ describe('generalized agentic loop', () => {
     await runAgenticLoop(baseOptions({ streamGateway, toolRunner: fakeCalcRunner(), sink: collectingSink().sink }));
     const steps = stepAudits();
     expect(steps).toHaveLength(1);
-    expect(steps[0]).toMatchObject({
+    // Exact metadata shape: the audit trail is a compliance surface, so
+    // assert equality (not partial matching) to catch any extra fields
+    // leaking into stored audit rows.
+    expect(steps[0]).toEqual({
+      tenantId: 't1',
+      userId: 'u1',
+      requestId: undefined,
       action: 'AGENTIC_LOOP_STEP',
+      resource: 'chat',
+      classification: 'INTERNAL',
       success: true,
       metadata: {
         step: 1,

@@ -139,6 +139,21 @@ const AVAILABILITY: Record<string, ItemAvailabilityResult> = {
     item: 'FG-9200', site: FTW, description: 'Pump housing',
     onHand: 0, allocated: 0, available: 0, unitOfMeasure: 'EA',
   },
+  // syteline-diag-005 evidence: FG-9200's BOM components are all covered
+  // for a 200-unit build (1/1/2 per unit → 200/200/400 needed), which is
+  // what lets that case rule out supply and pivot to the work order.
+  'COMP-2300': {
+    item: 'COMP-2300', site: FTW, description: 'Volute casing',
+    onHand: 900, allocated: 200, available: 700, unitOfMeasure: 'EA',
+  },
+  'COMP-2301': {
+    item: 'COMP-2301', site: FTW, description: 'Impeller',
+    onHand: 600, allocated: 200, available: 400, unitOfMeasure: 'EA',
+  },
+  'COMP-2302': {
+    item: 'COMP-2302', site: FTW, description: 'Wear ring',
+    onHand: 1400, allocated: 400, available: 1000, unitOfMeasure: 'EA',
+  },
   // Negative-inventory forensics scenario: the -460 cycle-count adjustment
   // posted Tuesday before the week's receipts were booked, driving on-hand
   // negative; the transaction trail tells the story, not a guess.
@@ -262,7 +277,11 @@ const ITEMS: Record<string, { item: string; site: string; description: string; i
 
 export class MockSyteLineAdapter implements SyteLineAdapter {
   async getItem(input: { item: string; site: string }, _signal: AbortSignal): Promise<unknown> {
-    return ITEMS[input.item] ?? { item: input.item, site: input.site, description: 'Fixture item', itemType: 'purchased' };
+    const record = ITEMS[input.item];
+    // Never invent fixture records: an unknown item is SYTELINE_NOT_FOUND,
+    // exactly like the real adapter's not-found path.
+    if (!record) throw Object.assign(new Error(`Item ${input.item} not found`), { code: 'SYTELINE_NOT_FOUND' });
+    return record;
   }
 
   async getSalesOrder(input: { orderNumber?: string; customerNumber?: string; site?: string; status?: string }, _signal: AbortSignal): Promise<SalesOrderResult> {

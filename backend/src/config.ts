@@ -342,6 +342,24 @@ if (config.INGEST_RETRY_MAX_DELAY_MS < config.INGEST_RETRY_BASE_DELAY_MS) {
   process.exit(1);
 }
 
+// OIDC transport security: every OIDC URL must be HTTPS. Plain HTTP is
+// tolerated only for explicit loopback hosts (local IdP development) and
+// only outside production — in production even a loopback HTTP IdP is a
+// startup error.
+const OIDC_LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+export function isAllowedOidcUrl(value: string, nodeEnv: string = config.NODE_ENV): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === 'https:') return true;
+  if (parsed.protocol !== 'http:') return false;
+  return nodeEnv !== 'production' && OIDC_LOOPBACK_HOSTS.has(parsed.hostname);
+}
+
 // OIDC (enterprise login): when enabled, every field the flow needs must be
 // present and well-formed, otherwise the server refuses to boot rather than
 // serving a half-configured login path.
@@ -357,6 +375,23 @@ if (config.OIDC_ENABLED) {
     console.error(`Configuration error: OIDC_ENABLED requires ${missing.join(', ')}`);
     process.exit(1);
   }
+  // Transport security: the issuer, the redirect URI, and the frontend
+  // callback must all be HTTPS (discovered IdP endpoints are checked at
+  // discovery time in auth/oidc.ts). Plain HTTP reaches the network in the
+  // clear, so it is allowed only for loopback development IdPs.
+  const oidcUrls: Array<[name: string, value: string | undefined]> = [
+    ['OIDC_ISSUER', config.OIDC_ISSUER],
+    ['OIDC_REDIRECT_URI', config.OIDC_REDIRECT_URI],
+    ['OIDC_FRONTEND_CALLBACK', config.OIDC_FRONTEND_CALLBACK],
+  ];
+  for (const [name, value] of oidcUrls) {
+    if (value && !isAllowedOidcUrl(value)) {
+      console.error(
+        `Configuration error: ${name} must use HTTPS (plain HTTP is allowed only for localhost/127.0.0.1/[::1] outside production)`
+      );
+      process.exit(1);
+    }
+  }
   let roleMapping: unknown;
   try {
     roleMapping = JSON.parse(config.OIDC_ROLE_MAPPING);
@@ -364,8 +399,11 @@ if (config.OIDC_ENABLED) {
     console.error('Configuration error: OIDC_ROLE_MAPPING is not valid JSON');
     process.exit(1);
   }
+  // Arrays are typeof 'object' but are not a group->role mapping: a JSON
+  // array like '["admins"]' would otherwise silently parse into a bogus
+  // {'0': 'admins'} mapping.
   const mappingOk =
-    typeof roleMapping === 'object' && roleMapping !== null &&
+    typeof roleMapping === 'object' && roleMapping !== null && !Array.isArray(roleMapping) &&
     Object.entries(roleMapping).every(([group, role]) => typeof group === 'string' && typeof role === 'string');
   if (!mappingOk) {
     console.error('Configuration error: OIDC_ROLE_MAPPING must be a JSON object of string group -> string role');

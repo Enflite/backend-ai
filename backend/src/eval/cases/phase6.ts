@@ -137,7 +137,7 @@ export const PHASE6_CASES: EvalCase[] = [
       '   return "I\'ll " + phrases.join(", then ");\n' +
       ' }\n' +
       '```\n' +
-      'The cap moves from 3 to 2; longer call lists are summarized by the existing "and N more" suffix.',
+      'The cap moves from 3 to 2.',
     severity: 'p0',
     dimensions: ['instruction-following', 'helpfulness'],
   },

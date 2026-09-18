@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
-import { query } from './db/pool.js';
+import { PoolClient } from 'pg';
+import { pool } from './db/pool.js';
 import { config } from './config.js';
 import { s3Storage } from './storage/storage.js';
 
@@ -36,8 +37,18 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 async function checkDatabase(): Promise<DependencyCheck> {
   const started = Date.now();
+  const timeoutMs = config.READY_CHECK_TIMEOUT_MS;
+  // Bounded server-side: statement_timeout cancels the probe query inside
+  // Postgres, so a timed-out probe never outlives the check on a pooled
+  // connection (a bare Promise.race would leave the backend running). A
+  // wedged connection — one that answers nothing at all — is destroyed
+  // rather than returned to the pool. A connect failure (pool exhaustion,
+  // database down) reports degraded instead of 500ing the whole route.
+  let client: PoolClient | undefined;
   try {
-    await withTimeout(query('SELECT 1'), config.READY_CHECK_TIMEOUT_MS, 'database check');
+    client = await pool.connect();
+    await client.query('SELECT set_config($1, $2, false)', ['statement_timeout', String(timeoutMs)]);
+    await withTimeout(client.query('SELECT 1'), timeoutMs, 'database check');
     return { status: 'ok', critical: true, latencyMs: Date.now() - started };
   } catch (error) {
     return {
@@ -46,6 +57,18 @@ async function checkDatabase(): Promise<DependencyCheck> {
       latencyMs: Date.now() - started,
       detail: error instanceof Error ? error.message : 'unknown error',
     };
+  } finally {
+    if (client) {
+      let healthy = true;
+      try {
+        await client.query('SELECT set_config($1, $2, false)', ['statement_timeout', '0']);
+      } catch {
+        healthy = false;
+      }
+      // A truthy error destroys the client instead of returning a possibly
+      // wedged connection to the pool.
+      client.release(healthy ? undefined : new Error('readiness check connection wedged'));
+    }
   }
 }
 
@@ -59,9 +82,15 @@ async function checkObjectStorage(): Promise<DependencyCheck> {
   }
   const started = Date.now();
   try {
-    // exists() performs a HeadObject round-trip; a 404 on the probe key still
-    // proves reachability, so any boolean result means the service is up.
-    await withTimeout(s3Storage.exists('__readiness_probe__'), config.READY_CHECK_TIMEOUT_MS, 'object storage check');
+    // Bucket-level probe (HeadBucket), aborted with the check: a 404 means
+    // the bucket itself is missing — HeadObject could not distinguish that
+    // from a missing probe key — and the abort signal cancels the HTTP
+    // request instead of letting it outlive the probe.
+    await withTimeout(
+      s3Storage.probeBucket(AbortSignal.timeout(config.READY_CHECK_TIMEOUT_MS)),
+      config.READY_CHECK_TIMEOUT_MS,
+      'object storage check'
+    );
     return { status: 'ok', critical: true, latencyMs: Date.now() - started };
   } catch (error) {
     return {
@@ -76,7 +105,7 @@ async function checkObjectStorage(): Promise<DependencyCheck> {
 async function checkEmbeddings(): Promise<DependencyCheck> {
   // Embeddings power ingestion and RAG. A ping failure degrades those paths
   // but chat keeps working, so this check is non-critical: it surfaces as
-  // `degraded` while /ready stays 200.
+  // `unavailable` while /ready stays 200.
   if (!config.EMBEDDING_BASE_URL) {
     return { status: 'not_configured', critical: false };
   }
@@ -130,8 +159,18 @@ export async function healthRoutes(fastify: FastifyInstance): Promise<void> {
   // critical dependency is reachable; 503 when a critical one is down.
   // Non-critical degradations (embeddings, unconfigured storage) are reported
   // in the body but do not fail the probe.
-  fastify.get('/ready', async (_req, reply) => {
+  // /ready is unauthenticated: raw dependency errors can carry connection
+  // strings, hostnames, or SDK internals, so they are logged server-side
+  // and never sent to the client — the public body carries only the bounded
+  // status enum and latencies.
+  fastify.get('/ready', async (req, reply) => {
     const report = await runReadinessChecks();
+    for (const [name, check] of Object.entries(report.checks)) {
+      if (check.detail !== undefined) {
+        req.log.warn({ dependency: name, status: check.status, detail: check.detail }, 'readiness check detail');
+        delete check.detail;
+      }
+    }
     return reply.status(report.status === 'ok' ? 200 : 503).send(report);
   });
 }

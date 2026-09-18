@@ -29,6 +29,13 @@ export interface ConcurrencyLimiterOptions {
   maxPerUser: number;
   /** Seconds clients should wait before retrying after a rejection. */
   retryAfterSeconds?: number;
+  /**
+   * Optional shared tenant counter. When provided, the limiter draws its
+   * tenant-wide counts from this map instead of a private one, so two
+   * limiters (e.g. chat + direct tool execution) enforce ONE tenant ceiling.
+   * Per-user counters always stay private to each limiter.
+   */
+  sharedTenantCounts?: Map<string, number>;
 }
 
 export type ConcurrencyAcquireResult =
@@ -36,7 +43,7 @@ export type ConcurrencyAcquireResult =
   | { ok: false; retryAfterSeconds: number };
 
 export class ConcurrencyLimiter {
-  private readonly tenantInFlight = new Map<string, number>();
+  private readonly tenantInFlight: Map<string, number>;
   private readonly userInFlight = new Map<string, number>();
   private readonly retryAfterSeconds: number;
 
@@ -47,6 +54,7 @@ export class ConcurrencyLimiter {
     if (!Number.isInteger(options.maxPerUser) || options.maxPerUser < 1) {
       throw new Error('ConcurrencyLimiter: maxPerUser must be a positive integer');
     }
+    this.tenantInFlight = options.sharedTenantCounts ?? new Map<string, number>();
     this.retryAfterSeconds =
       options.retryAfterSeconds ?? DEFAULT_BUSY_RETRY_AFTER_SECONDS;
   }
@@ -136,13 +144,22 @@ export function retryAfterSecondsFromReply(reply: FastifyReply, fallback: number
 }
 
 /**
+ * The single tenant-wide in-flight counter shared by the chat and tool
+ * limiters below. Module scope so both factories — constructed in different
+ * route modules — enforce one tenant ceiling instead of two.
+ */
+const sharedTenantInFlight = new Map<string, number>();
+
+/**
  * Limiter for chat streams: a slot covers the whole SSE stream including
  * agentic tool rounds. Built from config at module scope in the chat route.
+ * Shares its tenant counter with the tool limiter.
  */
 export function createChatConcurrencyLimiter(): ConcurrencyLimiter {
   return new ConcurrencyLimiter({
     maxPerTenant: config.AI_MAX_CONCURRENT_PER_TENANT,
     maxPerUser: config.AI_MAX_CONCURRENT_PER_USER,
+    sharedTenantCounts: sharedTenantInFlight,
   });
 }
 
@@ -156,5 +173,6 @@ export function createToolConcurrencyLimiter(): ConcurrencyLimiter {
     maxPerTenant: config.AI_MAX_CONCURRENT_PER_TENANT,
     maxPerUser: config.AI_MAX_CONCURRENT_TOOLS_PER_USER,
     retryAfterSeconds: 2,
+    sharedTenantCounts: sharedTenantInFlight,
   });
 }

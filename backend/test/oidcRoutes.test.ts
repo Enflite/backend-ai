@@ -12,6 +12,7 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import Fastify from 'fastify';
+import cookie from '@fastify/cookie';
 import { AppError } from '../src/errors.js';
 
 const { queryMock, withTxMock } = vi.hoisted(() => ({
@@ -49,6 +50,7 @@ vi.mock('../src/audit/audit.js', () => ({ recordAudit: recordAuditMock }));
 
 type RoutesModule = typeof import('../src/auth/oidcRoutes.js');
 let oidcRoutes: RoutesModule['oidcRoutes'];
+let OIDC_STATE_COOKIE: RoutesModule['OIDC_STATE_COOKIE'];
 
 const FRONTEND_CALLBACK = 'https://app.example.com/sso/callback';
 const TENANT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -62,7 +64,7 @@ beforeAll(async () => {
   vi.stubEnv('OIDC_DEFAULT_TENANT_ID', TENANT_ID);
   vi.stubEnv('OIDC_FRONTEND_CALLBACK', FRONTEND_CALLBACK);
   vi.stubEnv('JWT_EXPIRES_IN', '15m');
-  ({ oidcRoutes } = await import('../src/auth/oidcRoutes.js'));
+  ({ oidcRoutes, OIDC_STATE_COOKIE } = await import('../src/auth/oidcRoutes.js'));
 });
 
 const MEMBERSHIP = {
@@ -74,6 +76,7 @@ const MEMBERSHIP = {
 
 async function buildApp() {
   const app = Fastify();
+  await app.register(cookie); // the state cookie needs setCookie/clearCookie + request.cookies
   app.setErrorHandler((error: unknown, _req, reply) => {
     if (error instanceof AppError) {
       return reply.status(error.statusCode).send({ error: { code: error.code, message: error.message } });
@@ -154,7 +157,56 @@ describe('oidc routes', () => {
     const res = await app.inject({ method: 'GET', url: '/auth/oidc/login' });
     expect(res.statusCode).toBe(302);
     expect(res.headers.location).toBe('https://idp.example.com/authorize?x=1');
+    // Browser binding: the state is also set as a short-lived HttpOnly
+    // SameSite=Lax cookie that the callback must see again.
+    const setCookie = String(res.headers['set-cookie']);
+    expect(setCookie).toContain(`${OIDC_STATE_COOKIE}=s`);
+    expect(setCookie).toContain('HttpOnly');
+    expect(setCookie).toContain('SameSite=Lax');
     expect(recordAuditMock).toHaveBeenCalledWith(expect.objectContaining({ action: 'OIDC_LOGIN_START', success: true }));
+    await app.close();
+  });
+
+  it('callback rejects a state that does not match the browser cookie', async () => {
+    oidcCore.consumeOidcState.mockResolvedValue({ verifier: 'v', nonce: 'n' });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/oidc/callback?code=c&state=s',
+      cookies: { [OIDC_STATE_COOKIE]: 'different-browser' },
+    });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe(`${FRONTEND_CALLBACK}#error=invalid_state`);
+    expect(oidcCore.consumeOidcState).not.toHaveBeenCalled();
+    expect(oidcCore.exchangeCode).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('callback rejects a missing state cookie', async () => {
+    oidcCore.consumeOidcState.mockResolvedValue({ verifier: 'v', nonce: 'n' });
+    const app = await buildApp();
+    const res = await app.inject({ method: 'GET', url: '/auth/oidc/callback?code=c&state=s' });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe(`${FRONTEND_CALLBACK}#error=invalid_state`);
+    expect(oidcCore.exchangeCode).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('callback clears the state cookie on arrival', async () => {
+    mockNewUserFlow();
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/oidc/callback?code=c&state=s',
+      cookies: { [OIDC_STATE_COOKIE]: 's' },
+    });
+    expect(res.statusCode).toBe(302);
+    const setCookie = res.headers['set-cookie'];
+    const cleared = (Array.isArray(setCookie) ? setCookie : [String(setCookie)]).find((entry) =>
+      String(entry).startsWith(`${OIDC_STATE_COOKIE}=`)
+    );
+    // Cleared = expired immediately, so a replayed callback has no cookie.
+    expect(String(cleared)).toContain('Expires=Thu, 01 Jan 1970');
     await app.close();
   });
 
@@ -183,7 +235,11 @@ describe('oidc routes', () => {
   it('callback rejects a replayed or forged state', async () => {
     oidcCore.consumeOidcState.mockResolvedValue(null);
     const app = await buildApp();
-    const res = await app.inject({ method: 'GET', url: '/auth/oidc/callback?code=c&state=replayed' });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/oidc/callback?code=c&state=replayed',
+      cookies: { [OIDC_STATE_COOKIE]: 'replayed' },
+    });
     expect(res.statusCode).toBe(302);
     expect(res.headers.location).toBe(`${FRONTEND_CALLBACK}#error=invalid_state`);
     expect(oidcCore.exchangeCode).not.toHaveBeenCalled();
@@ -193,7 +249,11 @@ describe('oidc routes', () => {
   it('callback provisions a new user, creates the membership, and issues a session', async () => {
     mockNewUserFlow();
     const app = await buildApp();
-    const res = await app.inject({ method: 'GET', url: '/auth/oidc/callback?code=c&state=s' });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/oidc/callback?code=c&state=s',
+      cookies: { [OIDC_STATE_COOKIE]: 's' },
+    });
     expect(res.statusCode).toBe(302);
     const location = String(res.headers.location);
     expect(location.startsWith(`${FRONTEND_CALLBACK}#`)).toBe(true);
@@ -231,7 +291,11 @@ describe('oidc routes', () => {
     buildAuthMock.mockResolvedValue({ userId: 'user-9', tenantId: TENANT_ID });
     createSessionMock.mockResolvedValue({ accessToken: 'a', refreshToken: 'r' });
     const app = await buildApp();
-    const res = await app.inject({ method: 'GET', url: '/auth/oidc/callback?code=c&state=s' });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/oidc/callback?code=c&state=s',
+      cookies: { [OIDC_STATE_COOKIE]: 's' },
+    });
     expect(res.statusCode).toBe(302);
     // Same email, different subject would NOT resolve here: identity is the
     // (issuer, subject) pair.
@@ -252,7 +316,11 @@ describe('oidc routes', () => {
     oidcCore.verifyIdToken.mockResolvedValue({ issuer: 'https://idp.example.com', sub: 'sub-x', email: 'x@example.com', groups: [] });
     oidcCore.fetchUserinfo.mockResolvedValue({});
     const app = await buildApp();
-    const res = await app.inject({ method: 'GET', url: '/auth/oidc/callback?code=c&state=s' });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/oidc/callback?code=c&state=s',
+      cookies: { [OIDC_STATE_COOKIE]: 's' },
+    });
     // Browser-facing failures redirect to the frontend with a generic code
     // (audited as OIDC_LOGIN_FAILURE), never a JSON error page.
     expect(res.statusCode).toBe(302);
@@ -290,12 +358,48 @@ describe('oidc routes', () => {
     buildAuthMock.mockResolvedValue({ userId: 'user-winner', tenantId: TENANT_ID });
     createSessionMock.mockResolvedValue({ accessToken: 'a', refreshToken: 'r' });
     const app = await buildApp();
-    const res = await app.inject({ method: 'GET', url: '/auth/oidc/callback?code=c&state=s' });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/oidc/callback?code=c&state=s',
+      cookies: { [OIDC_STATE_COOKIE]: 's' },
+    });
     expect(res.statusCode).toBe(302);
     expect(String(res.headers.location)).toContain('#access_token=a');
     expect(recordAuditMock).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'LOGIN', success: true, userId: 'user-winner' })
     );
+    await app.close();
+  });
+
+  it('callback fails closed when the email is already taken by a different identity', async () => {
+    // A different IdP identity provisioning with an email another account
+    // owns: the users.email unique constraint fires inside withTx.
+    queryMock.mockImplementation(async (sql: string) => {
+      const text = String(sql);
+      if (text.includes('FROM oidc_identities')) return { rows: [] };
+      return { rows: [] };
+    });
+    withTxMock.mockRejectedValueOnce({ code: '23505', constraint: 'users_email_key' });
+    oidcCore.consumeOidcState.mockResolvedValue({ verifier: 'v', nonce: 'n' });
+    oidcCore.exchangeCode.mockResolvedValue({ idToken: 'id', accessToken: 'at' });
+    oidcCore.verifyIdToken.mockResolvedValue({ issuer: 'https://idp.example.com', sub: 'other-sub', email: 'taken@example.com', groups: [] });
+    oidcCore.fetchUserinfo.mockResolvedValue({});
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/auth/oidc/callback?code=c&state=s',
+      cookies: { [OIDC_STATE_COOKIE]: 's' },
+    });
+    expect(res.statusCode).toBe(302);
+    // The browser sees only the generic failure code; the internal code is
+    // recorded in the audit metadata for operators.
+    expect(res.headers.location).toBe(`${FRONTEND_CALLBACK}#error=login_failed`);
+    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(recordAuditMock).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OIDC_LOGIN_FAILURE',
+      success: false,
+      metadata: expect.objectContaining({ failure: 'login_failed', internalCode: 'OIDC_EMAIL_CONFLICT' }),
+    }));
     await app.close();
   });
 });

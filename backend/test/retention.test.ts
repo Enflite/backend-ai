@@ -210,4 +210,49 @@ describe('purgeAllTenants', () => {
       consoleSpy.mockRestore();
     }
   });
+
+  it('surfaces a platform-global audit purge failure in the result and the sweep audit', async () => {
+    queryMock.mockImplementation(async (sql: string) => {
+      if (String(sql).includes('FROM tenants')) {
+        return { rows: [{ id: 't1' }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    purgeGlobalAuditEventsMock.mockRejectedValue(new Error('audit db down'));
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await purgeAllTenants();
+      // The failure is surfaced on the result, not just logged.
+      expect(result.globalAuditPurgeError).toContain('audit db down');
+      expect(result.failed).toEqual([]);
+      // ...and the sweep audit is marked failed with the error detail.
+      expect(recordAuditMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'RETENTION_PURGE_SWEEP',
+          success: false,
+          metadata: expect.objectContaining({ globalAuditPurgeError: expect.stringContaining('audit db down') }),
+        })
+      );
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('marks the sweep audit successful when the global audit purge succeeds', async () => {
+    queryMock.mockImplementation(async (sql: string) => {
+      if (String(sql).includes('FROM tenants')) {
+        return { rows: [{ id: 't1' }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const result = await purgeAllTenants();
+    expect(result.globalAuditPurgeError).toBeNull();
+    expect(recordAuditMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'RETENTION_PURGE_SWEEP',
+        success: true,
+        metadata: expect.objectContaining({ globalAuditPurgeError: null }),
+      })
+    );
+  });
 });

@@ -122,13 +122,15 @@ checks with timeouts (`READY_CHECK_TIMEOUT_MS`, default 2000ms) and returns:
 - **200** when every *critical* dependency is `ok`; **503** with
   `"status": "degraded"` when any critical check is not `ok`.
 - `database` (critical): `SELECT 1` through the pool.
-- `objectStorage` (critical *when configured*): a `HeadObject` round-trip
-  against the bucket. Unconfigured endpoint → `not_configured`,
-  non-critical (dev state; document features disabled).
+- `objectStorage` (critical *when configured*): a `HeadBucket` round-trip
+  against the configured bucket. Unconfigured endpoint → `not_configured`,
+  non-critical (dev state; document features disabled). A 404 means the
+  bucket itself is missing — a key-level `HeadObject` probe could not tell
+  that apart from a missing probe key.
 - `embeddings` (**non-critical**): a token-free ping — `GET /v1/models` on
   OpenAI-compatible providers, `GET /api/tags` on Ollama. A failure
-  degrades ingestion/RAG but chat keeps working, so it surfaces as
-  `degraded` in the body without failing the probe. Unconfigured →
+  degrades ingestion/RAG but chat keeps working, so the dependency surfaces
+  as `unavailable` in the body without failing the probe. Unconfigured →
   `not_configured`.
 
 Status values: `ok` | `degraded` | `unavailable` | `not_configured`.

@@ -29,6 +29,7 @@ import {
   selectNextTenant,
   startIngestionWorkers,
   stopIngestionWorkers,
+  sweepStaleIngestionWork,
 } from '../src/documents/queue.js';
 
 // ---------------------------------------------------------------------------
@@ -720,5 +721,36 @@ describe('recoverIngestionJobs', () => {
     createFakeDb();
     await recoverIngestionJobs({ startWorkers: false });
     expect(isWorkerPoolRunning()).toBe(false);
+  });
+});
+
+describe('sweepStaleIngestionWork', () => {
+  it('reclaims a stranded PROCESSING job and reseeds the fairness set', async () => {
+    const db = createFakeDb();
+    db.seedJob({
+      id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PROCESSING',
+    });
+    await sweepStaleIngestionWork({ force: true });
+    expect(db.jobs.get('job-1')!.status).toBe('PENDING');
+    // The reseed worked: the pump can claim the reclaimed job even though no
+    // enqueue notify ever fired for it.
+    const claimed = await claimNextJob();
+    expect(claimed?.id).toBe('job-1');
+  });
+
+  it('is throttled to once per minute unless forced', async () => {
+    createFakeDb();
+    const callsBefore = query.mock.calls.length;
+    await sweepStaleIngestionWork({ force: true });
+    const afterFirst = query.mock.calls.length;
+    expect(afterFirst).toBeGreaterThan(callsBefore);
+    await sweepStaleIngestionWork();
+    expect(query.mock.calls.length).toBe(afterFirst);
+  });
+
+  it('never throws on a database blip', async () => {
+    createFakeDb();
+    query.mockRejectedValueOnce(new Error('connection reset'));
+    await expect(sweepStaleIngestionWork({ force: true })).resolves.toBeUndefined();
   });
 });

@@ -8,8 +8,12 @@ import Fastify from 'fastify';
 
 // The DB pool is stubbed per test: readiness is about check logic and HTTP
 // mapping, not about a live database.
-const { poolQuery } = vi.hoisted(() => ({ poolQuery: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ query: poolQuery }));
+const { poolQuery, poolConnect, clientRelease } = vi.hoisted(() => ({
+  poolQuery: vi.fn(),
+  poolConnect: vi.fn(),
+  clientRelease: vi.fn(),
+}));
+vi.mock('../src/db/pool.js', () => ({ query: poolQuery, pool: { connect: poolConnect } }));
 
 import { config } from '../src/config.js';
 import {
@@ -32,6 +36,12 @@ afterEach(() => {
 beforeEach(() => {
   poolQuery.mockReset();
   poolQuery.mockResolvedValue({ rows: [{ '?column?': 1 }] });
+  poolConnect.mockReset();
+  clientRelease.mockReset();
+  // The readiness database check uses a dedicated pooled client (bounded
+  // server-side via statement_timeout); stub connect() to hand it the
+  // stubbed query fn.
+  poolConnect.mockResolvedValue({ query: poolQuery, release: clientRelease });
 });
 
 describe('metrics registry', () => {
@@ -183,6 +193,34 @@ describe('/ready dependency checks', () => {
     const res = await app.inject({ method: 'GET', url: '/ready' });
     expect(res.statusCode).toBe(503);
     expect(res.json().status).toBe('degraded');
+    await app.close();
+  });
+
+  it('GET /ready never exposes raw dependency errors publicly', async () => {
+    // The probe is unauthenticated: connection strings and SDK internals in
+    // raw error messages must stay server-side (logged), not in the body.
+    poolQuery.mockRejectedValue(new Error('connect postgres://db.internal:5432 refused'));
+    const app = Fastify();
+    await app.register(healthRoutes);
+    const res = await app.inject({ method: 'GET', url: '/ready' });
+    expect(res.statusCode).toBe(503);
+    const body = res.json();
+    expect(body.checks.database.status).toBe('unavailable');
+    expect(body.checks.database.detail).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain('db.internal');
+    await app.close();
+  });
+
+  it('GET /ready reports degraded rather than 500ing when the pool is exhausted', async () => {
+    poolConnect.mockRejectedValueOnce(new Error('pool exhausted'));
+    const app = Fastify();
+    await app.register(healthRoutes);
+    const res = await app.inject({ method: 'GET', url: '/ready' });
+    expect(res.statusCode).toBe(503);
+    const body = res.json();
+    expect(body.status).toBe('degraded');
+    expect(body.checks.database.status).toBe('unavailable');
+    expect(body.checks.database.detail).toBeUndefined();
     await app.close();
   });
 
