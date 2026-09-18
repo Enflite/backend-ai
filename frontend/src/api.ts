@@ -60,6 +60,18 @@ export const api = {
   async logout(): Promise<void> {
     try { await request('/auth/logout', { method: 'POST' }, false); } finally { accessToken = null; }
   },
+  /** Enterprise SSO: is the OIDC login path enabled on this backend? */
+  async oidcStatus(): Promise<{ enabled: boolean }> {
+    return request('/auth/oidc/status', {}, false);
+  },
+  /** Starts the OIDC flow: full-page redirect to the IdP via the backend. */
+  oidcLoginUrl(): string {
+    return `${API_BASE}/auth/oidc/login`;
+  },
+  /** Current session user (used after the OIDC fragment handoff). */
+  async me(): Promise<AuthUser> {
+    return request<AuthUser>('/auth/me');
+  },
   request,
   async upload(file: File, classification?: DataClassification): Promise<DocumentRecord> {
     const form = new FormData();
@@ -93,8 +105,34 @@ export const api = {
   },
 };
 
-export function mapDocument(value: any): DocumentRecord {
-  return {
+/** Sets the bearer token directly (used for the OIDC fragment handoff). */
+export function setAccessToken(token: string): void {
+  accessToken = token;
+}
+
+export interface OidcFragmentResult {
+  accessToken?: string;
+  error?: string;
+}
+
+/**
+ * Reads the OIDC callback result from the URL fragment and immediately
+ * removes it from the URL: tokens must not linger in history or be copied
+ * with a shared link. Returns the access token or the backend's error code.
+ */
+export function consumeOidcFragment(): OidcFragmentResult {
+  const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const result: OidcFragmentResult = {
+    accessToken: params.get('access_token') ?? undefined,
+    error: params.get('error') ?? undefined,
+  };
+  if (result.accessToken || result.error) {
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+  return result;
+}
+
+export function mapDocument(value: any): DocumentRecord {  return {
     id: value.id,
     filename: value.filename,
     mimeType: value.mime_type,
