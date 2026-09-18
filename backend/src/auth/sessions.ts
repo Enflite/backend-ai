@@ -65,7 +65,11 @@ export async function rotateRefreshToken(
   const result = await tenantQuery(
     auth.tenantId,
     `UPDATE sessions
-     SET refresh_token_hash = $1, last_used_at = NOW()
+     SET refresh_token_hash = $1,
+         replaced_refresh_token_hash = $4,
+         replaced_at = NOW(),
+         previous_refresh_token_hashes = (ARRAY[$4] || COALESCE(previous_refresh_token_hashes, '{}'))[1:5],
+         last_used_at = NOW()
      WHERE id = $2 AND user_id = $3 AND refresh_token_hash = $4
        AND revoked_at IS NULL AND expires_at > NOW()
      RETURNING id`,
@@ -76,6 +80,57 @@ export async function rotateRefreshToken(
   return { auth: completeAuth, accessToken: await signToken(completeAuth), refreshToken };
 }
 
+/**
+ * Refresh-token reuse detection. After rotation the superseded token hashes
+ * are retained (most recent in replaced_refresh_token_hash, last five in
+ * previous_refresh_token_hashes); if a superseded hash is ever presented again
+ * the token was likely stolen (legitimate clients only ever hold the newest
+ * token). Returns the owning user when reuse is detected so the caller can
+ * revoke everything.
+ */
+export async function findRefreshReuse(
+  tenantId: string,
+  token: string
+): Promise<{ sessionId: string; userId: string } | null> {
+  const row = (
+    await tenantQuery<{ id: string; user_id: string }>(
+      tenantId,
+      `SELECT id, user_id FROM sessions
+       WHERE (replaced_refresh_token_hash = $1 AND replaced_at > NOW() - INTERVAL '10 minutes')
+          OR ($1 = ANY(previous_refresh_token_hashes))`,
+      [hashRefreshToken(token)]
+    )
+  ).rows[0];
+  return row ? { sessionId: row.id, userId: row.user_id } : null;
+}
+
 export async function revokeSession(tenantId: string, sessionId: string): Promise<void> {
   await tenantQuery(tenantId, 'UPDATE sessions SET revoked_at = NOW() WHERE id = $1', [sessionId]);
+}
+
+export async function revokeAllUserSessions(tenantId: string, userId: string): Promise<number> {
+  const result = await tenantQuery(
+    tenantId,
+    'UPDATE sessions SET revoked_at = NOW() WHERE tenant_id = $1 AND user_id = $2 AND revoked_at IS NULL',
+    [tenantId, userId]
+  );
+  return result.rowCount ?? 0;
+}
+
+export interface SessionSummary {
+  id: string;
+  created_at: string;
+  last_used_at: string;
+  expires_at: string;
+  revoked: boolean;
+}
+
+export async function listUserSessions(tenantId: string, userId: string): Promise<SessionSummary[]> {
+  const result = await tenantQuery<SessionSummary>(
+    tenantId,
+    `SELECT id, created_at, last_used_at, expires_at, revoked_at IS NOT NULL AS revoked
+     FROM sessions WHERE tenant_id = $1 AND user_id = $2 ORDER BY last_used_at DESC LIMIT 50`,
+    [tenantId, userId]
+  );
+  return result.rows;
 }
