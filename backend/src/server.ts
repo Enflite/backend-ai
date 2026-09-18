@@ -13,6 +13,7 @@ import { AppError, Errors } from './errors.js';
 import { busyBody, retryAfterSecondsFromReply } from './ai/gateway/limits.js';
 import { requestIdHook } from './requestId.js';
 import { healthRoutes } from './health.js';
+import { metricsRoutes, recordHttpRequest } from './observability/metrics.js';
 import { authRoutes } from './auth/routes.js';
 import { auditRoutes } from './audit/routes.js';
 import { modelRoutes, modelAdminRoutes, modelArtifactRoutes } from './ai/gateway/routes.js';
@@ -131,6 +132,12 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   // Request ID
   fastify.addHook('onRequest', requestIdHook);
+  // Trace correlation: rebind the per-request logger with requestId/traceId
+  // so every log line emitted through req.log — routes, gateway, providers,
+  // tool calls — carries both fields. See docs/scale.md.
+  fastify.addHook('onRequest', async (req) => {
+    req.log = req.log.child({ requestId: req.requestId, traceId: req.traceId });
+  });
   fastify.addHook('onResponse', async (req, reply) => {
     req.log.info({
       requestId: req.requestId,
@@ -141,6 +148,17 @@ export async function buildServer(): Promise<FastifyInstance> {
       statusCode: reply.statusCode,
       latencyMs: reply.elapsedTime,
     }, 'request completed');
+    // HTTP RED triplet for /metrics. The scrape endpoint itself is excluded
+    // so Prometheus polling does not pollute the request-rate series.
+    const route = req.routeOptions.url ?? 'unmatched';
+    if (route !== '/metrics') {
+      recordHttpRequest(
+        req.method,
+        route,
+        `${Math.floor(reply.statusCode / 100)}xx`,
+        reply.elapsedTime / 1000
+      );
+    }
   });
 
   await fastify.register(helmet);
@@ -210,6 +228,8 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   // Root health endpoints
   await fastify.register(healthRoutes);
+  // Prometheus exposition (gated by METRICS_PUBLIC; see observability/metrics.ts)
+  await fastify.register(metricsRoutes);
 
   // Hijacked SSE responses are invisible to server.close(): end them
   // explicitly so a client holding a stream open cannot stall shutdown.

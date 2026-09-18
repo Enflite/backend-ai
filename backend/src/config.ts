@@ -161,6 +161,22 @@ const envSchema = z.object({
   MALWARE_SCAN_MODE: z.enum(['http', 'disabled-development']).default('disabled-development'),
   SYTELINE_BASE_URL: z.string().url().optional(),
   SYTELINE_API_TOKEN: z.string().optional().default(''),
+  // ---------------------------------------------------------------------------
+  // Observability (backend/src/observability/). /metrics is public in dev and
+  // test for easy scraping; in production it defaults to hidden (404) and
+  // should be scraped over a private network or fronted with network policy /
+  // reverse-proxy auth. Set METRICS_PUBLIC=true explicitly to expose it.
+  // ---------------------------------------------------------------------------
+  METRICS_PUBLIC: z
+    .preprocess(
+      (val) => (val === undefined || val === null || val === '' ? undefined : val === true || val === 'true' || val === '1'),
+      z.boolean()
+    )
+    .default(process.env.NODE_ENV !== 'production'),
+  // Per-dependency timeout for the /ready checks. Bounded so one hung
+  // dependency cannot stall the readiness probe past the orchestrator's own
+  // timeout.
+  READY_CHECK_TIMEOUT_MS: z.coerce.number().int().min(250).max(30000).default(2000),
   DEV_AUTH_ENABLED: z
     .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
     .default(false),
