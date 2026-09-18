@@ -5,6 +5,7 @@ import { Errors, AppError } from '../errors.js';
 import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
 import { CLASSIFICATIONS, Classification } from '../authz/permissions.js';
+import { assertClassificationAllowed } from '../authz/classification.js';
 import { gatewayStream } from '../ai/gateway/gateway.js';
 import { getApprovedModelForUser, listApprovedModelsForUser } from '../ai/gateway/modelRegistry.js';
 import { retrieveAuthorizedContext } from '../rag/retrieval.js';
@@ -43,6 +44,9 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       modelId ??= conversation.model;
       classification = conversation.classification;
     }
+    // A caller may not self-assert a classification above their clearance, even
+    // for a conversation they own (clearances can be lowered after creation).
+    assertClassificationAllowed(auth.clearance, classification);
     if (!modelId) {
       modelId = (await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId))[0]?.id;
     }
@@ -90,11 +94,16 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, action: 'RAG_RETRIEVAL', resource: 'documents', classification, metadata: { resultCount: citations.length } });
     }
 
-    reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-    reply.raw.setHeader('Connection', 'keep-alive');
-    reply.raw.setHeader('x-request-id', req.requestId);
-    reply.raw.flushHeaders();
+    // Take over the raw response for SSE. hijack() is required: without it
+    // Fastify would attempt to serialize the handler's return value after the
+    // raw writes, corrupting the stream.
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'x-request-id': req.requestId,
+    });
     const send = (event: string, data: unknown) => {
       if (!reply.raw.writableEnded) reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };

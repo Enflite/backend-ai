@@ -12,6 +12,8 @@ Tenant and owner filters are applied in every resource query. Row-level security
 
 Supported labels are `PUBLIC`, `INTERNAL`, `CONFIDENTIAL`, `PROPRIETARY`, `CUI`, and `UNKNOWN`. `UNKNOWN` is always denied. The policy engine checks tenant, ownership/grants, user clearance, model compatibility, and tool compatibility before data crosses a boundary.
 
+Classification is enforced on the write side as well as the read side: conversation creation, chat turns, uploads, and reclassification reject any label above the caller's clearance (`CLASSIFICATION_DENIED`), and an explicit upload classification requested without the `document:classify` permission is rejected rather than silently downgraded. Renaming a conversation requires the dedicated `conversation:update` permission (granted to User, Developer, and Admin roles); read-only roles cannot mutate titles.
+
 ## AI gateway and conversations
 
 Clients send a registry UUID, never a URL or key. The gateway resolves enabled `APPROVED` models granted to the current user or role and permits only `vllm` or `openai-compatible` providers. It enforces classification compatibility, timeouts, cancellation, audit recording, and SSE `meta`, `delta`, `done`, and `error` events. Conversations and messages persist under both tenant and owner filters. Provider-reported usage is not currently stored because it is not available from the streaming adapter.

@@ -87,6 +87,16 @@ const defaultDependencies: IngestionDependencies = {
   embeddings: internalEmbeddingProvider,
 };
 
+function assertValidVectors(vectors: number[][], dimensions: number): void {
+  if (
+    vectors.some(
+      (vector) => vector.length !== dimensions || !vector.every((value) => Number.isFinite(value))
+    )
+  ) {
+    throw Errors.internal('Embedding provider returned invalid vectors', undefined, 'INVALID_EMBEDDING_RESPONSE');
+  }
+}
+
 function errorCode(error: unknown): string {
   if (error instanceof Error && 'code' in error) return String((error as Error & { code: unknown }).code).slice(0, 100);
   return 'INGESTION_FAILED';
@@ -135,22 +145,39 @@ export async function ingestDocument(
         AbortSignal.timeout(config.AI_REQUEST_TIMEOUT_MS)
       ));
     }
-    if (vectors.length !== chunks.length || vectors.some((vector) => vector.length !== dependencies.embeddings.dimensions)) {
-      throw Errors.internal('Embedding provider returned invalid dimensions', undefined, 'INVALID_EMBEDDING_RESPONSE');
+    if (vectors.length !== chunks.length) {
+      throw Errors.internal('Embedding provider returned a partial response', undefined, 'INVALID_EMBEDDING_RESPONSE');
     }
+    assertValidVectors(vectors, dependencies.embeddings.dimensions);
 
     await tenantQuery(tenantId, 'DELETE FROM document_chunks WHERE document_id = $1', [documentId]);
-    for (let index = 0; index < chunks.length; index += 1) {
-      const chunk = chunks[index]!;
+    // Multi-row inserts keep large documents from issuing one transaction per
+    // chunk (2000 chunks x BEGIN/COMMIT round-trips previously).
+    const INSERT_BATCH_ROWS = 200;
+    const INSERT_COLUMNS = 12;
+    for (let offset = 0; offset < chunks.length; offset += INSERT_BATCH_ROWS) {
+      const slice = chunks.slice(offset, offset + INSERT_BATCH_ROWS);
+      const placeholders: string[] = [];
+      const params: unknown[] = [];
+      slice.forEach((chunk, sliceIndex) => {
+        const index = offset + sliceIndex;
+        const base = sliceIndex * INSERT_COLUMNS;
+        placeholders.push(
+          `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5}::vector,$${base + 6},$${base + 7},$${base + 8},$${base + 9},$${base + 10},$${base + 11},$${base + 12})`
+        );
+        params.push(
+          documentId, tenantId, index, chunk.text, `[${vectors[index]!.join(',')}]`, document.classification,
+          dependencies.embeddings.model, dependencies.embeddings.version, dependencies.embeddings.dimensions,
+          chunk.page ?? null, chunk.section ?? null, chunk.sourceLocation ?? null
+        );
+      });
       await tenantQuery(
         tenantId,
         `INSERT INTO document_chunks (
           document_id, tenant_id, chunk_index, content, embedding, classification,
           embedding_model, embedding_version, embedding_dimensions, page, section, source_location
-        ) VALUES ($1,$2,$3,$4,$5::vector,$6,$7,$8,$9,$10,$11,$12)`,
-        [documentId, tenantId, index, chunk.text, `[${vectors[index]!.join(',')}]`, document.classification,
-          dependencies.embeddings.model, dependencies.embeddings.version, dependencies.embeddings.dimensions,
-          chunk.page ?? null, chunk.section ?? null, chunk.sourceLocation ?? null]
+        ) VALUES ${placeholders.join(',')}`,
+        params
       );
     }
     await tenantQuery(tenantId, "UPDATE documents SET status = 'READY', updated_at = NOW() WHERE id = $1", [documentId]);

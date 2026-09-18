@@ -28,6 +28,7 @@ export function canAccessClassification(
 export const PERMISSIONS = [
   'chat:create',
   'conversation:read',
+  'conversation:update',
   'conversation:delete',
   'document:upload',
   'document:read',
@@ -48,6 +49,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
   User: [
     'chat:create',
     'conversation:read',
+    'conversation:update',
     'conversation:delete',
     'document:upload',
     'document:read',
@@ -75,6 +77,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
   Developer: [
     'chat:create',
     'conversation:read',
+    'conversation:update',
     'document:upload',
     'document:read',
     'model:use',

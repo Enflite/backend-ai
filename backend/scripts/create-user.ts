@@ -3,6 +3,42 @@ import { hashPassword } from '../src/auth/password.js';
 import { pool, withTx } from '../src/db/pool.js';
 import { CLASSIFICATIONS, Classification } from '../src/authz/permissions.js';
 
+/**
+ * Prompt for a password on a TTY without echoing it. Nothing is printed per
+ * keystroke (not even asterisks) so shoulder-surfers and scrollback see nothing.
+ */
+function promptPassword(prompt: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const stdin = process.stdin;
+    if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') {
+      reject(new Error('No TTY available for password prompt; use --password or CREATE_USER_PASSWORD'));
+      return;
+    }
+    process.stdout.write(prompt);
+    stdin.setRawMode(true);
+    stdin.resume();
+    let password = '';
+    const onData = (chunk: Buffer): void => {
+      const char = chunk.toString('utf8');
+      if (char === '\n' || char === '\r' || char === '\u0004') {
+        stdin.setRawMode(false);
+        stdin.pause();
+        stdin.removeListener('data', onData);
+        process.stdout.write('\n');
+        resolve(password);
+      } else if (char === '\u0003') {
+        process.stdout.write('\n');
+        process.exit(1);
+      } else if (char === '\u007f' || char === '\b') {
+        password = password.slice(0, -1);
+      } else if (char >= ' ') {
+        password += char;
+      }
+    };
+    stdin.on('data', onData);
+  });
+}
+
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
@@ -15,10 +51,27 @@ async function main(): Promise<void> {
     },
   });
 
-  const { email, password, role, org, tenant, clearance } = values;
+  const { email, role, org, tenant, clearance } = values;
+  // Prefer an explicit flag or environment variable (automation), otherwise
+  // prompt on the TTY. The flag remains for non-interactive use but exposes the
+  // password in shell history and process listings; the prompt is preferred.
+  let password = values.password ?? process.env.CREATE_USER_PASSWORD;
+  if (!password) {
+    try {
+      password = await promptPassword('Password: ');
+    } catch (error) {
+      console.error(`Error: ${(error as Error).message}`);
+      process.exit(1);
+    }
+  }
 
   if (!email || !password) {
-    console.error('Usage: npm run create-user -- --email <email> --password <password> [--role <role>] [--org <org>] [--tenant <tenant>] [--clearance <clearance>]');
+    console.error('Usage: npm run create-user -- --email <email> [--password <password> | CREATE_USER_PASSWORD | TTY prompt] [--role <role>] [--org <org>] [--tenant <tenant>] [--clearance <clearance>]');
+    process.exit(1);
+  }
+
+  if (password.length < 12) {
+    console.error('Error: Password must be at least 12 characters');
     process.exit(1);
   }
 

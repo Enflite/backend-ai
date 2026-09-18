@@ -20,6 +20,7 @@ import { chatRoutes } from './chat/routes.js';
 import { documentRoutes } from './documents/routes.js';
 import { toolRoutes } from './tools/routes.js';
 import { recoverIngestionJobs } from './documents/queue.js';
+import { pool, query } from './db/pool.js';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const fastify = Fastify({
@@ -129,7 +130,41 @@ export async function buildServer(): Promise<FastifyInstance> {
 const __filename = fileURLToPath(import.meta.url);
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename)) {
   const server = await buildServer();
+  // Graceful shutdown: stop accepting connections, let in-flight requests
+  // (including SSE streams and ingestion callbacks) finish, then drain the DB
+  // pool. SIGKILL remains the last resort via container orchestration.
+  let shuttingDown = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`Received ${signal}; shutting down gracefully...`);
+    try {
+      await server.close();
+    } catch (error) {
+      server.log.error({ err: error }, 'Error during server close');
+    }
+    await pool.end().catch((error) => server.log.error({ err: error }, 'Error draining database pool'));
+    process.exit(0);
+  };
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  process.once('SIGINT', () => void shutdown('SIGINT'));
   try {
+    if (config.NODE_ENV === 'production') {
+      // Defense in depth: PostgreSQL superusers and BYPASSRLS roles bypass
+      // row-level security entirely, which would silently disable the
+      // tenant-isolation policies. Refuse to serve production on such a role.
+      const role = (
+        await query<{ rolsuper: boolean; rolbypassrl: boolean }>(
+          'SELECT rolsuper, rolbypassrl FROM pg_roles WHERE rolname = current_user'
+        )
+      ).rows[0];
+      if (!role || role.rolsuper || role.rolbypassrl) {
+        console.error(
+          'Configuration error: production DATABASE_URL must use a non-superuser role without BYPASSRLS, otherwise RLS tenant isolation is bypassed'
+        );
+        process.exit(1);
+      }
+    }
     await server.listen({ port: config.PORT, host: '0.0.0.0' });
     await recoverIngestionJobs();
     console.log(`Server listening on 0.0.0.0:${config.PORT}`);

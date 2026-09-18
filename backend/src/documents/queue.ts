@@ -86,6 +86,22 @@ export async function recoverIngestionJobs(): Promise<void> {
     // A crashed PROCESSING job is safe to retry: chunks are replaced before READY.
     await tenantQuery(tenant.id,
       "UPDATE document_ingestion_jobs SET status = 'PENDING', locked_at = NULL, updated_at = NOW() WHERE status = 'PROCESSING' AND locked_at < NOW() - INTERVAL '5 minutes'");
+    // Heal documents stuck in PENDING/PROCESSING without an active job row
+    // (e.g. the /retry route reset the status but the enqueue INSERT failed).
+    // enqueueIngestion is idempotent per document, so re-enqueueing is safe.
+    const orphaned = await tenantQuery<{ id: string; owner_id: string }>(tenant.id,
+      `SELECT d.id, d.owner_id FROM documents d
+       LEFT JOIN document_ingestion_jobs j
+         ON j.document_id = d.id AND j.status IN ('PENDING', 'PROCESSING')
+       WHERE d.tenant_id = $1 AND d.deleted_at IS NULL
+         AND d.status IN ('PENDING', 'PROCESSING')
+         AND d.classification <> 'UNKNOWN'
+         AND j.id IS NULL
+       LIMIT 20`,
+      [tenant.id]);
+    for (const document of orphaned.rows) {
+      await enqueueIngestion({ documentId: document.id, tenantId: tenant.id, requestedBy: document.owner_id });
+    }
     const pending = await tenantQuery<{ id: string; document_id: string; requested_by: string; request_id: string | null }>(tenant.id,
       "SELECT id, document_id, requested_by, request_id FROM document_ingestion_jobs WHERE status = 'PENDING' AND attempts < 3 ORDER BY created_at LIMIT 20");
     for (const job of pending.rows) {

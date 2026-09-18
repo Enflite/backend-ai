@@ -21,9 +21,8 @@ ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
-# Compiled dist/src/db/migrate.js resolves migrations relative to its own
-# directory (dist/src/db/migrations), so they must live there in the prod image.
-COPY src/db/migrations ./dist/src/db/migrations
+# npm run build copies src/db/migrations into dist/src/db/migrations, where the
+# compiled dist/src/db/migrate.js resolves them. No extra COPY needed.
 EXPOSE 8080
 USER node
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8080/health >/dev/null || exit 1

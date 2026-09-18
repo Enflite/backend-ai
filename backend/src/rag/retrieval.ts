@@ -52,6 +52,9 @@ export async function retrieveAuthorizedContext(
 ): Promise<RetrievalResult> {
   const topK = Math.min(Math.max(1, requestedTopK), config.RAG_TOP_K_MAX);
   const [embedding] = await internalEmbeddingProvider.embed([queryText], AbortSignal.timeout(30000));
+  if (!embedding || embedding.length !== internalEmbeddingProvider.dimensions || !embedding.every(Number.isFinite)) {
+    throw new Error('Embedding provider returned an invalid query vector');
+  }
   const allowed = CLASSIFICATIONS.filter(
     (classification) => classification !== 'UNKNOWN' && canAccessClassification(auth.clearance, classification)
   ) as Classification[];
@@ -109,9 +112,15 @@ export async function retrieveAuthorizedContext(
       text: row.content, score, citation };
   }).sort((a, b) => b.score - a.score).slice(0, topK);
 
+  // Optional similarity floor (RAG_SIMILARITY_THRESHOLD, default 0 = disabled).
+  // Applied after the hybrid rerank so low-relevance authorized chunks never
+  // reach model context even when topK slots are unfilled.
+  const threshold = config.RAG_SIMILARITY_THRESHOLD;
+  const qualified = threshold > 0 ? results.filter((result) => result.score >= threshold) : results;
+
   const included: AuthorizedChunk[] = [];
   let characters = 0;
-  for (const result of results) {
+  for (const result of qualified) {
     if (characters + result.text.length > config.MAX_RAG_CONTEXT_CHARACTERS) break;
     included.push(result);
     characters += result.text.length;

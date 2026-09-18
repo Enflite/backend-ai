@@ -6,8 +6,8 @@
 # For shared, staging, or production deployments, override every secret via the
 # environment or a secret manager (see backend/.env.example and
 # docs/deployment.md). Production must also set NODE_ENV=production,
-# COOKIE_SECURE=true, MALWARE_SCAN_REQUIRED=true, an explicit CORS_ORIGIN, and
-# a high-entropy JWT_SECRET (>= 32 chars).
+# COOKIE_SECURE=true, MALWARE_SCAN_MODE=http with MALWARE_SCANNER_ENDPOINT, an
+# explicit CORS_ORIGIN, and a high-entropy JWT_SECRET (>= 32 chars).
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -39,7 +39,7 @@ services:
       # Dev-only placeholder default. Override JWT_SECRET in any non-local
       # environment; the checked-in default must never be used beyond local dev.
       JWT_SECRET: ${JWT_SECRET:-dev-only-secret-do-not-use-in-production-min-32-chars}
-      JWT_EXPIRES_IN: 8h
+      JWT_EXPIRES_IN: 15m
       VLLM_BASE_URL: http://vllm:8000/v1
       VLLM_MODEL: meta-llama/Meta-Llama-3.1-8B-Instruct
       # Dev-only convenience. config.ts refuses to boot with DEV_AUTH_ENABLED=true
@@ -48,9 +48,9 @@ services:
       NODE_ENV: development
       PORT: 8080
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
-      OBJECT_STORAGE_BUCKET: enflite-ai-documents
-      OBJECT_STORAGE_ACCESS_KEY: dev-minio-user
-      OBJECT_STORAGE_SECRET_KEY: dev-minio-password-change-me
+      OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-enflite-ai-documents}
+      OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-dev-minio-user}
+      OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-dev-minio-password-change-me}
       MALWARE_SCAN_MODE: disabled-development
     ports:
       - "8080:8080"
@@ -62,8 +62,10 @@ services:
     image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: dev-minio-user
-      MINIO_ROOT_PASSWORD: dev-minio-password-change-me
+      # Dev-only placeholder defaults; override MINIO_ROOT_USER /
+      # MINIO_ROOT_PASSWORD in the environment for any non-local use.
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-dev-minio-user}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-dev-minio-password-change-me}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -83,8 +85,8 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
-        mc alias set local http://minio:9000 dev-minio-user dev-minio-password-change-me &&
-        mc mb --ignore-existing local/enflite-ai-documents
+        mc alias set local http://minio:9000 "${MINIO_ROOT_USER:-dev-minio-user}" "${MINIO_ROOT_PASSWORD:-dev-minio-password-change-me}" &&
+        mc mb --ignore-existing "local/${OBJECT_STORAGE_BUCKET:-enflite-ai-documents}"
 
   vllm:
     profiles:

@@ -1,0 +1,81 @@
+# Continuous integration: typecheck, tests, and builds for backend and frontend.
+#
+# What CI does NOT cover (documented, not silently skipped):
+# - PostgreSQL/pgvector integration: no database service is available in this
+#   environment, so migrations are validated statically only (ordering,
+#   append-only discipline, constraint/index name review). Apply migrations
+#   against a real PostgreSQL 16 + pgvector instance before deploying.
+# - External providers (vLLM, embeddings, malware scanner, S3 storage,
+#   SyteLine): unit tests mock these boundaries; real connectivity must be
+#   validated in a staging environment with the internal services.
+# - `npm audit` is intentionally non-blocking: the managed registry used here
+#   has denied the audit endpoint before (HTTP 403 policy_denied). Run
+#   `npm audit --omit=dev --audit-level=high` locally where the registry
+#   permits it.
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: backend
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: backend
+      - name: Tests
+        run: npm test
+        working-directory: backend
+      - name: Build
+        run: npm run build
+        working-directory: backend
+      - name: Verify compiled migrations resolve
+        run: |
+          test -f dist/src/db/migrate.js
+          ls dist/src/db/migrations/*.sql
+          node -e "const fs=require('fs');const f=fs.readdirSync('dist/src/db/migrations').filter(f=>f.endsWith('.sql')).sort();console.log('migrations:',f.join(', '));if(f.length<6)throw new Error('expected at least 6 migrations')"
+        working-directory: backend
+      - name: Audit (non-blocking; registry may deny)
+        run: npm audit --omit=dev --audit-level=high || echo "npm audit unavailable or found issues; see job log"
+        working-directory: backend
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - name: Typecheck
+        run: pnpm typecheck
+        working-directory: frontend
+      - name: Build
+        run: pnpm build
+        working-directory: frontend
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose file syntax
+        run: docker compose config --quiet

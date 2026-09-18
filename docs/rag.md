@@ -21,3 +21,9 @@ Chat remains routed through the AI Gateway. Retrieved text is escaped and placed
 Object storage, embeddings, and malware scanning are infrastructure dependencies; production has no fake fallback. Compose supplies private MinIO for development. It does not supply an embedding model, GPU inference, or scanner. Unit tests use deterministic test boundaries and do not claim external inference or scanning succeeded.
 
 The in-process worker is suitable for a single API replica. Before horizontally scaling, use the durable job table with a dedicated worker deployment and database-backed concurrency leases.
+
+## Relevance and safety gates
+
+Retrieval blends cosine similarity (85%) with a lexical overlap score (15%) and reranks only already-authorized candidates. `RAG_SIMILARITY_THRESHOLD` (default `0`, disabled) applies a floor to the blended score after reranking: chunks below the threshold are excluded from model context and citations, so weak matches cannot fill `topK` slots.
+
+Both the query embedding and stored chunk vectors are validated as finite numbers with the expected dimensions before use; a provider returning `NaN`, infinities, or wrong-dimension vectors fails the request instead of poisoning the index or the query.

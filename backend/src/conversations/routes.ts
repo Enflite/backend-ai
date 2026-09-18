@@ -5,6 +5,7 @@ import { Errors } from '../errors.js';
 import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
 import { CLASSIFICATIONS } from '../authz/permissions.js';
+import { assertClassificationAllowed } from '../authz/classification.js';
 import { recordAudit } from '../audit/audit.js';
 import { getApprovedModelForUser, listApprovedModelsForUser } from '../ai/gateway/modelRegistry.js';
 
@@ -32,6 +33,7 @@ export async function conversationRoutes(fastify: FastifyInstance): Promise<void
     const auth = req.auth!;
     const body = createSchema.safeParse(req.body ?? {});
     if (!body.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid conversation parameters');
+    assertClassificationAllowed(auth.clearance, body.data.classification);
     const modelId = body.data.modelId ?? (await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId))[0]?.id;
     if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
     const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
@@ -75,7 +77,7 @@ export async function conversationRoutes(fastify: FastifyInstance): Promise<void
     return reply.send({ messages: result.rows });
   });
 
-  fastify.patch('/conversations/:id', { preHandler: [requireAuth, requirePermission('conversation:read')] }, async (req, reply) => {
+  fastify.patch('/conversations/:id', { preHandler: [requireAuth, requirePermission('conversation:update')] }, async (req, reply) => {
     const auth = req.auth!;
     const params = idSchema.safeParse(req.params);
     const body = updateSchema.safeParse(req.body);

@@ -4,6 +4,8 @@ import { z } from 'zod';
 import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
 import { CLASSIFICATIONS, Classification, canAccessClassification } from '../authz/permissions.js';
+import { assertClassificationAllowed } from '../authz/classification.js';
+import { resolveUploadClassification } from './uploadClassification.js';
 import { tenantQuery } from '../db/pool.js';
 import { Errors } from '../errors.js';
 import { recordAudit } from '../audit/audit.js';
@@ -44,16 +46,11 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
     const requestedClassification = part.fields.classification && 'value' in part.fields.classification
       ? String(part.fields.classification.value)
       : undefined;
-    let classification: Classification = auth.clearance === 'PUBLIC' ? 'PUBLIC' : 'INTERNAL';
-    if (auth.permissions.includes('document:classify') && requestedClassification) {
-      if (!CLASSIFICATIONS.includes(requestedClassification as Classification) || requestedClassification === 'UNKNOWN') {
-        throw Errors.badRequest('INVALID_CLASSIFICATION', 'Invalid data classification');
-      }
-      classification = requestedClassification as Classification;
-    }
-    if (classification !== 'UNKNOWN' && !canAccessClassification(auth.clearance, classification)) {
-      throw Errors.forbidden('CLASSIFICATION_DENIED', 'Cannot upload above your clearance');
-    }
+    const classification = resolveUploadClassification(
+      auth.clearance,
+      requestedClassification,
+      auth.permissions.includes('document:classify')
+    );
     const checksum = createHash('sha256').update(bytes).digest('hex');
     const id = randomUUID();
     const objectKey = `${auth.tenantId}/${id}`;
@@ -155,9 +152,7 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
     const parsedId = idSchema.safeParse(req.params);
     const parsedBody = classificationSchema.safeParse(req.body);
     if (!parsedId.success || !parsedBody.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid classification request');
-    if (!canAccessClassification(auth.clearance, parsedBody.data.classification)) {
-      throw Errors.forbidden('CLASSIFICATION_DENIED', 'Cannot classify above your clearance');
-    }
+    assertClassificationAllowed(auth.clearance, parsedBody.data.classification);
     const updated = await tenantQuery(auth.tenantId,
       `UPDATE documents SET classification = $3, status = 'PENDING', error_code = NULL, updated_at = NOW()
        WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL AND status NOT IN ('PENDING', 'PROCESSING')

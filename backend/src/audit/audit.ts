@@ -50,10 +50,11 @@ const MAX_REASON_LENGTH = 500;
 // Upstream error messages can embed internal hostnames, URLs, or fragments of
 // request data. Audit reasons are stored, not shown to end users, but keep them
 // bounded and free of credential-shaped material anyway.
-function sanitizeReason(reason?: string | null): string | null {
+export function sanitizeReason(reason?: string | null): string | null {
   if (reason == null) return null;
   return reason
-    .replace(/(bearer|token|api[_-]?key|secret|password)\s*[:=]\s*\S+/gi, '$1=[REDACTED]')
+    .replace(/\bbearer\s+\S+/gi, 'Bearer=[REDACTED]')
+    .replace(/(token|api[_-]?key|secret|password)\s*[:=]\s*\S+/gi, '$1=[REDACTED]')
     .replace(/:\/\/[^/\s:]+:[^/\s@]+@/g, '://[REDACTED]@')
     .slice(0, MAX_REASON_LENGTH);
 }
