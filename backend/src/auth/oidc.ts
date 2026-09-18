@@ -34,7 +34,7 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from 'jose';
-import { config } from '../config.js';
+import { config, isAllowedOidcUrl } from '../config.js';
 import { query } from '../db/pool.js';
 import { Errors } from '../errors.js';
 
@@ -141,6 +141,20 @@ export async function discoverIssuer(): Promise<OidcDiscovery> {
     userinfo_endpoint: doc.userinfo_endpoint,
     jwks_uri: doc.jwks_uri,
   };
+  // Transport security: the IdP's endpoints must be HTTPS (plain HTTP only
+  // for loopback development IdPs). A network attacker that can tamper with
+  // the discovery document could otherwise downgrade the whole flow.
+  const endpoints: Array<[name: string, endpoint: string | undefined]> = [
+    ['authorization_endpoint', discovered.authorization_endpoint],
+    ['token_endpoint', discovered.token_endpoint],
+    ['jwks_uri', discovered.jwks_uri],
+    ['userinfo_endpoint', discovered.userinfo_endpoint],
+  ];
+  for (const [name, endpoint] of endpoints) {
+    if (endpoint !== undefined && !isAllowedOidcUrl(endpoint)) {
+      throw Errors.internal(`OIDC discovery endpoint ${name} must use HTTPS`, undefined, 'OIDC_INSECURE_ENDPOINT');
+    }
+  }
   discoveryCache = { fetchedAt: Date.now(), doc: discovered };
   return discovered;
 }
@@ -268,14 +282,29 @@ export async function verifyIdToken(idToken: string, expectedNonce?: string): Pr
   oidcEnabledOrThrow();
   const discovery = await discoverIssuer();
   const keySet = await getJwksKeySet(discovery.jwks_uri);
+  const verifyOptions = {
+    issuer: discovery.issuer,
+    audience: config.OIDC_CLIENT_ID!,
+  };
   let payload;
   try {
-    ({ payload } = await jwtVerify(idToken, keySet, {
-      issuer: discovery.issuer,
-      audience: config.OIDC_CLIENT_ID!,
-    }));
-  } catch {
-    throw Errors.unauthorized('OIDC_INVALID_ID_TOKEN', 'Identity token verification failed');
+    ({ payload } = await jwtVerify(idToken, keySet, verifyOptions));
+  } catch (error) {
+    // The cached JWKS no longer contains the signing key (key rotation at
+    // the IdP): drop the cache and retry verification EXACTLY ONCE against
+    // a freshly fetched key set. The retry never refreshes again, so there
+    // is no refresh loop — a second failure fails closed.
+    if ((error as { code?: unknown })?.code === 'ERR_JWKS_NO_MATCHING_KEY') {
+      jwksCache = null;
+      const refreshedKeySet = await getJwksKeySet(discovery.jwks_uri);
+      try {
+        ({ payload } = await jwtVerify(idToken, refreshedKeySet, verifyOptions));
+      } catch {
+        throw Errors.unauthorized('OIDC_INVALID_ID_TOKEN', 'Identity token verification failed');
+      }
+    } else {
+      throw Errors.unauthorized('OIDC_INVALID_ID_TOKEN', 'Identity token verification failed');
+    }
   }
   if (typeof payload.sub !== 'string' || payload.sub.length === 0) {
     throw Errors.unauthorized('OIDC_INVALID_ID_TOKEN', 'Identity token has no subject');
@@ -329,7 +358,10 @@ export async function fetchUserinfo(accessToken: string): Promise<Partial<OidcCl
 export function parseRoleMapping(): Record<string, string> {
   try {
     const parsed: unknown = JSON.parse(config.OIDC_ROLE_MAPPING);
-    if (typeof parsed === 'object' && parsed !== null) {
+    // Arrays are typeof 'object' but are not a group->role mapping; reject
+    // them defensively here too (with OIDC enabled the boot check in
+    // config.ts already refuses to start).
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
       const mapping: Record<string, string> = {};
       for (const [group, role] of Object.entries(parsed)) {
         if (typeof group === 'string' && typeof role === 'string') mapping[group] = role;

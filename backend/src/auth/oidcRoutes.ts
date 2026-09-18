@@ -31,6 +31,17 @@ import {
 
 const OIDC_RATE_LIMIT = { max: 10, timeWindow: '1 minute' } as const;
 
+/**
+ * Short-lived browser-binding cookie for the OIDC login flow. The login
+ * endpoint sets it to the state it just generated; the callback requires
+ * the state's query parameter to match it (CSRF protection: the flow is
+ * bound to the browser that initiated it, not just to whoever presents a
+ * state value). Single-use: cleared on callback arrival.
+ */
+export const OIDC_STATE_COOKIE = 'oidc_state';
+const OIDC_STATE_COOKIE_PATH = '/api/v1/auth/oidc/callback';
+const OIDC_STATE_COOKIE_MAX_AGE_SECONDS = 10 * 60;
+
 function frontendRedirect(reply: FastifyReply, fragment: string): void {
   const url = `${config.OIDC_FRONTEND_CALLBACK}#${fragment}`;
   reply.redirect(url, 302);
@@ -112,6 +123,14 @@ async function findOrProvisionUserId(issuer: string, claims: OidcClaims): Promis
     // constraint on (issuer, subject) still prevents a duplicate
     // identity: roll back and re-read the winner.
     if (isUniqueViolation(error)) {
+      // A users.email unique conflict means a *different* IdP identity is
+      // trying to provision with an email another account already owns.
+      // Identity is the (issuer, subject) pair — email is provisioning data
+      // and must never merge identities — so this fails closed rather than
+      // attaching to the existing account.
+      if ((error as { constraint?: unknown }).constraint === 'users_email_key') {
+        throw Errors.conflict('OIDC_EMAIL_CONFLICT', 'Email is already associated with a different account');
+      }
       const winner = (
         await query<{ user_id: string }>('SELECT user_id FROM oidc_identities WHERE issuer = $1 AND subject = $2', [
           issuer,
@@ -155,7 +174,16 @@ export async function oidcRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get('/auth/oidc/login', { config: { rateLimit: OIDC_RATE_LIMIT } }, async (request: FastifyRequest, reply: FastifyReply) => {
     if (!config.OIDC_ENABLED) throw Errors.notFound('OIDC_DISABLED', 'Enterprise SSO is not enabled');
     try {
-      const { url } = await buildAuthorizeUrl();
+      const { url, state } = await buildAuthorizeUrl();
+      // Bind the flow to this browser: the callback must present the same
+      // state in its query string as this HttpOnly cookie carries.
+      reply.setCookie(OIDC_STATE_COOKIE, state, {
+        httpOnly: true,
+        secure: config.COOKIE_SECURE,
+        sameSite: 'lax',
+        path: OIDC_STATE_COOKIE_PATH,
+        maxAge: OIDC_STATE_COOKIE_MAX_AGE_SECONDS,
+      });
       await recordAudit({
         action: 'OIDC_LOGIN_START',
         classification: 'INTERNAL',
@@ -197,6 +225,13 @@ export async function oidcRoutes(fastify: FastifyInstance): Promise<void> {
     if (typeof code !== 'string' || typeof state !== 'string' || !code || !state) {
       return fail('invalid_callback');
     }
+    // The callback must come from the browser that started the flow: the
+    // state query parameter has to match the HttpOnly cookie set at login
+    // time (CSRF protection). The cookie is single-use and cleared here —
+    // a replayed callback no longer has a matching cookie.
+    const cookieState = request.cookies?.[OIDC_STATE_COOKIE];
+    reply.clearCookie(OIDC_STATE_COOKIE, { path: OIDC_STATE_COOKIE_PATH });
+    if (cookieState !== state) return fail('invalid_state');
     // Single-use, expiry-checked state lookup. A replayed or forged state
     // simply finds no row.
     const consumed = await consumeOidcState(state);
@@ -246,9 +281,12 @@ export async function oidcRoutes(fastify: FastifyInstance): Promise<void> {
       // Browser-facing failures always redirect to the frontend with a
       // generic, audited error code: the callback is a navigation endpoint,
       // so a JSON error page would strand the user. Internal error codes
-      // never reach the URL fragment.
+      // never reach the URL fragment — they are recorded in the audit
+      // metadata for operators only.
       if (error instanceof AppError) {
-        return fail(error.code === 'ACCOUNT_DISABLED' ? 'account_disabled' : 'login_failed');
+        return fail(error.code === 'ACCOUNT_DISABLED' ? 'account_disabled' : 'login_failed', {
+          internalCode: error.code,
+        });
       }
       return fail('login_failed');
     }

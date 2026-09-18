@@ -1,6 +1,7 @@
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
@@ -13,6 +14,13 @@ export interface ObjectStorage {
   get(key: string): Promise<Uint8Array>;
   delete(key: string): Promise<void>;
   exists(key: string): Promise<boolean>;
+  /**
+   * Bucket-level reachability probe for readiness. HeadBucket (not
+   * HeadObject): a 404 means the bucket itself is missing, which a key
+   * probe could not distinguish from a missing key. Any error rejects —
+   * a missing bucket and wrong credentials are both "storage unusable".
+   */
+  probeBucket(signal?: AbortSignal): Promise<void>;
 }
 
 function client(): S3Client {
@@ -50,5 +58,8 @@ export const s3Storage: ObjectStorage = {
       if (error?.$metadata?.httpStatusCode === 404 || error?.name === 'NotFound') return false;
       throw error;
     }
+  },
+  async probeBucket(signal?: AbortSignal) {
+    await client().send(new HeadBucketCommand({ Bucket: config.OBJECT_STORAGE_BUCKET }), { abortSignal: signal });
   },
 };

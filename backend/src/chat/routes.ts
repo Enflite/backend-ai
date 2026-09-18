@@ -318,348 +318,356 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
     const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
 
-    if (!conversationId) {
-      conversationId = (
-        await tenantQuery<{ id: string }>(
-          auth.tenantId,
-          `INSERT INTO conversations (tenant_id, user_id, title, model, model_id, classification)
-           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-          [auth.tenantId, auth.userId, parsed.data.content.slice(0, 80), model.name, modelId, classification]
-        )
-      ).rows[0]!.id;
-    }
-
-    const history = (
-      await tenantQuery<{ role: 'user' | 'assistant' | 'system'; content: string }>(
-        auth.tenantId,
-        `SELECT role, content FROM messages WHERE conversation_id = $1 AND tenant_id = $2
-         AND role IN ('user','assistant','system') ORDER BY created_at DESC LIMIT 50`,
-        [conversationId, auth.tenantId]
-      )
-    ).rows.reverse();
-    await tenantQuery(
-      auth.tenantId,
-      `INSERT INTO messages (conversation_id, tenant_id, role, content, model, model_id) VALUES ($1,$2,'user',$3,$4,$5)`,
-      [conversationId, auth.tenantId, parsed.data.content, model.name, modelId]
-    );
-    history.push({ role: 'user', content: parsed.data.content });
-
-    let citations: Awaited<ReturnType<typeof retrieveAuthorizedContext>>['citations'] = [];
-    if (parsed.data.documentIds?.length) {
-      const retrievalStart = Date.now();
-      let retrieval: Awaited<ReturnType<typeof retrieveAuthorizedContext>>;
-      try {
-        retrieval = await retrieveAuthorizedContext(auth, parsed.data.content, parsed.data.documentIds);
-      } catch (error) {
-        recordRetrieval('error', (Date.now() - retrievalStart) / 1000);
-        throw error;
-      }
-      recordRetrieval(retrieval.context ? 'hit' : 'empty', (Date.now() - retrievalStart) / 1000);
-      citations = retrieval.citations;
-      if (retrieval.context) {
-        history.pop();
-        // Zone 3 of the system prompt: labeled, delimited, untrusted data.
-        history.push({ role: 'user', content: wrapRetrievedContext(retrieval.context) });
-        history.push({ role: 'user', content: parsed.data.content });
-      } else {
-        // Retrieval was requested but returned nothing: instruct the model to
-        // answer honestly ("I don't know from the available sources") rather
-        // than hallucinate document contents.
-        history.push({ role: 'user', content: buildNoEvidenceNotice() });
-      }
-      await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, action: 'RAG_RETRIEVAL', resource: 'documents', classification, metadata: { resultCount: citations.length } });
-    }
-
-    // Phase 6 coding workflows: caller-supplied repo files are assembled
-    // into a path-labeled, budget-capped block (zone 3b, untrusted data) so
-    // "explain this code" answers stay grounded in real file contents. The
-    // block is inserted before the current user turn, like RAG context.
-    const codeFileInputs = parsed.data.codeFiles ? normalizeCodeFiles(parsed.data.codeFiles) : [];
-    let codeFilesIncluded: string[] = [];
-    let codeFilesDropped: Array<{ path: string; reason: string }> = [];
-    if (codeFileInputs.length > 0) {
-      const assembled = assembleCodeContext(codeFileInputs);
-      codeFilesIncluded = assembled.filesIncluded;
-      codeFilesDropped = assembled.dropped;
-      if (assembled.context) {
-        const userTurn = history.pop()!;
-        history.push({ role: 'user', content: assembled.context });
-        history.push(userTurn);
-      }
-    }
-
-    // The charter-encoded system prompt for this turn: behavioral spec (§2),
-    // labeled content zones, and tenant-safe model metadata (name/version
-    // only — never secrets). The gateway pins it at index 0 of every
-    // provider call and re-adds it after each truncation round, so it is
-    // never dropped no matter how long the history grows.
-    const sytelineToolsAvailable = providerTools.some((tool) => tool.function.name.startsWith('syteline.'));
-    // Coding turns get the CODING WORK section: ground claims in shown files,
-    // never invent paths or APIs, deliver changes as unified diffs.
-    const codingMode = requestedCapability === 'coding' || codeFileInputs.length > 0;
-    const buildTurnSystemPrompt = (modelName: string, modelVersion?: string) =>
-      buildSystemPrompt({
-        modelName,
-        modelVersion,
-        toolsAvailable: providerTools.length > 0,
-        sytelineToolsAvailable,
-        codingMode,
-      });
-    const chatSystemPrompt = buildTurnSystemPrompt(model.name, model.version);
-
-    // Context-window management: sliding window that always keeps the system
-    // prompt and the most recent turns. The drop count is surfaced in `meta`
-    // so truncation is never silent.
-    const windowed = applyContextWindow(history, model.context_window, undefined, chatSystemPrompt);
-    if (windowed.dropped > 0) {
-      req.log.info({ requestId: req.requestId, conversationId, dropped: windowed.dropped }, 'context window truncated oldest messages');
-    }
-
-    // Concurrency cap (gateway fairness): acquire one slot before the stream
-    // starts and hold it for the whole SSE response, released in the finally
-    // below on normal close, error, client abort, or server shutdown. The
-    // check happens BEFORE reply.hijack() so an over-capacity request gets a
-    // normal JSON 429 instead of a half-hijacked stream. Nothing between the
-    // acquire and the try block below early-returns; everything that can
-    // throw or await (DB, gateway, tool calls) lives inside it, so the slot
-    // cannot leak.
+    // Concurrency cap (gateway fairness): acquire one slot BEFORE any
+    // persistent or expensive work (conversation creation, user-message
+    // insert, retrieval, code-context assembly) so an over-capacity request
+    // fails fast with a 429 instead of doing the work first and discovering
+    // there is no capacity. The slot is held for the whole SSE stream and
+    // released by the finally below on normal close, error, client abort, or
+    // server shutdown — and by the stream's own try/finally once streaming
+    // starts. The check happens BEFORE reply.hijack() so an over-capacity
+    // request gets a normal JSON 429 instead of a half-hijacked stream.
+    // Everything after this point that can throw lives inside the try, so
+    // the slot cannot leak (release is idempotent, so the inner finally's
+    // release is a safe no-op when it also fires).
     const concurrencySlot = chatConcurrency.tryAcquire(auth.tenantId, auth.userId);
     if (!concurrencySlot.ok) {
       recordChatTurn(model.name, 'rate_limited', (Date.now() - turnStart) / 1000);
       return replyBusy(reply, concurrencySlot.retryAfterSeconds);
     }
-
-    // Take over the raw response for SSE. hijack() is required: without it
-    // Fastify would attempt to serialize the handler's return value after the
-    // raw writes, corrupting the stream.
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-store, no-transform',
-      Connection: 'keep-alive',
-      'x-request-id': req.requestId,
-    });
-    const abortController = new AbortController();
-    // Set when the socket closes before we finished the response: the client
-    // went away mid-stream, so the partial turn must persist as interrupted —
-    // never as a clean completion.
-    let clientDisconnected = false;
-    // Set once the terminal `done` frame was accepted: a socket close after
-    // that is a normal post-response close, not a mid-stream disconnect.
-    let doneDelivered = false;
-    const onSocketClose = () => {
-      // The socket also closes after a normal response; only a close before
-      // the response finished means the client disconnected mid-stream.
-      if (!reply.raw.writableEnded && !doneDelivered) {
-        clientDisconnected = true;
-        abortController.abort();
-      }
-    };
-    req.raw.socket.once('close', onSocketClose);
-    // Register the hijacked response so shutdown can end it explicitly.
-    const activeStream: ActiveSseStream = {
-      end: () => {
-        if (!reply.raw.writableEnded) reply.raw.end();
-      },
-      abort: () => abortController.abort(),
-    };
-    activeSseStreams.add(activeStream);
-    const sse = createSseSender(reply.raw as unknown as SseRawSocket, {
-      abortSignal: abortController.signal,
-    });
-    /**
-     * Backpressure-aware frame send. Resolves false when the client is gone
-     * or too slow: the caller must stop producing events. The provider
-     * request is aborted too — there is nobody left to read the answer, and
-     * the partial turn must not persist as a completed message.
-     */
-    const send = async (event: string, data: unknown): Promise<boolean> => {
-      const ok = await sse.send(event, data);
-      if (!ok) {
-        if (sse.backpressureAborted) {
-          req.log.warn(
-            { requestId: req.requestId, conversationId, pendingBytes: sse.pendingBytes() },
-            'SSE consumer too slow; aborting provider stream'
-          );
-        }
-        abortController.abort();
-      }
-      return ok;
-    };
-    // Heartbeats keep intermediaries from closing idle streams during long
-    // provider pauses; SSE comments are ignored by EventSource clients.
-    // Guarded and self-clearing: a destroyed socket must not raise from the
-    // timer or leak the interval.
-    const heartbeat = setInterval(() => {
-      if (reply.raw.writableEnded || reply.raw.destroyed) {
-        clearInterval(heartbeat);
-        return;
-      }
-      sse.ping();
-      if (sse.backpressureAborted) {
-        // The client never drains, not even heartbeats: treat it as gone.
-        clearInterval(heartbeat);
-        req.log.warn({ requestId: req.requestId, conversationId }, 'SSE consumer stalled; aborting provider stream');
-        abortController.abort();
-      }
-    }, HEARTBEAT_INTERVAL_MS);
-    if (!(await send('meta', {
-      conversationId,
-      model: { id: model.id, name: model.name },
-      citations,
-      contextDropped: windowed.dropped,
-      // Telemetry for operators: which capability served and whether the
-      // chat default covered for a missing capability model. Not user-facing.
-      capability: capabilityResolution
-        ? { requested: capabilityResolution.requested, resolved: capabilityResolution.resolved, fallbackUsed: capabilityResolution.fallbackUsed }
-        : undefined,
-      codeFiles: codeFileInputs.length > 0 ? { included: codeFilesIncluded, dropped: codeFilesDropped } : undefined,
-    }))) {
-      // Nobody is listening; skip straight to persistence/cleanup.
-      abortController.abort();
-    }
-
-    const telemetry: GatewayTelemetry = {};
-    // DLP outbound boundary (Phase 5c): every assistant text chunk passes
-    // through the stream guard before reaching the client or the persisted
-    // transcript. The loop tallies detections for the turn-end audit; matched
-    // text is never persisted or logged.
-    const dlpGuard = config.DLP_ENABLED ? new DlpStreamGuard(!!config.DLP_EXTERNAL_ENDPOINT) : null;
-
-    const sink: AgenticLoopSink = {
-      text: (delta) => send('delta', { content: delta }),
-      // Brief plan narration before each tool round (Phase 6 loop contract).
-      plan: (planText, toolNames) => send('notice', { code: 'TOOL_PLAN', message: planText, tools: toolNames }),
-      toolCalls: (calls) =>
-        send('notice', {
-          code: 'TOOL_CALLS',
-          message: `Running ${calls.length} tool call${calls.length === 1 ? '' : 's'}…`,
-          tools: calls.map((call) => call.name),
-        }),
-      failover: (modelName, failoverModelId) =>
-        send('notice', {
-          code: 'MODEL_FAILOVER',
-          message: `Primary model unavailable; continued with ${modelName}`,
-          model: { id: failoverModelId, name: modelName },
-        }),
-      done: async (payload) => {
-        doneDelivered = await send('done', { ...payload, citations });
-        return doneDelivered;
-      },
-      error: async (code, message) => {
-        await send('error', { code, message, requestId: req.requestId });
-      },
-    };
-
-    // The generalized agentic loop (Phase 6): bounded tool rounds with
-    // per-step audit, dependent chaining, brief plan narration, and an
-    // approval gate that keeps destructive tools out of auto-execution.
-    // Everything that can throw or await lives inside the try below, so the
-    // concurrency slot acquired above cannot leak.
-    // Both the try and the catch assign loopResult before the finally runs.
-    let loopResult!: Awaited<ReturnType<typeof runAgenticLoop>>;
     try {
-      loopResult = await runAgenticLoop({
-        tenantId: auth.tenantId,
-        userId: auth.userId,
-        roleId: auth.roleId,
-        requestId: req.requestId,
-        classification,
-        auth,
-        initialModel: { id: modelId, name: model.name, contextWindow: model.context_window, version: model.version },
-        buildSystemPrompt: buildTurnSystemPrompt,
-        providerTools,
-        messages: windowed.messages,
-        signal: abortController.signal,
-        telemetry,
-        maxIterations: config.AI_MAX_TOOL_ITERATIONS,
-        maxResponseChars: config.AI_MAX_RESPONSE_CHARS,
-        dlpGuard,
-        sink,
-        capabilityResolved: capabilityResolution?.resolved,
-        capabilityFallbackUsed: capabilityResolution?.fallbackUsed,
-      });
-    } catch (error) {
-      // The loop surfaces stream errors through the sink; a throw here is a
-      // defect in the loop machinery itself — log it, mark the turn failed,
-      // and tell the client honestly instead of hanging the stream.
-      req.log.error({ err: error }, 'agentic loop threw unexpectedly');
-      await send('error', { code: 'STREAM_ERROR', message: 'Model request failed', requestId: req.requestId });
-      loopResult = {
-        content: '',
-        finishReason: 'error',
-        toolIterations: 0,
-        truncatedByCap: false,
-        servingModel: { id: modelId, name: model.name },
-        interrupted: false,
-        failed: true,
-        aborted: abortController.signal.aborted,
-        completed: false,
-        dlpDetections: [],
-      };
-    } finally {
-      // Release the concurrency slot first: the stream is over (normal close,
-      // error, abort, or shutdown), so the next waiting request may proceed.
-      concurrencySlot.release();
-      clearInterval(heartbeat);
-      // The response uses Connection: keep-alive, so the socket can serve
-      // later requests: remove the per-request listener or each request leaks
-      // a closure retaining reply, the abort controller, and request flags.
-      req.raw.socket.off('close', onSocketClose);
-      activeSseStreams.delete(activeStream);
-      // The loop reports the model that actually served the turn: after a
-      // mid-turn failover the transcript names the fallback model, not the
-      // failed primary.
-      const servingModelId = loopResult.servingModel.id;
-      const servingModelName = loopResult.servingModel.name;
-      const content = loopResult.content;
-      // Set when the stream errored after partial output was produced: the
-      // persisted message gets stream_interrupted metadata so a truncated
-      // reply is never mistaken for a finished one.
-      const streamInterrupted = loopResult.interrupted;
-      // Set when the loop's run threw: the turn outcome for metrics is
-      // 'error' even when no partial content was produced.
-      const turnFailed = loopResult.failed;
-      const dlpDetections = loopResult.dlpDetections;
-      // Domain RED metric for the turn: outcome reflects what the user
-      // experienced (completed / error / aborted by disconnect).
-      recordChatTurn(
-        servingModelName,
-        clientDisconnected ? 'aborted' : turnFailed || streamInterrupted ? 'error' : 'completed',
-        (Date.now() - turnStart) / 1000,
-        telemetry.timeToFirstTokenMs !== undefined ? telemetry.timeToFirstTokenMs / 1000 : undefined
-      );
-      if (content) {
-        // Stream status travels in metadata, never in the message text: a
-        // reconnecting client reading history can distinguish a completed
-        // answer from one cut short by a provider error, a client
-        // disconnect, or a stalled consumer. (A deliberate length-cap cut
-        // still counts as completed: the terminal `done` frame told the live
-        // client why via finishReason.)
-        const interrupted = !doneDelivered && (streamInterrupted || clientDisconnected || sse.backpressureAborted);
-        await tenantQuery(
+      if (!conversationId) {
+        conversationId = (
+          await tenantQuery<{ id: string }>(
+            auth.tenantId,
+            `INSERT INTO conversations (tenant_id, user_id, title, model, model_id, classification)
+           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+            [auth.tenantId, auth.userId, parsed.data.content.slice(0, 80), model.name, modelId, classification]
+          )
+        ).rows[0]!.id;
+      }
+
+      const history = (
+        await tenantQuery<{ role: 'user' | 'assistant' | 'system'; content: string }>(
           auth.tenantId,
-          `INSERT INTO messages (conversation_id, tenant_id, role, content, model, model_id, citations, metadata)
-           VALUES ($1,$2,'assistant',$3,$4,$5,$6,$7)`,
-          [conversationId, auth.tenantId, content, servingModelName, servingModelId, JSON.stringify(citations), JSON.stringify(streamMetadata(interrupted ? 'interrupted' : 'completed'))]
-        ).catch((error) => req.log.error({ err: error }, 'Failed to persist assistant message'));
-        await tenantQuery(auth.tenantId, 'UPDATE conversations SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2', [conversationId, auth.tenantId]);
-        if (dlpDetections.length > 0) {
-          // DLP audit: kinds and counts only — matched text is never logged.
-          const counts: Record<string, number> = {};
-          for (const kind of dlpDetections) counts[kind] = (counts[kind] ?? 0) + 1;
-          await recordAudit({
-            action: 'DLP_DETECTION',
-            classification: 'INTERNAL',
-            tenantId: auth.tenantId,
-            userId: auth.userId,
-            requestId: req.requestId,
-            success: true,
-            metadata: { counts, redactedSpans: dlpDetections.length },
-          }).catch((error) => req.log.error({ err: error }, 'Failed to audit DLP detection'));
+          `SELECT role, content FROM messages WHERE conversation_id = $1 AND tenant_id = $2
+         AND role IN ('user','assistant','system') ORDER BY created_at DESC LIMIT 50`,
+          [conversationId, auth.tenantId]
+        )
+      ).rows.reverse();
+      await tenantQuery(
+        auth.tenantId,
+        `INSERT INTO messages (conversation_id, tenant_id, role, content, model, model_id) VALUES ($1,$2,'user',$3,$4,$5)`,
+        [conversationId, auth.tenantId, parsed.data.content, model.name, modelId]
+      );
+      history.push({ role: 'user', content: parsed.data.content });
+
+      let citations: Awaited<ReturnType<typeof retrieveAuthorizedContext>>['citations'] = [];
+      if (parsed.data.documentIds?.length) {
+        const retrievalStart = Date.now();
+        let retrieval: Awaited<ReturnType<typeof retrieveAuthorizedContext>>;
+        try {
+          retrieval = await retrieveAuthorizedContext(auth, parsed.data.content, parsed.data.documentIds);
+        } catch (error) {
+          recordRetrieval('error', (Date.now() - retrievalStart) / 1000);
+          throw error;
+        }
+        recordRetrieval(retrieval.context ? 'hit' : 'empty', (Date.now() - retrievalStart) / 1000);
+        citations = retrieval.citations;
+        if (retrieval.context) {
+          history.pop();
+          // Zone 3 of the system prompt: labeled, delimited, untrusted data.
+          history.push({ role: 'user', content: wrapRetrievedContext(retrieval.context) });
+          history.push({ role: 'user', content: parsed.data.content });
+        } else {
+          // Retrieval was requested but returned nothing: instruct the model to
+          // answer honestly ("I don't know from the available sources") rather
+          // than hallucinate document contents.
+          history.push({ role: 'user', content: buildNoEvidenceNotice() });
+        }
+        await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, action: 'RAG_RETRIEVAL', resource: 'documents', classification, metadata: { resultCount: citations.length } });
+      }
+
+      // Phase 6 coding workflows: caller-supplied repo files are assembled
+      // into a path-labeled, budget-capped block (zone 3b, untrusted data) so
+      // "explain this code" answers stay grounded in real file contents. The
+      // block is inserted before the current user turn, like RAG context.
+      const codeFileInputs = parsed.data.codeFiles ? normalizeCodeFiles(parsed.data.codeFiles) : [];
+      let codeFilesIncluded: string[] = [];
+      let codeFilesDropped: Array<{ path: string; reason: string }> = [];
+      if (codeFileInputs.length > 0) {
+        const assembled = assembleCodeContext(codeFileInputs);
+        codeFilesIncluded = assembled.filesIncluded;
+        codeFilesDropped = assembled.dropped;
+        if (assembled.context) {
+          const userTurn = history.pop()!;
+          history.push({ role: 'user', content: assembled.context });
+          history.push(userTurn);
         }
       }
-      if (!reply.raw.writableEnded) reply.raw.end();
+
+      // The charter-encoded system prompt for this turn: behavioral spec (§2),
+      // labeled content zones, and tenant-safe model metadata (name/version
+      // only — never secrets). The gateway pins it at index 0 of every
+      // provider call and re-adds it after each truncation round, so it is
+      // never dropped no matter how long the history grows.
+      const sytelineToolsAvailable = providerTools.some((tool) => tool.function.name.startsWith('syteline.'));
+      // Coding turns get the CODING WORK section: ground claims in shown files,
+      // never invent paths or APIs, deliver changes as unified diffs.
+      const codingMode = requestedCapability === 'coding' || codeFileInputs.length > 0;
+      const buildTurnSystemPrompt = (modelName: string, modelVersion?: string) =>
+        buildSystemPrompt({
+          modelName,
+          modelVersion,
+          toolsAvailable: providerTools.length > 0,
+          sytelineToolsAvailable,
+          codingMode,
+        });
+      const chatSystemPrompt = buildTurnSystemPrompt(model.name, model.version);
+
+      // Context-window management: sliding window that always keeps the system
+      // prompt and the most recent turns. The drop count is surfaced in `meta`
+      // so truncation is never silent.
+      const windowed = applyContextWindow(history, model.context_window, undefined, chatSystemPrompt);
+      if (windowed.dropped > 0) {
+        req.log.info({ requestId: req.requestId, conversationId, dropped: windowed.dropped }, 'context window truncated oldest messages');
+      }
+
+
+      // Take over the raw response for SSE. hijack() is required: without it
+      // Fastify would attempt to serialize the handler's return value after the
+      // raw writes, corrupting the stream.
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-store, no-transform',
+        Connection: 'keep-alive',
+        'x-request-id': req.requestId,
+      });
+      const abortController = new AbortController();
+      // Set when the socket closes before we finished the response: the client
+      // went away mid-stream, so the partial turn must persist as interrupted —
+      // never as a clean completion.
+      let clientDisconnected = false;
+      // Set once the terminal `done` frame was accepted: a socket close after
+      // that is a normal post-response close, not a mid-stream disconnect.
+      let doneDelivered = false;
+      const onSocketClose = () => {
+        // The socket also closes after a normal response; only a close before
+        // the response finished means the client disconnected mid-stream.
+        if (!reply.raw.writableEnded && !doneDelivered) {
+          clientDisconnected = true;
+          abortController.abort();
+        }
+      };
+      req.raw.socket.once('close', onSocketClose);
+      // Register the hijacked response so shutdown can end it explicitly.
+      const activeStream: ActiveSseStream = {
+        end: () => {
+          if (!reply.raw.writableEnded) reply.raw.end();
+        },
+        abort: () => abortController.abort(),
+      };
+      activeSseStreams.add(activeStream);
+      const sse = createSseSender(reply.raw as unknown as SseRawSocket, {
+        abortSignal: abortController.signal,
+      });
+      /**
+       * Backpressure-aware frame send. Resolves false when the client is gone
+       * or too slow: the caller must stop producing events. The provider
+       * request is aborted too — there is nobody left to read the answer, and
+       * the partial turn must not persist as a completed message.
+       */
+      const send = async (event: string, data: unknown): Promise<boolean> => {
+        const ok = await sse.send(event, data);
+        if (!ok) {
+          if (sse.backpressureAborted) {
+            req.log.warn(
+              { requestId: req.requestId, conversationId, pendingBytes: sse.pendingBytes() },
+              'SSE consumer too slow; aborting provider stream'
+            );
+          }
+          abortController.abort();
+        }
+        return ok;
+      };
+      // Heartbeats keep intermediaries from closing idle streams during long
+      // provider pauses; SSE comments are ignored by EventSource clients.
+      // Guarded and self-clearing: a destroyed socket must not raise from the
+      // timer or leak the interval.
+      const heartbeat = setInterval(() => {
+        if (reply.raw.writableEnded || reply.raw.destroyed) {
+          clearInterval(heartbeat);
+          return;
+        }
+        sse.ping();
+        if (sse.backpressureAborted) {
+          // The client never drains, not even heartbeats: treat it as gone.
+          clearInterval(heartbeat);
+          req.log.warn({ requestId: req.requestId, conversationId }, 'SSE consumer stalled; aborting provider stream');
+          abortController.abort();
+        }
+      }, HEARTBEAT_INTERVAL_MS);
+      if (!(await send('meta', {
+        conversationId,
+        model: { id: model.id, name: model.name },
+        citations,
+        contextDropped: windowed.dropped,
+        // Telemetry for operators: which capability served and whether the
+        // chat default covered for a missing capability model. Not user-facing.
+        capability: capabilityResolution
+          ? { requested: capabilityResolution.requested, resolved: capabilityResolution.resolved, fallbackUsed: capabilityResolution.fallbackUsed }
+          : undefined,
+        codeFiles: codeFileInputs.length > 0 ? { included: codeFilesIncluded, dropped: codeFilesDropped } : undefined,
+      }))) {
+        // Nobody is listening; skip straight to persistence/cleanup.
+        abortController.abort();
+      }
+
+      const telemetry: GatewayTelemetry = {};
+      // DLP outbound boundary (Phase 5c): every assistant text chunk passes
+      // through the stream guard before reaching the client or the persisted
+      // transcript. The loop tallies detections for the turn-end audit; matched
+      // text is never persisted or logged.
+      const dlpGuard = config.DLP_ENABLED ? new DlpStreamGuard(!!config.DLP_EXTERNAL_ENDPOINT) : null;
+
+      const sink: AgenticLoopSink = {
+        text: (delta) => send('delta', { content: delta }),
+        // Brief plan narration before each tool round (Phase 6 loop contract).
+        plan: (planText, toolNames) => send('notice', { code: 'TOOL_PLAN', message: planText, tools: toolNames }),
+        toolCalls: (calls) =>
+          send('notice', {
+            code: 'TOOL_CALLS',
+            message: `Running ${calls.length} tool call${calls.length === 1 ? '' : 's'}…`,
+            tools: calls.map((call) => call.name),
+          }),
+        failover: (modelName, failoverModelId) =>
+          send('notice', {
+            code: 'MODEL_FAILOVER',
+            message: `Primary model unavailable; continued with ${modelName}`,
+            model: { id: failoverModelId, name: modelName },
+          }),
+        done: async (payload) => {
+          doneDelivered = await send('done', { ...payload, citations });
+          return doneDelivered;
+        },
+        error: async (code, message) => {
+          await send('error', { code, message, requestId: req.requestId });
+        },
+      };
+
+      // The generalized agentic loop (Phase 6): bounded tool rounds with
+      // per-step audit, dependent chaining, brief plan narration, and an
+      // approval gate that keeps destructive tools out of auto-execution.
+      // Everything that can throw or await lives inside the try below, so the
+      // concurrency slot acquired above cannot leak.
+      // Both the try and the catch assign loopResult before the finally runs.
+      let loopResult!: Awaited<ReturnType<typeof runAgenticLoop>>;
+      try {
+        loopResult = await runAgenticLoop({
+          tenantId: auth.tenantId,
+          userId: auth.userId,
+          roleId: auth.roleId,
+          requestId: req.requestId,
+          classification,
+          auth,
+          initialModel: { id: modelId, name: model.name, contextWindow: model.context_window, version: model.version },
+          buildSystemPrompt: buildTurnSystemPrompt,
+          providerTools,
+          messages: windowed.messages,
+          signal: abortController.signal,
+          telemetry,
+          maxIterations: config.AI_MAX_TOOL_ITERATIONS,
+          maxResponseChars: config.AI_MAX_RESPONSE_CHARS,
+          dlpGuard,
+          sink,
+          capabilityResolved: capabilityResolution?.resolved,
+          capabilityFallbackUsed: capabilityResolution?.fallbackUsed,
+        });
+      } catch (error) {
+        // The loop surfaces stream errors through the sink; a throw here is a
+        // defect in the loop machinery itself — log it, mark the turn failed,
+        // and tell the client honestly instead of hanging the stream.
+        req.log.error({ err: error }, 'agentic loop threw unexpectedly');
+        await send('error', { code: 'STREAM_ERROR', message: 'Model request failed', requestId: req.requestId });
+        loopResult = {
+          content: '',
+          finishReason: 'error',
+          toolIterations: 0,
+          truncatedByCap: false,
+          servingModel: { id: modelId, name: model.name },
+          interrupted: false,
+          failed: true,
+          aborted: abortController.signal.aborted,
+          completed: false,
+          dlpDetections: [],
+        };
+      } finally {
+        // Release the concurrency slot first: the stream is over (normal close,
+        // error, abort, or shutdown), so the next waiting request may proceed.
+        concurrencySlot.release();
+        clearInterval(heartbeat);
+        // The response uses Connection: keep-alive, so the socket can serve
+        // later requests: remove the per-request listener or each request leaks
+        // a closure retaining reply, the abort controller, and request flags.
+        req.raw.socket.off('close', onSocketClose);
+        activeSseStreams.delete(activeStream);
+        // The loop reports the model that actually served the turn: after a
+        // mid-turn failover the transcript names the fallback model, not the
+        // failed primary.
+        const servingModelId = loopResult.servingModel.id;
+        const servingModelName = loopResult.servingModel.name;
+        const content = loopResult.content;
+        // Set when the stream errored after partial output was produced: the
+        // persisted message gets stream_interrupted metadata so a truncated
+        // reply is never mistaken for a finished one.
+        const streamInterrupted = loopResult.interrupted;
+        // Set when the loop's run threw: the turn outcome for metrics is
+        // 'error' even when no partial content was produced.
+        const turnFailed = loopResult.failed;
+        const dlpDetections = loopResult.dlpDetections;
+        // Domain RED metric for the turn: outcome reflects what the user
+        // experienced (completed / error / aborted by disconnect).
+        recordChatTurn(
+          servingModelName,
+          clientDisconnected ? 'aborted' : turnFailed || streamInterrupted ? 'error' : 'completed',
+          (Date.now() - turnStart) / 1000,
+          telemetry.timeToFirstTokenMs !== undefined ? telemetry.timeToFirstTokenMs / 1000 : undefined
+        );
+        if (content) {
+          // Stream status travels in metadata, never in the message text: a
+          // reconnecting client reading history can distinguish a completed
+          // answer from one cut short by a provider error, a client
+          // disconnect, or a stalled consumer. (A deliberate length-cap cut
+          // still counts as completed: the terminal `done` frame told the live
+          // client why via finishReason.)
+          const interrupted = !doneDelivered && (streamInterrupted || clientDisconnected || sse.backpressureAborted);
+          await tenantQuery(
+            auth.tenantId,
+            `INSERT INTO messages (conversation_id, tenant_id, role, content, model, model_id, citations, metadata)
+           VALUES ($1,$2,'assistant',$3,$4,$5,$6,$7)`,
+            [conversationId, auth.tenantId, content, servingModelName, servingModelId, JSON.stringify(citations), JSON.stringify(streamMetadata(interrupted ? 'interrupted' : 'completed'))]
+          ).catch((error) => req.log.error({ err: error }, 'Failed to persist assistant message'));
+          await tenantQuery(auth.tenantId, 'UPDATE conversations SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2', [conversationId, auth.tenantId]);
+          if (dlpDetections.length > 0) {
+            // DLP audit: kinds and counts only — matched text is never logged.
+            const counts: Record<string, number> = {};
+            for (const kind of dlpDetections) counts[kind] = (counts[kind] ?? 0) + 1;
+            await recordAudit({
+              action: 'DLP_DETECTION',
+              classification: 'INTERNAL',
+              tenantId: auth.tenantId,
+              userId: auth.userId,
+              requestId: req.requestId,
+              success: true,
+              metadata: { counts, redactedSpans: dlpDetections.length },
+            }).catch((error) => req.log.error({ err: error }, 'Failed to audit DLP detection'));
+          }
+        }
+        if (!reply.raw.writableEnded) reply.raw.end();
+      }
+    } finally {
+      concurrencySlot.release();
     }
   });
 }

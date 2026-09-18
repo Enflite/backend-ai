@@ -4,11 +4,11 @@
 #
 # What it does:
 #   1. pg_dump --schema-only the test database (custom format).
-#   2. Restores the dump into a scratch database.
-#   3. Marks every migration file applied in the restored schema_migrations
-#      table (as a full backup would contain), then runs the migration runner
-#      (backend/src/db/migrate.ts) the way the app runs it on boot — it must
-#      report "All migrations are up to date."
+#   2. Restores the dump into a scratch database ON THE SAME SERVER.
+#   3. Copies the source's real schema_migrations records into the restored
+#      database (a schema-only dump leaves that table empty), then runs the
+#      migration runner (backend/src/db/migrate.ts) the way the app runs it
+#      on boot — it must report "All migrations are up to date."
 #   4. Verifies the key platform tables exist in the restored database.
 #   5. Drops the scratch database and removes the dump.
 #
@@ -28,12 +28,14 @@
 #
 set -euo pipefail
 
-SOURCE_URL="${DATABASE_URL:?DATABASE_URL must be set to the database to dump}"
 SCRATCH_DB="${SCRATCH_DB:-backend_ai_restore_check}"
 WORK_DIR="${RESTORE_DUMP_DIR:-$(mktemp -d)}"
 DUMP_FILE="$WORK_DIR/restore-check.dump"
 
-for tool in pg_dump pg_restore psql createdb dropdb; do
+# Client tools are checked BEFORE DATABASE_URL is required: without them the
+# script SKIP-exits (local runs), and requiring the URL first would fail
+# spuriously in exactly those environments.
+for tool in pg_dump pg_restore psql; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "SKIP: $tool not found — no PostgreSQL client in this environment."
     echo "This check runs in CI where postgresql-client is installed; nothing failed."
@@ -41,9 +43,31 @@ for tool in pg_dump pg_restore psql createdb dropdb; do
   fi
 done
 
+SOURCE_URL="${DATABASE_URL:?DATABASE_URL must be set to the database to dump}"
+
+# Build a connection URL for a different database on the SAME server as
+# $SOURCE_URL, preserving userinfo/host/port and any query options
+# (e.g. ?sslmode=require). Pure bash so the script needs no extra tooling.
+url_for_db() {
+  local db="$1" rest="$SOURCE_URL" query=""
+  if [[ "$rest" == *\?* ]]; then
+    query="?${rest#*\?}"
+    rest="${rest%%\?*}"
+  fi
+  printf '%s/%s%s' "${rest%/*}" "$db" "$query"
+}
+
+# Maintenance connection (default 'postgres' database) for CREATE/DROP
+# DATABASE, and the scratch connection. Both target the source server —
+# never local defaults.
+MAINT_URL="$(url_for_db postgres)"
+SCRATCH_URL="$(url_for_db "$SCRATCH_DB")"
+
 cleanup() {
   echo "Cleaning up scratch database and dump..."
-  dropdb --if-exists "$SCRATCH_DB" >/dev/null 2>&1 || true
+  if [[ -n "${MAINT_URL:-}" ]]; then
+    psql "$MAINT_URL" -c "DROP DATABASE IF EXISTS \"$SCRATCH_DB\";" >/dev/null 2>&1 || true
+  fi
   if [[ -z "${RESTORE_DUMP_DIR:-}" ]]; then
     rm -rf "$WORK_DIR"
   fi
@@ -55,29 +79,31 @@ pg_dump --format=custom --schema-only --no-owner --no-privileges \
   --file="$DUMP_FILE" "$SOURCE_URL"
 echo "    dump written to $DUMP_FILE ($(du -h "$DUMP_FILE" | cut -f1))"
 
-echo "2/5 Creating scratch database '$SCRATCH_DB' and restoring..."
-dropdb --if-exists "$SCRATCH_DB"
-createdb "$SCRATCH_DB"
-pg_restore --no-owner --dbname="$SCRATCH_DB" "$DUMP_FILE"
+echo "2/5 Creating scratch database '$SCRATCH_DB' on the source server and restoring..."
+psql "$MAINT_URL" -v ON_ERROR_STOP=1 \
+  -c "DROP DATABASE IF EXISTS \"$SCRATCH_DB\";" \
+  -c "CREATE DATABASE \"$SCRATCH_DB\";"
+pg_restore --no-owner --dbname="$SCRATCH_URL" "$DUMP_FILE"
 echo "    restore complete"
 
-SCRATCH_URL="$(echo "$SOURCE_URL" | sed -E "s|/[^/]*$|/$SCRATCH_DB|")"
 # The repo root is the parent of backend/; migrate.ts is run via tsx from backend/.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-echo "3/5 Simulating post-restore boot: marking source migrations applied, then running the migrator..."
-# The dump came from a fully-migrated database, so every migration file is
-# recorded as applied (exactly what a full backup's schema_migrations table
-# contains after restore). Then the migrator runs the way the app runs it on
-# boot: it must report "up to date". Any pending migration here means the
-# restored schema drifted from what the migration chain produces.
+echo "3/5 Copying the source's real migration records, then running the migrator..."
+# A schema-only dump leaves schema_migrations EMPTY. Copy the source's
+# actual applied versions instead of blindly marking every file applied —
+# the latter would hide a migration the source database never ran and make
+# the "up to date" check meaningless.
+psql "$SOURCE_URL" -v ON_ERROR_STOP=1 \
+  -c "COPY (SELECT version FROM schema_migrations ORDER BY version) TO STDOUT" \
+  | psql "$SCRATCH_URL" -v ON_ERROR_STOP=1 \
+  -c "COPY schema_migrations (version) FROM STDIN"
+# Then the migrator runs the way the app runs it on boot: it must report
+# "up to date". Any pending migration here means the restored schema
+# drifted from what the migration chain produces.
 # (Re-running the migration files from scratch is NOT what happens after a
 # real restore, and seed migrations are not re-runnable against the final
 # schema — so the boot path is the faithful check.)
-for f in "$REPO_ROOT"/backend/src/db/migrations/*.sql; do
-  version="$(basename "$f")"
-  psql "$SCRATCH_URL" -c "INSERT INTO schema_migrations (version) VALUES ('$version') ON CONFLICT DO NOTHING;" >/dev/null
-done
 (cd "$REPO_ROOT/backend" && DATABASE_URL="$SCRATCH_URL" JWT_SECRET="$JWT_SECRET" npx tsx src/db/migrate.ts) | tee "$WORK_DIR/migrate.log"
 grep -q "All migrations are up to date." "$WORK_DIR/migrate.log" || { echo "FAIL: migrator did not report up-to-date after restore"; exit 1; }
 echo "    migrator reports up to date after restore"

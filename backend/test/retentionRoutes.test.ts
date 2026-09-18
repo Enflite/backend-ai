@@ -9,8 +9,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
-const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
+const { tenantQuery, withTenantTx } = vi.hoisted(() => ({
+  tenantQuery: vi.fn(),
+  withTenantTx: vi.fn(),
+}));
+const { recordAudit, recordAuditInTx } = vi.hoisted(() => ({
+  recordAudit: vi.fn(),
+  recordAuditInTx: vi.fn(),
+}));
 const { currentAuth } = vi.hoisted(() => ({
   currentAuth: {
     userId: 'user-1',
@@ -25,8 +31,8 @@ const { currentAuth } = vi.hoisted(() => ({
   } as Record<string, unknown>,
 }));
 
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
-vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
+vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenantTx }));
+vi.mock('../src/audit/audit.js', () => ({ recordAudit, recordAuditInTx }));
 vi.mock('../src/auth/middleware.js', () => ({
   requireAuth: (req: any, _reply: any, done: () => void) => {
     req.auth = currentAuth;
@@ -67,7 +73,15 @@ beforeEach(() => {
     if (text.includes('UPDATE audit_events SET legal_hold')) return { rows: [{ id: AUDIT_ID }] };
     return { rows: [] };
   });
+  // Default transaction mock: runs the callback on a fake client whose
+  // queries delegate to tenantQuery, mirroring withTenantTx's real
+  // contract (one client, one transaction).
+  withTenantTx.mockImplementation(async (tenant: string, callback: (client: any) => Promise<any>) => {
+    const client = { query: (sql: string, params?: unknown[]) => tenantQuery(tenant, sql, params) };
+    return callback(client);
+  });
   recordAudit.mockResolvedValue(undefined);
+  recordAuditInTx.mockResolvedValue(undefined);
 });
 
 describe('retention routes', () => {
@@ -102,7 +116,7 @@ describe('retention routes', () => {
     expect(upsert).toBeDefined();
     expect(upsert![0]).toBe('tenant-1');
     expect(upsert![2]).toEqual(['tenant-1', 90, null, 0]);
-    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+    expect(recordAuditInTx).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: 'RETENTION_POLICY_UPDATED',
       tenantId: 'tenant-1',
       userId: 'user-1',
@@ -122,7 +136,7 @@ describe('retention routes', () => {
     expect(setRes.json()).toEqual({ id: CONV_ID, legalHold: true });
     const update = tenantQuery.mock.calls.find((call) => String(call[1]).includes('UPDATE conversations SET legal_hold'));
     expect(update![2]).toEqual([true, CONV_ID, 'tenant-1']);
-    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+    expect(recordAuditInTx).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: 'LEGAL_HOLD_SET',
       resource: 'conversation',
       resourceId: CONV_ID,
@@ -134,7 +148,7 @@ describe('retention routes', () => {
       payload: { hold: false },
     });
     expect(clearRes.json()).toEqual({ id: CONV_ID, legalHold: false });
-    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'LEGAL_HOLD_CLEARED' }));
+    expect(recordAuditInTx).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'LEGAL_HOLD_CLEARED' }));
     await app.close();
   });
 
@@ -149,7 +163,7 @@ describe('retention routes', () => {
     expect(res.json()).toEqual({ id: AUDIT_ID, legalHold: true });
     const update = tenantQuery.mock.calls.find((call) => String(call[1]).includes('UPDATE audit_events SET legal_hold'));
     expect(update![2]).toEqual([true, AUDIT_ID, 'tenant-1']);
-    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+    expect(recordAuditInTx).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: 'LEGAL_HOLD_SET',
       resource: 'audit_event',
       resourceId: AUDIT_ID,
@@ -184,6 +198,79 @@ describe('retention routes', () => {
       expect(res.json().error.code).toBe('AUTHORIZATION_FAILURE');
     }
     expect(tenantQuery).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('writes the legal-hold update and its audit row on the same transaction client', async () => {
+    let updateClient: unknown;
+    let auditClient: unknown;
+    withTenantTx.mockImplementationOnce(async (_tenant: string, callback: (client: any) => Promise<any>) => {
+      const client = {
+        query: async (sql: string, params?: unknown[]) => {
+          if (String(sql).includes('UPDATE conversations SET legal_hold')) {
+            updateClient = client;
+            return { rows: [{ id: CONV_ID }] };
+          }
+          return tenantQuery(_tenant, sql, params);
+        },
+      };
+      return callback(client);
+    });
+    recordAuditInTx.mockImplementationOnce(async (client: unknown) => {
+      auditClient = client;
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: `/retention/conversations/${CONV_ID}/legal-hold`,
+      payload: { hold: true },
+    });
+    expect(res.statusCode).toBe(200);
+    // Same client for the mutation and the audit write: they commit or roll
+    // back together, never one without the other.
+    expect(updateClient).toBeDefined();
+    expect(auditClient).toBe(updateClient);
+    await app.close();
+  });
+
+  it('aborts the policy upsert transaction when the in-transaction audit write fails', async () => {
+    const statements: string[] = [];
+    let committed = false;
+    let rolledBack = false;
+    // Mirrors the real withTenantTx contract: a throw inside the callback
+    // rolls the transaction back instead of committing it.
+    withTenantTx.mockImplementationOnce(async (_tenant: string, callback: (client: any) => Promise<any>) => {
+      const client = {
+        query: async (sql: string) => {
+          statements.push(String(sql));
+          return { rows: [] };
+        },
+      };
+      try {
+        const result = await callback(client);
+        committed = true;
+        return result;
+      } catch (error) {
+        rolledBack = true;
+        throw error;
+      }
+    });
+    recordAuditInTx.mockRejectedValueOnce(new Error('audit store down'));
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/retention/policy',
+      payload: { conversationsDays: 90 },
+    });
+    // The audit failure propagates instead of being swallowed after commit.
+    expect(res.statusCode).toBe(500);
+    expect(statements.some((s) => s.includes('INSERT INTO retention_policies'))).toBe(true);
+    expect(recordAuditInTx).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'RETENTION_POLICY_UPDATED' })
+    );
+    expect(committed).toBe(false);
+    expect(rolledBack).toBe(true);
     await app.close();
   });
 });

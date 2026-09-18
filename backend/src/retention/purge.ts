@@ -198,6 +198,13 @@ export interface PurgeAllResult {
   counts: PurgeCounts;
   /** tenantIds that failed; their error is logged, the sweep continues. */
   failed: string[];
+  /**
+   * Set when purging the platform-global (NULL-tenant) audit log failed.
+   * Unlike tenant failures (which abort that tenant's sweep), this can only
+   * be discovered after the sweep, so it is surfaced here — and in the
+   * sweep's audit record — instead of being swallowed into a log line.
+   */
+  globalAuditPurgeError: string | null;
 }
 
 /** Sweeps every tenant, then platform-global (NULL-tenant) audit events. */
@@ -206,6 +213,7 @@ export async function purgeAllTenants(): Promise<PurgeAllResult> {
     tenants: 0,
     counts: { conversations: 0, messages: 0, auditEvents: 0 },
     failed: [],
+    globalAuditPurgeError: null,
   };
   const tenants = (await query<{ id: string }>('SELECT id FROM tenants')).rows;
   for (const tenant of tenants) {
@@ -222,22 +230,27 @@ export async function purgeAllTenants(): Promise<PurgeAllResult> {
   }
   // Platform-global audit rows belong to no tenant; purge them against the
   // global default and audit the sweep itself without a tenant scope.
+  // A failure here is surfaced on the result (and in the sweep audit
+  // below), not just logged: a silently skipped global audit purge would
+  // leave expired audit rows behind with a "successful" sweep on record.
   if (purgeEnabled(config.RETENTION_AUDIT_EVENTS_DAYS)) {
     try {
       const globalDeleted = await purgeAuditEvents(null, config.RETENTION_AUDIT_EVENTS_DAYS);
       result.counts.auditEvents += globalDeleted;
     } catch (error) {
+      result.globalAuditPurgeError = (error instanceof Error ? error.message : String(error)).slice(0, 500);
       console.error('Retention purge failed for platform-global audit events', error);
     }
   }
   await recordAudit({
     action: 'RETENTION_PURGE_SWEEP',
     classification: 'INTERNAL',
-    success: result.failed.length === 0,
+    success: result.failed.length === 0 && result.globalAuditPurgeError === null,
     metadata: {
       tenants: result.tenants,
       counts: result.counts,
       failedTenants: result.failed.length,
+      globalAuditPurgeError: result.globalAuditPurgeError,
     },
   }).catch((error) => console.error('Failed to audit retention sweep', error));
   return result;

@@ -194,8 +194,7 @@ describe('ConcurrencyLimiter', () => {
     if (b.ok) b.release();
   });
 
-  it('isolates tenants: one tenant at cap does not block another, even for the same user id', () => {
-    const limiter = new limits.ConcurrencyLimiter({ maxPerTenant: 1, maxPerUser: 10 });
+  it('isolates tenants: one tenant at cap does not block another, even for the same user id', () => {    const limiter = new limits.ConcurrencyLimiter({ maxPerTenant: 1, maxPerUser: 10 });
     const a = limiter.tryAcquire('t1', 'u1');
     expect(a.ok).toBe(true);
     expect(limiter.tryAcquire('t1', 'u2').ok).toBe(false);
@@ -206,6 +205,25 @@ describe('ConcurrencyLimiter', () => {
     if (b.ok) b.release();
     expect(limiter.inFlight('t1', 'u1')).toEqual({ tenant: 0, user: 0 });
     expect(limiter.inFlight('t2', 'u1')).toEqual({ tenant: 0, user: 0 });
+  });
+
+  it('shares one tenant ceiling across limiters with sharedTenantCounts, keeping per-user counters separate', () => {
+    const shared = new Map<string, number>();
+    const chat = new limits.ConcurrencyLimiter({ maxPerTenant: 2, maxPerUser: 10, sharedTenantCounts: shared });
+    const tools = new limits.ConcurrencyLimiter({ maxPerTenant: 2, maxPerUser: 10, sharedTenantCounts: shared });
+    const a = chat.tryAcquire('t1', 'u1');
+    const b = tools.tryAcquire('t1', 'u2');
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    // Two limiters, one tenant ceiling: the third slot is refused by either.
+    expect(chat.tryAcquire('t1', 'u3').ok).toBe(false);
+    expect(tools.tryAcquire('t1', 'u3').ok).toBe(false);
+    // Per-user counters stay private: u1's chat slot does not count against
+    // u1's tool quota, and releasing through one limiter frees the shared ceiling.
+    expect(tools.inFlight('t1', 'u1')).toEqual({ tenant: 2, user: 0 });
+    if (a.ok) a.release();
+    expect(tools.tryAcquire('t1', 'u3').ok).toBe(true);
+    if (b.ok) b.release();
   });
 
   it('release is idempotent and never drives counts negative', () => {

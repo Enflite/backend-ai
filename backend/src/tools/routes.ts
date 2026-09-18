@@ -65,7 +65,7 @@ export async function toolRoutes(fastify: FastifyInstance): Promise<void> {
         classification: body.data.classification as Classification,
         confirmed: body.data.confirmed,
         requestId: req.requestId,
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(config.AI_TOOL_TIMEOUT_MS),
       });
       if (!result.ok) {
         // Map denial/failure codes back onto the API error surface.

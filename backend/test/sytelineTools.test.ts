@@ -307,7 +307,11 @@ describe('HttpSyteLineAdapter', () => {
     originalMaxRows = config.SYTELINE_MAX_ROWS;
     (config as Record<string, unknown>).SYTELINE_BASE_URL = BASE_URL;
     (config as Record<string, unknown>).SYTELINE_API_TOKEN = 'test-token';
-    fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) }));
+    fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ item: 'WIDGET', site: 'MAIN' }),
+    }));
     vi.stubGlobal('fetch', fetchMock);
   });
 
@@ -331,7 +335,11 @@ describe('HttpSyteLineAdapter', () => {
   });
 
   it('omits undefined and empty query params', async () => {
-    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ lines: [] }) });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ orderNumber: 'SO-1', status: 'open', lines: [] }),
+    });
     await adapter().getSalesOrder({ orderNumber: 'SO-1' }, signal);
     const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
     expect(url.toString()).toBe(`${BASE_URL}/api/sales-orders?orderNumber=SO-1`);
@@ -355,10 +363,17 @@ describe('HttpSyteLineAdapter', () => {
 
   it('caps list results at SYTELINE_MAX_ROWS with a truncated marker', async () => {
     (config as Record<string, unknown>).SYTELINE_MAX_ROWS = 3;
+    const po = (n: number) => ({
+      poNumber: `PO-${n}`,
+      item: 'WIDGET',
+      quantityOrdered: 10,
+      quantityReceived: 0,
+      status: 'open',
+    });
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ purchaseOrders: [{ po: 1 }, { po: 2 }, { po: 3 }, { po: 4 }, { po: 5 }] }),
+      json: async () => ({ item: 'WIDGET', purchaseOrders: [po(1), po(2), po(3), po(4), po(5)] }),
     });
     const result = await adapter().getOpenPurchaseOrders({ item: 'WIDGET' }, signal);
     expect(result.purchaseOrders).toHaveLength(3);
@@ -376,5 +391,99 @@ describe('HttpSyteLineAdapter', () => {
     });
     await expect(adapter().getItem({ item: 'WIDGET', site: 'MAIN' }, controller.signal)).rejects.toThrowError(/abort/i);
     expect(seenSignal?.aborted).toBe(true);
+  });
+
+  it('rejects plaintext HTTP to non-loopback hosts before any token is sent', async () => {
+    (config as Record<string, unknown>).SYTELINE_BASE_URL = 'http://syteline.internal.example';
+    await expect(adapter().getItem({ item: 'WIDGET', site: 'MAIN' }, signal)).rejects.toMatchObject({
+      code: 'SYTELINE_INSECURE_URL',
+    });
+    // The refusal happens before fetch is even attempted, so the token never leaves the process.
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(adapter().getItem({ item: 'WIDGET', site: 'MAIN' }, signal)).rejects.not.toThrowError(/test-token/);
+  });
+
+  it.each(['http://localhost:8080', 'http://127.0.0.1:8080', 'http://[::1]:8080'])(
+    'allows plaintext HTTP only for loopback dev hosts (%s)',
+    async (baseUrl) => {
+      (config as Record<string, unknown>).SYTELINE_BASE_URL = baseUrl;
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ item: 'WIDGET', site: 'MAIN' }),
+      });
+      await expect(adapter().getItem({ item: 'WIDGET', site: 'MAIN' }, signal)).resolves.toMatchObject({
+        item: 'WIDGET',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it('rejects malformed live JSON instead of returning an unchecked cast', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ item: 42, site: 'MAIN', onHand: 'lots', allocated: 0, available: 0 }),
+    });
+    await expect(adapter().getItemAvailability({ item: 'WIDGET', site: 'MAIN' }, signal)).rejects.toMatchObject({
+      code: 'SYTELINE_INVALID_RESPONSE',
+    });
+  });
+
+  it('rejects a sales order payload missing required fields', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ lines: [{ lineNumber: 1 }] }),
+    });
+    await expect(adapter().getSalesOrder({ orderNumber: 'SO-1' }, signal)).rejects.toMatchObject({
+      code: 'SYTELINE_INVALID_RESPONSE',
+    });
+  });
+
+  it('rejects a non-JSON response body with a structured error', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON');
+      },
+    });
+    await expect(adapter().getCustomer({ customerNumber: 'CONT-220' }, signal)).rejects.toMatchObject({
+      code: 'SYTELINE_INVALID_RESPONSE',
+    });
+  });
+
+  it('tolerates unknown extra fields in live responses (shape validated, not exhaustiveness)', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        customerNumber: 'CONT-220',
+        name: 'Continental Dynamics',
+        someNewErpField: { nested: true },
+      }),
+    });
+    const result = await adapter().getCustomer({ customerNumber: 'CONT-220' }, signal);
+    expect(result.customerNumber).toBe('CONT-220');
+    expect((result as unknown as Record<string, unknown>).someNewErpField).toEqual({ nested: true });
+  });
+});
+
+describe('MockSyteLineAdapter getItem', () => {
+  const fixture = new MockSyteLineAdapter();
+  const signal = AbortSignal.timeout(5000);
+
+  it('returns known fixture items', async () => {
+    await expect(fixture.getItem({ item: 'ITEM-77100', site: 'FTW' }, signal)).resolves.toMatchObject({
+      item: 'ITEM-77100',
+      description: 'Precision shaft',
+    });
+  });
+
+  it('returns SYTELINE_NOT_FOUND for unknown item ids instead of inventing a record', async () => {
+    await expect(fixture.getItem({ item: 'NOPE-0000', site: 'FTW' }, signal)).rejects.toMatchObject({
+      code: 'SYTELINE_NOT_FOUND',
+    });
   });
 });

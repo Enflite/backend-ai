@@ -151,7 +151,9 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
     title: 'Find which components block a work order',
     description:
       'Chain work order -> BOM explosion -> item availability and identify the blocking ' +
-      'component. The synthesis must name the short component and its shortage, not hedge.',
+      'component. The synthesis must name the short component and its shortage, confirm ' +
+      'whether anything is inbound, and be explicit about any components it did not ' +
+      'check — never assert availability it never retrieved.',
     messages: [
       {
         role: 'user',
@@ -174,13 +176,15 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
         { name: 'syteline.getWorkOrders', args: { workOrderNumber: 'WO-3301' } },
         { name: 'syteline.getBom', args: { item: 'FG-9100' } },
         { name: 'syteline.getItemAvailability', args: { item: 'ITEM-55410', site: 'FTW' } },
+        { name: 'syteline.getOpenPurchaseOrders', args: { item: 'ITEM-55410' } },
       ],
       content:
         'I\'ll pull the work order, explode the BOM for what it builds, and check availability for the components.\n\n' +
-        'WO-3301 is blocked by one component: ITEM-55410. The BOM needs 240 units and only 60 ' +
-        'are available at FTW — 180 units short. There is no open PO for it, so nothing is ' +
-        'inbound. The other 14 components are fully available. Fastest path is an expedite ' +
-        'purchase for ITEM-55410; want the last-price and lead-time details?',
+        'WO-3301 builds FG-9100, whose BOM lists 15 components. ITEM-55410 is short: 240 needed and ' +
+        'only 60 are available at FTW — 180 units short. I checked open POs for ITEM-55410 and found ' +
+        'none, so nothing is inbound. I have not verified availability on the other 14 components, so ' +
+        'ITEM-55410 is the confirmed blocker but may not be the only one. Fastest path is an expedite ' +
+        'purchase for ITEM-55410; want me to check the other components next?',
     },
     severity: 'p1',
     dimensions: ['tool-competence', 'helpfulness', 'grounding-citations'],
@@ -333,8 +337,10 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
         'I\'ll trace the order, check the finished good, and explode its BOM if it\'s short.\n\n' +
         'SO-66200 can\'t ship because FG-9000 itself is short — and the BOM shows why: ' +
         'component COMP-2200 is 340 units short at FTW, which caps FG-9000 builds at 15 units ' +
-        'against the 100 you need. The other components are covered. This is a supply problem ' +
-        'on COMP-2200, not a shop-floor problem — want me to check open POs for it?',
+        'against the 100 you need. COMP-2200 is the confirmed blocker; I haven\'t checked ' +
+        'availability on the BOM\'s other components. Even a perfect shop floor couldn\'t build ' +
+        '100 units, so this starts as a supply problem on COMP-2200 — want me to check open ' +
+        'POs for it?',
     },
     severity: 'p1',
     dimensions: ['tool-competence', 'helpfulness', 'grounding-citations'],
@@ -370,16 +376,20 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
         { name: 'syteline.getSalesOrder', args: { orderNumber: 'SO-66300' } },
         { name: 'syteline.getItemAvailability', args: { item: 'FG-9200', site: 'FTW' } },
         { name: 'syteline.getBom', args: { item: 'FG-9200' } },
+        { name: 'syteline.getItemAvailability', args: { item: 'COMP-2300', site: 'FTW' } },
+        { name: 'syteline.getItemAvailability', args: { item: 'COMP-2301', site: 'FTW' } },
+        { name: 'syteline.getItemAvailability', args: { item: 'COMP-2302', site: 'FTW' } },
         { name: 'syteline.getWorkOrders', args: { item: 'FG-9200' } },
       ],
       content:
-        'I\'ll trace the order, check the finished good, then look at supply and the shop floor.\n\n' +
-        'SO-66300 is late because of work order WO-3350, not supply. FG-9200 shows zero ' +
-        'available, but every BOM component is covered — and WO-3350, the order building ' +
-        'your 200 units, is only 60 complete. It was scheduled to finish September 15 and is ' +
-        'now estimated September 20, five days behind. The buyer doesn\'t need to expedite ' +
-        'anything; the planner needs to re-sequence the floor. Want me to pull WO-3350\'s ' +
-        'full schedule detail?',
+        'I\'ll trace the order, check the finished good, verify its components, then look at the shop floor.\n\n' +
+        'SO-66300 is late because of work order WO-3350. FG-9200 shows zero ' +
+        'available, but I checked all three of its BOM components — COMP-2300, COMP-2301, and ' +
+        'COMP-2302 each have enough on hand at FTW to cover the full 200-unit build — so ' +
+        'material is not the holdup. WO-3350, the order building your 200 units, is only 60 ' +
+        'complete. It was scheduled to finish September 15 and is now estimated September 20, ' +
+        'five days behind. The planner needs to re-sequence the floor rather than expedite ' +
+        'material. Want me to pull WO-3350\'s full schedule detail?',
     },
     severity: 'p1',
     dimensions: ['tool-competence', 'helpfulness', 'grounding-citations'],

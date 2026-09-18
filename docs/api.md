@@ -3,7 +3,10 @@
 Base path: `/api/v1`. All endpoints return JSON unless noted. Every route
 except `GET /health` and `GET /ready` requires a Bearer access token
 (`Authorization: Bearer <jwt>`) plus the listed permission. Errors use the
-shape `{ error: { code, message, requestId, details? } }`.
+shape `{ error: { code, message, requestId, details? } }`, except the
+capacity `429` documented below, which intentionally uses the flat
+`{ error: 'busy', message, retryAfterSeconds }` body so clients can branch
+on `error === 'busy'` without knowing the rest of the error taxonomy.
 
 Auth model: short-lived JWT access tokens (15m) + rotating opaque refresh
 tokens in the `session` cookie. See `docs/adr/010-server-side-sessions.md`.

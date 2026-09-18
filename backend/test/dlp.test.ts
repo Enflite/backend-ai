@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   findDlpMatches,
   luhnValid,
+  panShapePlausible,
   redactText,
   DLP_MARKERS,
 } from '../src/dlp/detectors.js';
@@ -63,6 +64,56 @@ describe('dlp detectors', () => {
     expect(luhnValid('4111111111111111')).toBe(true);
     expect(luhnValid('4111111111111112')).toBe(false);
     expect(luhnValid('123')).toBe(false);
+  });
+
+  it('redacts true PANs in plausible groupings (spaced, dashed, Amex, contiguous)', () => {
+    // Visa test PAN 4111111111111111 and Amex test PAN 378282246310005.
+    const inputs = [
+      'card 4111 1111 1111 1111 ok',
+      'card 4111-1111-1111-1111 ok',
+      'card 3782 822463 10005 ok', // Amex 4-6-5
+      'card 4111111111111111 ok',
+      'card 378282246310005 ok',
+    ];
+    for (const input of inputs) {
+      const { text, detections } = redactText(input);
+      expect(text).toBe(`card ${DLP_MARKERS.credit_card} ok`);
+      expect(detections).toEqual(['credit_card']);
+    }
+  });
+
+  it('does not redact Luhn-passing digit runs with implausible PAN groupings (ERP tables)', () => {
+    // Spaced ERP numeric columns whose digit runs pass Luhn by chance but
+    // are grouped 4-5-3-5 and 5-5-6 — no card network groups PANs that way.
+    const inputs = [
+      'row: qty 1200 34500 800 12908 pcs',
+      'totals 12000 34500 800136 end',
+    ];
+    for (const input of inputs) {
+      expect(luhnValid(input.replace(/\D/g, ''))).toBe(true); // guard: the test is meaningful
+      const { text, detections } = redactText(input);
+      expect(text).toBe(input);
+      expect(detections).toEqual([]);
+    }
+  });
+
+  it('rejects mixed separators even when the digits pass Luhn', () => {
+    const input = 'card 4111-1111 1111-1111 ok'; // 4111111111111111 passes Luhn
+    const { text, detections } = redactText(input);
+    expect(text).toBe(input);
+    expect(detections).toEqual([]);
+  });
+
+  it('panShapePlausible accepts real PAN shapes and rejects table-like ones', () => {
+    expect(panShapePlausible('4111 1111 1111 1111')).toBe(true);
+    expect(panShapePlausible('4111-1111-1111-1111')).toBe(true);
+    expect(panShapePlausible('3782 822463 10005')).toBe(true); // Amex 4-6-5
+    expect(panShapePlausible('3056 930902 5904')).toBe(true); // Diners 4-6-4
+    expect(panShapePlausible('4111111111111111')).toBe(true); // contiguous
+    expect(panShapePlausible('1200 34500 800 12908')).toBe(false); // 4-5-3-5
+    expect(panShapePlausible('12000 34500 800136')).toBe(false); // 5-5-6
+    expect(panShapePlausible('4111-1111 1111-1111')).toBe(false); // mixed separators
+    expect(panShapePlausible('1234')).toBe(false); // too short
   });
 });
 

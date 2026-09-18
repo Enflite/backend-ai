@@ -1,21 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
-const { query, withTx } = vi.hoisted(() => {
+const { query, withTx, withTenantTx } = vi.hoisted(() => {
   const query = vi.fn();
   // Emulate withTx: the callback runs against a client whose query delegates
   // to the shared query mock, so per-call mockResolvedValue sequencing keeps
   // working and the single-transaction structure stays observable.
   const withTx = vi.fn(async (callback: (client: { query: typeof query }) => Promise<unknown>) =>
     callback({ query }));
-  return { query, withTx };
+  // withTenantTx is the same shape with the tenant bound first; the callback
+  // still runs against the shared query mock.
+  const withTenantTx = vi.fn(async (_tenantId: string, callback: (client: { query: typeof query }) => Promise<unknown>) =>
+    callback({ query }));
+  return { query, withTx, withTenantTx };
 });
 const { recordAudit, recordAuditInTx } = vi.hoisted(() => ({ recordAudit: vi.fn(), recordAuditInTx: vi.fn() }));
 const { getPromotionGate } = vi.hoisted(() => ({ getPromotionGate: vi.fn() }));
 // Mutable so each test can act as an AI Admin or an unprivileged user.
 const authState = { permissions: ['model:manage', 'model:use'] as string[] };
 
-vi.mock('../src/db/pool.js', () => ({ query, tenantQuery: query, withTx }));
+vi.mock('../src/db/pool.js', () => ({ query, tenantQuery: query, withTx, withTenantTx }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit, recordAuditInTx }));
 vi.mock('../src/eval/compare.js', () => ({ getPromotionGate }));
 vi.mock('../src/auth/middleware.js', () => ({

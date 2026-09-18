@@ -34,8 +34,8 @@
  * resolveServingModel. The router only decides WHICH authorized model
  * serves, never WHETHER an unauthorized one may.
  */
-import { Errors } from '../../errors.js';
-import { tenantQuery, withTx } from '../../db/pool.js';
+import { Errors, AppError } from '../../errors.js';
+import { tenantQuery, withTenantTx } from '../../db/pool.js';
 import { recordAudit, recordAuditInTx } from '../../audit/audit.js';
 import { KNOWN_CAPABILITIES, resolveServingModel } from './modelLifecycle.js';
 import { getApprovedModelForUser, listApprovedModelsForUser, type ApprovedModel } from './modelRegistry.js';
@@ -126,7 +126,9 @@ export async function setRoutingPolicy(
   if (!ROUTING_STRATEGIES.includes(policy.strategy)) {
     throw Errors.badRequest('INVALID_STRATEGY', `Strategy must be one of: ${ROUTING_STRATEGIES.join(', ')}`);
   }
-  return withTx(async (client) => {
+  // Tenant-scoped transaction: model_routing_policies is under forced RLS,
+  // so the tenant context must be established before the upsert.
+  return withTenantTx(tenantId, async (client) => {
     const row = (
       await client.query<RoutingPolicy>(
         `INSERT INTO model_routing_policies (tenant_id, capability, strategy, fallback_to_chat, updated_by, updated_at)
@@ -265,12 +267,13 @@ export async function resolveCapabilityModel(options: {
     }
     reason = 'no serving default configured for capability';
   } catch (error) {
-    // resolveServingModel throws when the default went stale (model
-    // deprecated/disabled, tenant grant revoked) or the caller may not use
-    // it: fail closed on the capability, then fall back per policy. The
-    // underlying message stays in the audit trail; the client sees only
-    // the generic fallback notice.
-    reason = error instanceof Error ? error.message : 'capability model resolution failed';
+    // Only the expected "stale default" failure triggers fallback. An
+    // unexpected error (database outage, programming bug) must surface
+    // instead of being silently converted into a chat-model fallback —
+    // otherwise a broken model registry would masquerade as a healthy
+    // fallback and hide the outage.
+    if (!(error instanceof AppError) || error.code !== 'MODEL_NOT_APPROVED') throw error;
+    reason = error.message;
   }
 
   if (!policy.fallbackToChat) {
