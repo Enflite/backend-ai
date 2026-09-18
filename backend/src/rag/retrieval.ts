@@ -135,8 +135,9 @@ export async function retrieveAuthorizedContext(
   // An empty query has no retrievable meaning: return the empty retrieval
   // shape instead of embedding a meaningless vector.
   if (!query) return { context: '', citations: [], results: [] };
-  const [embedding] = await internalEmbeddingProvider.embed([query], AbortSignal.timeout(30000));
-  if (!embedding || embedding.length !== internalEmbeddingProvider.dimensions || !embedding.every(Number.isFinite)) {
+  const embeddingProvider = internalEmbeddingProvider();
+  const [embedding] = await embeddingProvider.embed([query], { timeoutMs: config.EMBEDDING_TIMEOUT_MS });
+  if (!embedding || embedding.length !== embeddingProvider.dimensions || !embedding.every(Number.isFinite)) {
     throw new Error('Embedding provider returned an invalid query vector');
   }
   const allowed = CLASSIFICATIONS.filter(
@@ -181,8 +182,8 @@ export async function retrieveAuthorizedContext(
        ORDER BY dc.embedding <=> $6::vector
        LIMIT $10`,
       [auth.tenantId, allowed, documentIds?.length ? documentIds : null, auth.userId, auth.roleId,
-        `[${embedding!.join(',')}]`, internalEmbeddingProvider.model, internalEmbeddingProvider.version,
-        internalEmbeddingProvider.dimensions, topK * 4]
+        `[${embedding!.join(',')}]`, embeddingProvider.model, embeddingProvider.version,
+        embeddingProvider.dimensions, topK * 4]
       )
     ).rows;
   });

@@ -224,7 +224,7 @@ const testModel = {
   provider: 'vllm',
   endpoint: 'http://localhost:8000/v1',
   model_identifier: 'test-model',
-  status: 'APPROVED',
+  status: 'ACTIVE',
   context_window: 8192,
   capabilities: {},
   allowed_classifications: ['PUBLIC', 'INTERNAL'],

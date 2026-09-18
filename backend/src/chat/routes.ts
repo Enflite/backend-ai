@@ -8,6 +8,7 @@ import { CLASSIFICATIONS, Classification, AuthContext } from '../authz/permissio
 import { assertClassificationAllowed } from '../authz/classification.js';
 import { gatewayStream, applyContextWindow, GatewayTelemetry, ChatMessage, ProviderToolDefinition, streamMetadata } from '../ai/gateway/gateway.js';
 import { getApprovedModelForUser, listApprovedModelsForUser } from '../ai/gateway/modelRegistry.js';
+import { resolveServingModel } from '../ai/gateway/modelLifecycle.js';
 import { retrieveAuthorizedContext } from '../rag/retrieval.js';
 import { recordAudit } from '../audit/audit.js';
 import { toolRegistry, runToolCall, zodToJsonSchema } from '../tools/gateway.js';
@@ -258,7 +259,11 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     // for a conversation they own (clearances can be lowered after creation).
     assertClassificationAllowed(auth.clearance, classification);
     if (!modelId) {
-      modelId = (await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId))[0]?.id;
+      // Admin-configured serving default first (re-verified servable and
+      // authorized on every resolution); legacy first-approved fallback.
+      modelId =
+        (await resolveServingModel(auth.tenantId, auth.userId, auth.roleId, 'chat'))?.id ??
+        (await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId))[0]?.id;
     }
     if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
     const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);

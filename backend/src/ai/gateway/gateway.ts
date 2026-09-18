@@ -1,7 +1,8 @@
 import { Errors, AppError } from '../../errors.js';
 import { recordAudit } from '../../audit/audit.js';
 import { getApprovedModelForUser, ApprovedModel } from './modelRegistry.js';
-import { streamChat, ProviderEvent, ProviderToolDefinition, TokenUsage, ChatMessage } from './vllmProvider.js';
+import { resolveChatProvider, isKnownChatProvider } from '../providers/factory.js';
+import type { ProviderEvent, ProviderToolDefinition, TokenUsage, ChatMessage, ChatProvider } from '../providers/types.js';
 export type { ProviderToolDefinition, ChatMessage, TokenUsage };
 import { Classification } from '../../authz/permissions.js';
 import { canModelProcess } from '../../policy/engine.js';
@@ -42,6 +43,8 @@ export interface GatewayStreamInput {
 
 export interface GatewayTelemetry {
   timeToFirstTokenMs?: number;
+  /** Completion tokens per second after the first token (streaming throughput). */
+  tokensPerSecond?: number;
   usage?: TokenUsage;
   fallbackUsed?: boolean;
   fallbackModelId?: string;
@@ -86,17 +89,27 @@ export function streamMetadata(status: StreamStatus): StreamMetadata {
     : { stream_status: status };
 }
 
-function resolveEndpoint(model: ApprovedModel): void {
+/**
+ * Rejects endpoints whose origin is outside the server allowlist.
+ * Exported for model registration: a model must never be registered with
+ * an endpoint the gateway would refuse to call.
+ */
+export function assertEndpointAllowed(endpoint: string): string {
   const allowedOrigins = new Set(config.AI_PROVIDER_ALLOWED_ORIGINS.split(',').map((value) => value.trim()));
   let endpointOrigin: string;
   try {
-    endpointOrigin = new URL(model.endpoint).origin;
+    endpointOrigin = new URL(endpoint).origin;
   } catch {
     throw Errors.forbidden('MODEL_ENDPOINT_INVALID', 'Approved model endpoint is invalid');
   }
   if (!allowedOrigins.has(endpointOrigin)) {
     throw Errors.forbidden('MODEL_ENDPOINT_DENIED', 'Approved model endpoint is outside the server allowlist');
   }
+  return endpointOrigin;
+}
+
+function resolveEndpoint(model: ApprovedModel): void {
+  assertEndpointAllowed(model.endpoint);
 }
 
 function checkClassification(classification: Classification, model: ApprovedModel): void {
@@ -105,7 +118,11 @@ function checkClassification(classification: Classification, model: ApprovedMode
 }
 
 function checkProviderSupport(model: ApprovedModel): void {
-  if (model.provider !== 'vllm' && model.provider !== 'openai-compatible') {
+  // 'ollama' is dev-only: the factory refuses to construct it unless
+  // ALLOW_DEV_PROVIDERS is enabled, so reaching this check is not itself
+  // an authorization decision — the gate lives in the factory. This check
+  // just fails fast on a misconfigured provider string before any authz.
+  if (!isKnownChatProvider(model.provider)) {
     throw Errors.forbidden('MODEL_PROVIDER_UNSUPPORTED', 'Approved model provider is not supported by this gateway');
   }
 }
@@ -180,7 +197,12 @@ async function* streamWithTelemetry(
   telemetry: GatewayTelemetry
 ): AsyncGenerator<ProviderEvent, void, unknown> {
   const startedAt = Date.now();
-  const stream = streamChat({
+  let firstTokenAt: number | undefined;
+  // The provider is resolved AFTER the gateway authorized the model
+  // (approval, endpoint allowlist, classification policy): the factory only
+  // picks the wire protocol.
+  const provider: ChatProvider = resolveChatProvider(model);
+  const stream = provider.streamChat({
     endpoint: model.endpoint,
     model: model.model_identifier,
     messages,
@@ -192,10 +214,17 @@ async function* streamWithTelemetry(
   });
   for await (const event of stream) {
     if (event.type === 'text' && telemetry.timeToFirstTokenMs === undefined) {
-      telemetry.timeToFirstTokenMs = Date.now() - startedAt;
+      firstTokenAt = Date.now();
+      telemetry.timeToFirstTokenMs = firstTokenAt - startedAt;
     }
     if (event.type === 'usage') {
       telemetry.usage = event.usage;
+      // Streaming throughput: completion tokens per second measured from the
+      // first emitted token, so queueing/connect time doesn't pollute it.
+      if (firstTokenAt !== undefined && event.usage.completionTokens > 0) {
+        const elapsedSec = Math.max((Date.now() - firstTokenAt) / 1000, 0.001);
+        telemetry.tokensPerSecond = Math.round((event.usage.completionTokens / elapsedSec) * 10) / 10;
+      }
     }
     yield event;
   }
@@ -220,6 +249,7 @@ async function auditModelUse(
     reason,
     metadata: {
       ...(telemetry.timeToFirstTokenMs !== undefined ? { timeToFirstTokenMs: telemetry.timeToFirstTokenMs } : {}),
+      ...(telemetry.tokensPerSecond !== undefined ? { tokensPerSecond: telemetry.tokensPerSecond } : {}),
       ...(telemetry.usage ? { usage: telemetry.usage } : {}),
       ...(telemetry.fallbackUsed ? { fallbackUsed: true, fallbackModelId: telemetry.fallbackModelId } : {}),
     },

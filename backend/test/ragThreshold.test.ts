@@ -4,10 +4,10 @@ const { tenantQuery, withTenant } = vi.hoisted(() => ({ tenantQuery: vi.fn(), wi
 const embedMock = vi.hoisted(() => vi.fn());
 vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenant }));
 vi.mock('../src/documents/ingestion.js', () => ({
-  internalEmbeddingProvider: {
+  internalEmbeddingProvider: () => ({
     model: 'embedding-test', version: '1', dimensions: 2,
     embed: embedMock,
-  },
+  }),
 }));
 
 import { config } from '../src/config.js';

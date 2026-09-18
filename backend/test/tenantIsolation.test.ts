@@ -28,7 +28,7 @@ const { currentAuth } = vi.hoisted(() => ({ currentAuth: {} as Record<string, un
 vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenant }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
 vi.mock('../src/documents/ingestion.js', () => ({
-  internalEmbeddingProvider: { model: 'emb', version: '1', dimensions: 3, embed },
+  internalEmbeddingProvider: () => ({ model: 'emb', version: '1', dimensions: 3, embed }),
 }));
 vi.mock('../src/auth/middleware.js', () => ({
   requireAuth: (req: any, _reply: any, done: () => void) => {

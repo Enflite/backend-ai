@@ -5,80 +5,29 @@ import { ObjectStorage, s3Storage } from '../storage/storage.js';
 import { ExtractedSection, extractDocument } from './extraction.js';
 import { MalwareScanner, malwareScanner, scanMayProceed } from './malware.js';
 
-export interface EmbeddingProvider {
-  readonly model: string;
-  readonly version: string;
-  readonly dimensions: number;
-  embed(texts: string[], signal?: AbortSignal): Promise<number[][]>;
-}
+import type { EmbeddingProvider } from '../ai/providers/types.js';
+import { resolveEmbeddingProvider } from '../ai/providers/factory.js';
+export type { EmbeddingProvider };
 
 /**
- * Embeddings are idempotent (same input -> same output, no side effects), so a
- * small bounded retry with jitter is safe here — unlike streaming inference,
- * which the gateway never retries and instead fails over to another model.
+ * The platform embedding provider, resolved once from server configuration
+ * via the provider factory. Document ingestion and RAG retrieval share this
+ * instance so embeddings are always computed by the same backend — there is
+ * exactly one embedding call-site family, and it lives behind the factory.
+ *
+ * Resolved lazily (not at module load) so tests can stub configuration
+ * before first use.
  */
-async function fetchWithRetry(input: string, init: RequestInit, attempts = 3): Promise<Response> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    // Never retry after cancellation: an aborted job must stop immediately.
-    if (init.signal?.aborted) throw new Error('Embedding request aborted');
-    try {
-      const response = await fetch(input, init);
-      // Retry transient 5xx/429; 4xx is deterministic (bad request) and surfaces.
-      if ((response.status >= 500 || response.status === 429) && attempt < attempts) {
-        await response.arrayBuffer().catch(() => undefined);
-      } else {
-        return response;
-      }
-    } catch (error) {
-      lastError = error;
-      // AbortError (cancellation/timeout) is not transient: rethrow at once.
-      if (error instanceof Error && error.name === 'AbortError') throw error;
-      if (attempt === attempts) throw error;
-    }
-    const backoffMs = Math.min(2000, 150 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 100);
-    // Abort-aware sleep: a cancelled job must not linger in backoff.
-    await new Promise<void>((resolve, reject) => {
-      const onAbort = () => {
-        clearTimeout(timer);
-        reject(new Error('Embedding request aborted'));
-      };
-      const timer = setTimeout(() => {
-        init.signal?.removeEventListener('abort', onAbort);
-        resolve();
-      }, backoffMs);
-      init.signal?.addEventListener('abort', onAbort, { once: true });
-    });
-  }
-  throw lastError instanceof Error ? lastError : new Error('Embedding provider request failed');
+let cachedProvider: EmbeddingProvider | null = null;
+export function internalEmbeddingProvider(): EmbeddingProvider {
+  if (!cachedProvider) cachedProvider = resolveEmbeddingProvider();
+  return cachedProvider;
 }
 
-export const internalEmbeddingProvider: EmbeddingProvider = {
-  model: config.EMBEDDING_MODEL ?? '',
-  version: config.EMBEDDING_MODEL_VERSION,
-  dimensions: config.EMBEDDING_DIMENSIONS,
-  async embed(texts, signal) {
-    if (!config.EMBEDDING_BASE_URL || !config.EMBEDDING_MODEL) {
-      throw Errors.internal('Internal embedding provider is not configured', undefined, 'EMBEDDING_NOT_CONFIGURED');
-    }
-    const response = await fetchWithRetry(`${config.EMBEDDING_BASE_URL.replace(/\/+$/, '')}/embeddings`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(config.EMBEDDING_API_KEY ? { authorization: `Bearer ${config.EMBEDDING_API_KEY}` } : {}),
-      },
-      body: JSON.stringify({ model: config.EMBEDDING_MODEL, input: texts }),
-      signal,
-    });
-    if (!response.ok) throw Errors.internal('Embedding provider request failed', { status: response.status }, 'EMBEDDING_PROVIDER_ERROR');
-    const payload = await response.json() as { data?: Array<{ embedding?: number[]; index?: number }> };
-    const ordered = [...(payload.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-    if (ordered.length !== texts.length || ordered.some((item) => !Array.isArray(item.embedding) || item.embedding.length !== config.EMBEDDING_DIMENSIONS)) {
-      throw Errors.internal('Embedding provider returned invalid dimensions', undefined, 'INVALID_EMBEDDING_RESPONSE');
-    }
-    return ordered.map((item) => item.embedding!);
-  },
-};
+/** Test-only: reset the cached provider so config stubs take effect. */
+export function resetEmbeddingProviderCache(): void {
+  cachedProvider = null;
+}
 
 export interface DocumentChunk {
   text: string;
@@ -142,7 +91,12 @@ const defaultDependencies: IngestionDependencies = {
   storage: s3Storage,
   scanner: malwareScanner,
   extractor: extractDocument,
-  embeddings: internalEmbeddingProvider,
+  // Resolved on first access (not at module load) so importing this module
+  // never throws when embeddings are unconfigured — the error surfaces only
+  // when an embedding is actually attempted.
+  get embeddings() {
+    return internalEmbeddingProvider();
+  },
 };
 
 function assertValidVectors(vectors: number[][], dimensions: number): void {

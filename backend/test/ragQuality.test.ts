@@ -9,10 +9,10 @@ vi.mock('../src/documents/ingestion.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/documents/ingestion.js')>();
   return {
     ...original,
-    internalEmbeddingProvider: {
+    internalEmbeddingProvider: () => ({
       model: 'embedding-test', version: '1', dimensions: 2,
       embed: embedMock,
-    },
+    }),
   };
 });
 
