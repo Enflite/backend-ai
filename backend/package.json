@@ -15,7 +15,8 @@
     "create-user": "tsx scripts/create-user.ts",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "eval": "tsx src/eval/cli.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1135.0",
