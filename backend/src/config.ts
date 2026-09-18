@@ -69,6 +69,26 @@ const envSchema = z.object({
   // caller's (client-disconnect) signal, so a hung tool cannot hold a chat
   // turn or worker slot indefinitely.
   AI_TOOL_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(60000),
+  // ---------------------------------------------------------------------------
+  // Gateway fairness (Phase 4b): in-flight concurrency caps and request-rate
+  // limits on the expensive AI endpoints. Hitting a concurrency cap returns a
+  // friendly HTTP 429 'busy' body (see src/ai/gateway/limits.ts), never a
+  // silent drop. Rate-limit 429s from @fastify/rate-limit use the same body.
+  // ---------------------------------------------------------------------------
+  // In-flight chat streams per tenant / per user. A slot is held for the
+  // whole SSE stream (including agentic tool rounds) and released on
+  // close/error/abort. In-process per instance; front multi-instance
+  // deployments with a shared limiter (see docs/deployment.md).
+  AI_MAX_CONCURRENT_PER_TENANT: z.coerce.number().int().min(1).max(10000).default(20),
+  AI_MAX_CONCURRENT_PER_USER: z.coerce.number().int().min(1).max(1000).default(5),
+  // In-flight direct tool executions per user. Tool calls fan out, so this is
+  // deliberately looser than the chat-stream user cap.
+  AI_MAX_CONCURRENT_TOOLS_PER_USER: z.coerce.number().int().min(1).max(10000).default(10),
+  // Sustained request rates: @fastify/rate-limit per-route buckets keyed by
+  // session token (or IP). The chat stream is long-lived, so its per-minute
+  // request rate is lower than the cheap, bursty tool endpoint's.
+  CHAT_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).max(10000).default(30),
+  TOOL_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).max(100000).default(120),
   EMBEDDING_BASE_URL: z.string().url().optional(),
   EMBEDDING_MODEL: z.string().optional(),
   EMBEDDING_MODEL_VERSION: z.string().default('1'),
