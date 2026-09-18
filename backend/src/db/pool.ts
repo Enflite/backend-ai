@@ -48,3 +48,19 @@ export async function tenantQuery<T extends pg.QueryResultRow = any>(
 ): Promise<pg.QueryResult<T>> {
   return withTenant(tenantId, (client) => client.query<T>(text, params));
 }
+
+/**
+ * Run a callback inside a single database transaction with the RLS tenant
+ * context set. Unlike tenantQuery (one statement per transaction), every
+ * statement issued through `client` participates in the same transaction, so
+ * SELECT ... FOR UPDATE locks are held until commit.
+ */
+export async function withTenantTx<T>(
+  tenantId: string,
+  callback: (client: pg.PoolClient) => Promise<T>
+): Promise<T> {
+  return withTx(async (client) => {
+    await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+    return callback(client);
+  });
+}
