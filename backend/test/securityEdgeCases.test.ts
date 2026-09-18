@@ -22,14 +22,9 @@ const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 const { currentAuth } = vi.hoisted(() => ({ currentAuth: {} as Record<string, unknown> }));
 
-const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
+const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
-vi.mock('../src/ai/gateway/modelLifecycle.js', async (importOriginal) => {
-  // Only the resolution helper is stubbed; admin routes need the real
-  // MODEL_STATUSES / transitionModel exports from this module.
-  const actual = await importOriginal<typeof import('../src/ai/gateway/modelLifecycle.js')>();
-  return { ...actual, resolveServingModel };
-});
+vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 // Keep the real sanitizeReason: secret-redaction assertions below run against
 // production code, with only the DB write itself mocked out.
 vi.mock('../src/audit/audit.js', async (importOriginal) => ({
@@ -263,21 +258,31 @@ describe('prompt-injection resistance', () => {
   });
 
   it('chat input cannot smuggle a classification into tool calls', () => {
-    // The agentic loop binds the tool call's classification to the
-    // conversation's stored classification (server-side), never to message
-    // content. Assert the wiring in source. The loop invokes tools through
-    // runToolCallWithRecovery(runToolCall, {...}) — the options object is the
-    // second argument.
-    const source = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'chat', 'routes.ts'),
+    // The agentic loop binds the tool call's classification to the turn's
+    // server-side classification, never to message content. The loop invokes
+    // tools through runToolCallWithRecovery(toolRunner, {...}) — the options
+    // object is the second argument.
+    const loopSource = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'chat', 'agenticLoop.ts'),
       'utf8'
     );
-    const callSites = [...source.matchAll(/runToolCallWithRecovery\(runToolCall, \{([\s\S]*?)\}\)/g)].map((m) => m[1]);
+    const callSites = [...loopSource.matchAll(/runToolCallWithRecovery\(toolRunner, \{([\s\S]*?)\}\)/g)].map((m) => m[1]);
     expect(callSites.length).toBeGreaterThan(0);
     for (const site of callSites) {
       expect(site).toContain('classification,');
       expect(site).not.toMatch(/classification:\s*parsed/);
       expect(site).not.toMatch(/classification:\s*content/);
+    }
+    // And the chat route feeds the loop its own server-side classification —
+    // the value the clearance check approved, not anything from the body.
+    const routeSource = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'chat', 'routes.ts'),
+      'utf8'
+    );
+    const loopSites = [...routeSource.matchAll(/runAgenticLoop\(\{([\s\S]*?)\}\)/g)].map((m) => m[1]);
+    expect(loopSites.length).toBeGreaterThan(0);
+    for (const site of loopSites) {
+      expect(site).toContain('classification,');
     }
   });
 });

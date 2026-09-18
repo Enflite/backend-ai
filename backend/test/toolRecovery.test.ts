@@ -135,9 +135,9 @@ const { currentAuth } = vi.hoisted(() => ({
   },
 }));
 
-const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
+const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
-vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({ resolveServingModel }));
+vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
 vi.mock('../src/ai/gateway/gateway.js', async (importOriginal) => {
@@ -201,6 +201,13 @@ describe('chat route tool recovery', () => {
     });
     listApprovedModelsForUser.mockResolvedValue([testModel]);
     getApprovedModelForUser.mockResolvedValue(testModel);
+  resolveCapabilityModel.mockResolvedValue({
+    requested: 'chat',
+    resolved: 'chat',
+    model: testModel,
+    fallbackUsed: false,
+    strategy: 'quality',
+  });
     retrieveAuthorizedContext.mockResolvedValue({ context: '', citations: [], results: [] });
     recordAudit.mockResolvedValue(undefined);
   });

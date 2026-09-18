@@ -335,6 +335,17 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
             success: true,
             metadata: { maxIterations, pendingToolCalls: toolCalls.map((c) => c.name) },
           });
+          // Say so in the transcript: the user deserves to know the turn was
+          // cut off by the budget, not finished by the model. This is
+          // server narration, clearly bracketed — never model output.
+          const pending = toolCalls.map((c) => c.name).join(', ');
+          const notice =
+            `\n\n[I stopped after ${maxIterations} tool round${maxIterations === 1 ? '' : 's'} ` +
+            `to keep the turn bounded — ${pending} didn't run. Ask me to continue and I'll pick up where I left off.]`;
+          content += notice;
+          await sink.text(notice);
+          finishReason = 'tool_budget';
+          truncatedByCap = true;
         }
         break;
       }

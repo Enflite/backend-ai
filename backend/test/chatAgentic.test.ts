@@ -23,9 +23,9 @@ const { currentAuth } = vi.hoisted(() => ({
   },
 }));
 
-const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
+const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
-vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({ resolveServingModel }));
+vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
 vi.mock('../src/ai/gateway/gateway.js', async (importOriginal) => {
@@ -92,6 +92,13 @@ beforeEach(() => {
   sytelineTool.execute = vi.fn(async () => ({ item: 'ABC', price: 42 })) as never;
   mockDb();
   listApprovedModelsForUser.mockResolvedValue([testModel]);
+  resolveCapabilityModel.mockResolvedValue({
+    requested: 'chat',
+    resolved: 'chat',
+    model: testModel,
+    fallbackUsed: false,
+    strategy: 'quality',
+  });
   getApprovedModelForUser.mockResolvedValue(testModel);
   retrieveAuthorizedContext.mockResolvedValue({ context: '', citations: [], results: [] });
   recordAudit.mockResolvedValue(undefined);

@@ -21,7 +21,7 @@ const { listApprovedModelsForUser, getApprovedModelForUser } = vi.hoisted(() => 
   listApprovedModelsForUser: vi.fn(),
   getApprovedModelForUser: vi.fn(),
 }));
-const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
+const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: vi.fn() }));
 const { retrieveAuthorizedContext } = vi.hoisted(() => ({ retrieveAuthorizedContext: vi.fn() }));
 
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
@@ -32,7 +32,7 @@ vi.mock('../src/ai/gateway/gateway.js', async (importOriginal) => {
 vi.mock('../src/tools/gateway.js', () => ({ runToolCall, toolRegistry: [] }));
 // Per repo convention, the audit mock includes sanitizeReason.
 vi.mock('../src/audit/audit.js', () => ({ recordAudit, sanitizeReason: (reason: string) => reason }));
-vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({ resolveServingModel }));
+vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
 vi.mock('../src/auth/middleware.js', () => ({
@@ -136,7 +136,13 @@ beforeEach(() => {
   mockChatDb();
   listApprovedModelsForUser.mockResolvedValue([testModel]);
   getApprovedModelForUser.mockResolvedValue(testModel);
-  resolveServingModel.mockResolvedValue(null);
+  resolveCapabilityModel.mockResolvedValue({
+    requested: 'chat',
+    resolved: 'chat',
+    model: testModel,
+    fallbackUsed: false,
+    strategy: 'quality',
+  });
   retrieveAuthorizedContext.mockResolvedValue({ context: '', citations: [], results: [] });
   recordAudit.mockResolvedValue(undefined);
 });

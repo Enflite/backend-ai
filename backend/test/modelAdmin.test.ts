@@ -15,7 +15,7 @@ const { getPromotionGate } = vi.hoisted(() => ({ getPromotionGate: vi.fn() }));
 // Mutable so each test can act as an AI Admin or an unprivileged user.
 const authState = { permissions: ['model:manage', 'model:use'] as string[] };
 
-vi.mock('../src/db/pool.js', () => ({ query, withTx }));
+vi.mock('../src/db/pool.js', () => ({ query, tenantQuery: query, withTx }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit, recordAuditInTx }));
 vi.mock('../src/eval/compare.js', () => ({ getPromotionGate }));
 vi.mock('../src/auth/middleware.js', () => ({
@@ -446,6 +446,75 @@ describe('/admin/serving-defaults', () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('MODEL_NOT_SERVABLE');
+    await fastify.close();
+  });
+});
+
+describe('/admin/routing-policies', () => {
+  const tenantId = '22222222-2222-4222-8222-222222222222';
+  const policyRow = {
+    tenantId, capability: 'syteline', strategy: 'latency', fallbackToChat: true,
+    updatedBy: 'admin-1', updatedAt: new Date('2026-09-01T00:00:00Z'),
+  };
+
+  it('lists the tenant routing policies', async () => {
+    query.mockResolvedValue({ rows: [policyRow], rowCount: 1 });
+    const fastify = await app();
+    const res = await fastify.inject({ method: 'GET', url: '/admin/routing-policies' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().policies).toHaveLength(1);
+    expect(res.json().policies[0]).toMatchObject({ capability: 'syteline', strategy: 'latency' });
+    await fastify.close();
+  });
+
+  it('returns the platform default for an unconfigured capability', async () => {
+    query.mockResolvedValue({ rows: [], rowCount: 0 });
+    const fastify = await app();
+    const res = await fastify.inject({ method: 'GET', url: '/admin/routing-policies/coding' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().policy).toMatchObject({
+      tenantId, capability: 'coding', strategy: 'quality', fallbackToChat: true, updatedBy: null,
+    });
+    await fastify.close();
+  });
+
+  it('rejects unknown capabilities with INVALID_CAPABILITY', async () => {
+    const fastify = await app();
+    const res = await fastify.inject({ method: 'GET', url: '/admin/routing-policies/image-gen' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('INVALID_CAPABILITY');
+    await fastify.close();
+  });
+
+  it('sets a policy and audits it', async () => {
+    query.mockResolvedValue({
+      rows: [{ ...policyRow, strategy: 'cost', fallbackToChat: false }], rowCount: 1,
+    });
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'PUT', url: '/admin/routing-policies/syteline',
+      payload: { strategy: 'cost', fallbackToChat: false },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().policy).toMatchObject({ capability: 'syteline', strategy: 'cost', fallbackToChat: false });
+    expect(recordAuditInTx).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'MODEL_ROUTING_POLICY_SET', resourceId: `${tenantId}:syteline` })
+    );
+    await fastify.close();
+  });
+
+  it('rejects invalid strategies and requires model:manage', async () => {
+    const fastify = await app();
+    const bad = await fastify.inject({
+      method: 'PUT', url: '/admin/routing-policies/syteline',
+      payload: { strategy: 'rocket', fallbackToChat: true },
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().error.code).toBe('INVALID_REQUEST');
+    authState.permissions = ['model:use'];
+    const denied = await fastify.inject({ method: 'GET', url: '/admin/routing-policies' });
+    expect(denied.statusCode).toBe(403);
     await fastify.close();
   });
 });
