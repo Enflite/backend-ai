@@ -1,7 +1,8 @@
 import { Errors, AppError } from '../../errors.js';
 import { recordAudit } from '../../audit/audit.js';
-import { getApprovedModelForUser } from './modelRegistry.js';
-import { streamChat } from './vllmProvider.js';
+import { getApprovedModelForUser, ApprovedModel } from './modelRegistry.js';
+import { streamChat, ProviderEvent, ProviderToolDefinition, TokenUsage, ChatMessage } from './vllmProvider.js';
+export type { ProviderToolDefinition, ChatMessage, TokenUsage };
 import { Classification } from '../../authz/permissions.js';
 import { canModelProcess } from '../../policy/engine.js';
 import { config } from '../../config.js';
@@ -20,17 +21,33 @@ export interface GatewayStreamInput {
   requestId?: string;
   modelId: string;
   classification: Classification;
-  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  messages: ChatMessage[];
+  /** OpenAI-compatible tool definitions the model may call this turn. */
+  tools?: ProviderToolDefinition[];
   signal?: AbortSignal;
+  /** Filled in as the stream progresses: time-to-first-token and usage. */
+  telemetry?: GatewayTelemetry;
 }
 
-export async function* gatewayStream(
-  input: GatewayStreamInput
-): AsyncGenerator<string, void, unknown> {
-  const model = await getApprovedModelForUser(input.modelId, input.tenantId, input.userId, input.roleId);
-  if (model.provider !== 'vllm' && model.provider !== 'openai-compatible') {
-    throw Errors.forbidden('MODEL_PROVIDER_UNSUPPORTED', 'Approved model provider is not supported by this gateway');
-  }
+export interface GatewayTelemetry {
+  timeToFirstTokenMs?: number;
+  usage?: TokenUsage;
+  fallbackUsed?: boolean;
+  fallbackModelId?: string;
+  fallbackModelName?: string;
+}
+
+/** Gateway-level events (provider events plus failover notices). */
+export type GatewayEvent = ProviderEvent | { type: 'failover'; modelId: string; modelName: string; contextWindow: number };
+
+export interface GatewayStreamResult {
+  events: AsyncGenerator<GatewayEvent, void, unknown>;
+  /** The primary model (authorization already verified). */
+  model: ApprovedModel;
+  telemetry: GatewayTelemetry;
+}
+
+function resolveEndpoint(model: ApprovedModel): void {
   const allowedOrigins = new Set(config.AI_PROVIDER_ALLOWED_ORIGINS.split(',').map((value) => value.trim()));
   let endpointOrigin: string;
   try {
@@ -41,53 +58,218 @@ export async function* gatewayStream(
   if (!allowedOrigins.has(endpointOrigin)) {
     throw Errors.forbidden('MODEL_ENDPOINT_DENIED', 'Approved model endpoint is outside the server allowlist');
   }
-  const decision = canModelProcess(input.classification, model.allowed_classifications);
-  if (!decision.allowed) throw Errors.forbidden('MODEL_CLASSIFICATION_DENIED', 'Model is not approved for this data classification');
+}
 
-  const fullMessages = [
+function checkClassification(classification: Classification, model: ApprovedModel): void {
+  const decision = canModelProcess(classification, model.allowed_classifications);
+  if (!decision.allowed) throw Errors.forbidden('MODEL_CLASSIFICATION_DENIED', 'Model is not approved for this data classification');
+}
+
+function checkProviderSupport(model: ApprovedModel): void {
+  if (model.provider !== 'vllm' && model.provider !== 'openai-compatible') {
+    throw Errors.forbidden('MODEL_PROVIDER_UNSUPPORTED', 'Approved model provider is not supported by this gateway');
+  }
+}
+
+/**
+ * Heuristic token estimate (chars / 4). Documented as an approximation for
+ * context-window budgeting only — never for billing.
+ */
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+export function estimateMessagesTokens(messages: ChatMessage[]): number {
+  return messages.reduce((total, message) => {
+    const content = typeof message.content === 'string' ? message.content : '';
+    return total + estimateTokens(content) + 8; // per-message framing overhead
+  }, 0);
+}
+
+/**
+ * Sliding-window truncation for the model's context window.
+ *
+ * Strategy (documented, never silent):
+ * - The gateway system prompt is ALWAYS retained (index 0 of the result).
+ * - The most recent messages are retained; oldest non-system messages are
+ *   dropped first until the budget fits.
+ * - `reserveTokens` keeps headroom for the response (defaults to 25% of the
+ *   window or 4096, whichever is smaller).
+ * - Tool-result messages are dropped before user/assistant history when
+ *   forced to choose, since they are reproducible untrusted data.
+ *
+ * Returns the truncated list and how many messages were dropped so callers
+ * can surface it (e.g. in audit metadata or UI hints).
+ */
+export function applyContextWindow(
+  messages: ChatMessage[],
+  contextWindow: number,
+  reserveTokens?: number
+): { messages: ChatMessage[]; dropped: number } {
+  const systemPrompt: ChatMessage = { role: 'system', content: SYSTEM_PROMPT };
+  const history = messages.filter((message) => message.role !== 'system');
+  const reserve = reserveTokens ?? Math.min(4096, Math.floor(contextWindow * 0.25));
+  const budget = Math.max(512, contextWindow - reserve - estimateTokens(SYSTEM_PROMPT) - 8);
+
+  let selected = history;
+  let dropped = 0;
+  while (selected.length > 1 && estimateMessagesTokens(selected) > budget) {
+    // Prefer dropping tool results first (reproducible), then oldest first.
+    const toolIndex = selected.findIndex((message) => message.role === 'tool');
+    const dropIndex = toolIndex >= 0 ? toolIndex : 0;
+    selected = [...selected.slice(0, dropIndex), ...selected.slice(dropIndex + 1)];
+    dropped += 1;
+  }
+  // If even one message exceeds the budget, hard-truncate its content tail.
+  if (selected.length === 1 && estimateMessagesTokens(selected) > budget) {
+    const only = selected[0]!;
+    const content = typeof only.content === 'string' ? only.content : '';
+    const allowedChars = Math.max(0, budget * 4 - 64);
+    selected = [{ ...only, content: `${content.slice(0, allowedChars)}\n\n[truncated: message exceeded context budget]` }];
+    dropped += 1;
+  }
+  return { messages: [systemPrompt, ...selected], dropped };
+}
+
+async function* streamWithTelemetry(
+  model: ApprovedModel,
+  messages: ChatMessage[],
+  input: GatewayStreamInput,
+  telemetry: GatewayTelemetry
+): AsyncGenerator<ProviderEvent, void, unknown> {
+  const startedAt = Date.now();
+  const stream = streamChat({
+    endpoint: model.endpoint,
+    model: model.model_identifier,
+    messages,
+    tools: input.tools,
+    timeoutMs: model.request_timeout_ms ?? config.AI_REQUEST_TIMEOUT_MS,
+    maxTokens: model.max_tokens,
+    temperature: model.temperature,
+    signal: input.signal,
+  });
+  for await (const event of stream) {
+    if (event.type === 'text' && telemetry.timeToFirstTokenMs === undefined) {
+      telemetry.timeToFirstTokenMs = Date.now() - startedAt;
+    }
+    if (event.type === 'usage') {
+      telemetry.usage = event.usage;
+    }
+    yield event;
+  }
+}
+
+async function auditModelUse(
+  input: GatewayStreamInput,
+  model: ApprovedModel,
+  telemetry: GatewayTelemetry,
+  success: boolean,
+  reason?: string
+): Promise<void> {
+  await recordAudit({
+    tenantId: input.tenantId,
+    userId: input.userId,
+    requestId: input.requestId,
+    action: 'MODEL_USED',
+    resource: 'model',
+    resourceId: model.id,
+    model: model.name,
+    success,
+    reason,
+    metadata: {
+      ...(telemetry.timeToFirstTokenMs !== undefined ? { timeToFirstTokenMs: telemetry.timeToFirstTokenMs } : {}),
+      ...(telemetry.usage ? { usage: telemetry.usage } : {}),
+      ...(telemetry.fallbackUsed ? { fallbackUsed: true, fallbackModelId: telemetry.fallbackModelId } : {}),
+    },
+  });
+}
+
+/**
+ * Streams a chat completion through the authorized model, failing over once to
+ * the model's configured fallback (which must itself be approved for this
+ * user, tenant, and classification) when the primary provider fails.
+ *
+ * Failover triggers only on provider failures (network errors, timeouts, 5xx,
+ * malformed streams) — never on authorization/policy rejections, which are
+ * deterministic and must surface immediately. A `failover` event is emitted
+ * before fallback output so transcripts stay honest about which model spoke.
+ */
+export async function gatewayStream(input: GatewayStreamInput): Promise<GatewayStreamResult> {
+  const telemetry: GatewayTelemetry = input.telemetry ?? {};
+  const primary = await getApprovedModelForUser(input.modelId, input.tenantId, input.userId, input.roleId);
+
+  // Authorize the primary up front: endpoint allowlist, provider support, and
+  // classification policy. Strip any caller-supplied `system` messages and
+  // prepend the gateway's own trusted SYSTEM_PROMPT: stored history must never
+  // smuggle instructions past it, and the provider must never see a prompt
+  // without the security policy (applyContextWindow's prompt is re-added here
+  // because callers cannot be trusted to have included it).
+  checkProviderSupport(primary);
+  resolveEndpoint(primary);
+  checkClassification(input.classification, primary);
+  const messages: ChatMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
-    ...input.messages,
+    ...input.messages.filter((message) => message.role !== 'system'),
   ];
 
-  try {
-    const stream = streamChat({
-      endpoint: model.endpoint,
-      model: model.model_identifier,
-      messages: fullMessages,
-      signal: input.signal,
-    });
-
-    for await (const chunk of stream) {
-      yield chunk;
+  async function* events(): AsyncGenerator<GatewayEvent, void, unknown> {
+    let primaryProducedOutput = false;
+    try {
+      for await (const event of streamWithTelemetry(primary, messages, input, telemetry)) {
+        if (event.type === 'text' || event.type === 'tool_call') primaryProducedOutput = true;
+        yield event;
+      }
+      await auditModelUse(input, primary, telemetry, true);
+      return;
+    } catch (err) {
+      // Never fail over on policy/auth rejections: retrying those is pointless
+      // and could mask a real authorization bug. Never fail over after the
+      // primary already produced visible output either: that would stitch two
+      // models' answers into a single turn with no honest attribution.
+      const failoverEligible = !primaryProducedOutput && !(err instanceof AppError) && !!primary.fallback_model_id;
+      if (!failoverEligible) {
+        await auditModelUse(input, primary, telemetry, false, err instanceof Error ? err.message : 'Model provider error');
+        throw err instanceof AppError ? err : Errors.internal('Model provider unavailable');
+      }
+      let fallback: ApprovedModel;
+      try {
+        fallback = await getApprovedModelForUser(primary.fallback_model_id!, input.tenantId, input.userId, input.roleId);
+        checkProviderSupport(fallback);
+        resolveEndpoint(fallback);
+        checkClassification(input.classification, fallback);
+      } catch (policyError) {
+        // Deliberately generic: the specific fallback policy failure is in the
+        // audit trail, but the client must not learn which fallbacks exist or
+        // why they were denied.
+        await auditModelUse(input, primary, telemetry, false, 'Primary provider failed and fallback model failed authorization or policy checks');
+        throw Errors.internal('Model provider unavailable');
+      }
+      telemetry.fallbackUsed = true;
+      telemetry.fallbackModelId = fallback.id;
+      telemetry.fallbackModelName = fallback.name;
+      await recordAudit({
+        tenantId: input.tenantId,
+        userId: input.userId,
+        requestId: input.requestId,
+        action: 'MODEL_FAILOVER',
+        resource: 'model',
+        resourceId: fallback.id,
+        model: fallback.name,
+        success: true,
+        reason: err instanceof Error ? err.message : 'Primary model provider failed',
+        metadata: { primaryModelId: primary.id, primaryModel: primary.name },
+      });
+      yield { type: 'failover', modelId: fallback.id, modelName: fallback.name, contextWindow: fallback.context_window };
+      try {
+        yield* streamWithTelemetry(fallback, messages, input, telemetry);
+        await auditModelUse(input, fallback, telemetry, true);
+      } catch (fallbackError) {
+        // No chains: a failing fallback surfaces instead of cascading.
+        await auditModelUse(input, fallback, telemetry, false, fallbackError instanceof Error ? fallbackError.message : 'Fallback provider error');
+        throw fallbackError instanceof AppError ? fallbackError : Errors.internal('Model provider unavailable');
+      }
     }
-
-    await recordAudit({
-      tenantId: input.tenantId,
-      userId: input.userId,
-      requestId: input.requestId,
-      action: 'MODEL_USED',
-      resource: 'model',
-      resourceId: model.id,
-      model: model.name,
-      success: true,
-    });
-  } catch (err: unknown) {
-    await recordAudit({
-      tenantId: input.tenantId,
-      userId: input.userId,
-      requestId: input.requestId,
-      action: 'MODEL_USED',
-      resource: 'model',
-      resourceId: model.id,
-      model: model.name,
-      success: false,
-      reason: err instanceof Error ? err.message : 'Model provider error',
-    });
-
-    if (err instanceof AppError) {
-      throw err;
-    }
-
-    throw Errors.internal('Model provider unavailable');
   }
+
+  return { events: events(), model: primary, telemetry };
 }
