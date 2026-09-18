@@ -141,6 +141,22 @@ const envSchema = z.object({
   RAG_CHUNK_MAX_CHARS: z.coerce.number().int().min(64).max(20000).default(1600),
   RAG_CHUNK_OVERLAP: z.coerce.number().int().min(0).max(5000).default(200),
   MAX_RAG_CONTEXT_CHARACTERS: z.coerce.number().int().min(1000).max(200000).default(24000),
+  // ---------------------------------------------------------------------------
+  // Ingestion worker pool (backend/src/documents/queue.ts). The pool runs as
+  // part of the server process: recoverIngestionJobs() (called at boot) heals
+  // crashed jobs and starts the workers.
+  // ---------------------------------------------------------------------------
+  // Dedicated worker concurrency: how many ingestion jobs may execute at once.
+  // The pool claims jobs round-robin across tenants so one tenant's backlog
+  // cannot starve the others.
+  INGEST_WORKERS: z.coerce.number().int().min(1).max(32).default(4),
+  // Attempts before a failed job is quarantined (terminal; never auto-retried,
+  // admin requeue only via POST /documents/jobs/:id/requeue).
+  INGEST_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(5),
+  // Exponential backoff between attempts: base * 2^(attempts-1) with ±20%
+  // jitter, capped at INGEST_RETRY_MAX_DELAY_MS.
+  INGEST_RETRY_BASE_DELAY_MS: z.coerce.number().int().min(1000).max(600000).default(30000),
+  INGEST_RETRY_MAX_DELAY_MS: z.coerce.number().int().min(60000).max(3600000).default(900000),
   MALWARE_SCANNER_ENDPOINT: z.string().url().optional(),
   MALWARE_SCAN_MODE: z.enum(['http', 'disabled-development']).default('disabled-development'),
   SYTELINE_BASE_URL: z.string().url().optional(),
@@ -239,6 +255,11 @@ if (config.MALWARE_SCAN_MODE === 'http' && !config.MALWARE_SCANNER_ENDPOINT) {
 
 if (config.NODE_ENV === 'production' && config.EMBEDDING_DIMENSIONS !== 1536) {
   console.error('Configuration error: this schema requires 1536-dimensional embeddings');
+  process.exit(1);
+}
+
+if (config.INGEST_RETRY_MAX_DELAY_MS < config.INGEST_RETRY_BASE_DELAY_MS) {
+  console.error('Configuration error: INGEST_RETRY_MAX_DELAY_MS must be >= INGEST_RETRY_BASE_DELAY_MS');
   process.exit(1);
 }
 

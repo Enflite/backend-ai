@@ -87,6 +87,29 @@ interface IngestionDependencies {
   embeddings: EmbeddingProvider;
 }
 
+/**
+ * Cooperative cancellation hook for the ingestion pipeline.
+ *
+ * The worker pool (backend/src/documents/queue.ts) passes a `shouldCancel`
+ * closure that reads the job's `cancel_requested` flag. It is polled between
+ * pipeline stages (fetch -> scan -> extract -> embed -> store); a truthy
+ * result aborts ingestion by throwing IngestionCanceledError. Chunks are only
+ * written in the final store stage, so aborting at a boundary leaves no
+ * partial state behind.
+ */
+export interface IngestionHooks {
+  shouldCancel?: () => boolean | Promise<boolean>;
+}
+
+/** Thrown when a cancellation hook fires mid-pipeline. Carries a stable code. */
+export class IngestionCanceledError extends Error {
+  readonly code = 'INGESTION_CANCELED';
+  constructor() {
+    super('Document ingestion was canceled');
+    this.name = 'IngestionCanceledError';
+  }
+}
+
 const defaultDependencies: IngestionDependencies = {
   storage: s3Storage,
   scanner: malwareScanner,
@@ -117,7 +140,8 @@ function errorCode(error: unknown): string {
 export async function ingestDocument(
   documentId: string,
   tenantId: string,
-  dependencies: IngestionDependencies = defaultDependencies
+  dependencies: IngestionDependencies = defaultDependencies,
+  hooks: IngestionHooks = {}
 ): Promise<'READY' | 'QUARANTINED'> {
   const document = (
     await tenantQuery<{ object_key: string; mime_type: string; classification: string }>(
@@ -134,17 +158,27 @@ export async function ingestDocument(
     throw Errors.badRequest('CLASSIFICATION_REQUIRED', 'Document classification is required before ingestion');
   }
 
+  // Cooperative cancellation: polled between pipeline stages below.
+  const throwIfCanceled = async (): Promise<void> => {
+    if (hooks.shouldCancel && await hooks.shouldCancel()) {
+      throw new IngestionCanceledError();
+    }
+  };
+
   try {
     const bytes = await dependencies.storage.get(document.object_key);
+    await throwIfCanceled();
     const scan = await dependencies.scanner.scan(bytes, AbortSignal.timeout(30000));
     if (!scanMayProceed(scan, document.classification)) {
       const code = scan.verdict === 'INFECTED' ? 'MALWARE_DETECTED' : 'SCANNER_UNAVAILABLE';
       await tenantQuery(tenantId, "UPDATE documents SET status = 'QUARANTINED', error_code = $2, updated_at = NOW() WHERE id = $1", [documentId, code]);
       return 'QUARANTINED';
     }
+    await throwIfCanceled();
 
     const chunks = chunkSections(await dependencies.extractor(bytes, document.mime_type));
     if (chunks.length === 0) throw Errors.badRequest('EMPTY_DOCUMENT', 'No extractable document text found');
+    await throwIfCanceled();
     // Warn well before the hard cap so operators see oversized documents
     // coming; the cap itself stays fail-closed (TOO_MANY_CHUNKS).
     if (chunks.length >= Math.floor(config.MAX_DOCUMENT_CHUNKS * 0.75)) {
@@ -170,6 +204,7 @@ export async function ingestDocument(
       throw Errors.internal('Embedding provider returned a partial response', undefined, 'INVALID_EMBEDDING_RESPONSE');
     }
     assertValidVectors(vectors, dependencies.embeddings.dimensions);
+    await throwIfCanceled();
 
     await tenantQuery(tenantId, 'DELETE FROM document_chunks WHERE document_id = $1', [documentId]);
     // Multi-row inserts keep large documents from issuing one transaction per
@@ -208,6 +243,13 @@ export async function ingestDocument(
     await tenantQuery(tenantId, "UPDATE documents SET status = 'READY', updated_at = NOW() WHERE id = $1", [documentId]);
     return 'READY';
   } catch (error) {
+    if (error instanceof IngestionCanceledError) {
+      // A canceled job must not strand the document in PROCESSING and must
+      // not look like a failure: FAILED + INGESTION_CANCELED keeps it visible
+      // and retryable via POST /documents/:id/retry.
+      await tenantQuery(tenantId, "UPDATE documents SET status = 'FAILED', error_code = 'INGESTION_CANCELED', updated_at = NOW() WHERE id = $1", [documentId]);
+      throw error;
+    }
     await tenantQuery(tenantId, "UPDATE documents SET status = 'FAILED', error_code = $2, updated_at = NOW() WHERE id = $1 AND status <> 'QUARANTINED'", [documentId, errorCode(error)]);
     throw error;
   }

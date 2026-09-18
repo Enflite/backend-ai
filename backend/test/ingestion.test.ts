@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
 
-import { ingestDocument, chunkText } from '../src/documents/ingestion.js';
+import { ingestDocument, chunkText, IngestionCanceledError } from '../src/documents/ingestion.js';
 import { OpenAICompatibleEmbeddingProvider } from '../src/ai/providers/openaiEmbeddings.js';
 import type { EmbeddingProvider } from '../src/documents/ingestion.js';
 import { config } from '../src/config.js';
@@ -197,5 +197,45 @@ describe('ingestion chunk insert batching', () => {
     const allParams = inserts.flatMap(([, , params]: any[]) => params as unknown[]);
     const indexes = allParams.filter((_: unknown, i: number) => i % 12 === 2);
     expect(indexes).toEqual(Array.from({ length: 250 }, (_, i) => i));
+  });
+});
+
+describe('ingestion cancellation hooks', () => {
+  beforeEach(() => tenantQuery.mockReset());
+
+  it('aborts between pipeline stages when shouldCancel fires', async () => {
+    mockDocumentRow();
+    const deps = fakeDependencies();
+    let calls = 0;
+    // Cancel lands after the scan stage: extraction (a later stage) never runs.
+    const shouldCancel = () => ++calls > 1;
+    await expect(
+      ingestDocument('d1', 't1', deps as any, { shouldCancel })
+    ).rejects.toBeInstanceOf(IngestionCanceledError);
+    expect(deps.scanner.scan).toHaveBeenCalled();
+    expect(deps.extractor).not.toHaveBeenCalled();
+    // The document is left FAILED/INGESTION_CANCELED, never stranded in PROCESSING.
+    const canceledUpdate = tenantQuery.mock.calls.find(([, sql]: any[]) =>
+      (sql as string).includes("error_code = 'INGESTION_CANCELED'")
+    );
+    expect(canceledUpdate).toBeTruthy();
+    // No chunks were written: the store stage was never reached.
+    expect(
+      tenantQuery.mock.calls.some(([, sql]: any[]) => (sql as string).includes('INSERT INTO document_chunks'))
+    ).toBe(false);
+  });
+
+  it('runs to completion when shouldCancel never fires', async () => {
+    mockDocumentRow();
+    const deps = fakeDependencies();
+    await expect(
+      ingestDocument('d1', 't1', deps as any, { shouldCancel: () => false })
+    ).resolves.toBe('READY');
+  });
+
+  it('is backward compatible when no hooks are passed', async () => {
+    mockDocumentRow();
+    const deps = fakeDependencies();
+    await expect(ingestDocument('d1', 't1', deps as any)).resolves.toBe('READY');
   });
 });
