@@ -15,6 +15,7 @@ import { requestIdHook } from './requestId.js';
 import { healthRoutes } from './health.js';
 import { metricsRoutes, recordHttpRequest } from './observability/metrics.js';
 import { authRoutes } from './auth/routes.js';
+import { oidcRoutes } from './auth/oidcRoutes.js';
 import { auditRoutes } from './audit/routes.js';
 import { modelRoutes, modelAdminRoutes, modelArtifactRoutes } from './ai/gateway/routes.js';
 import { conversationRoutes } from './conversations/routes.js';
@@ -22,6 +23,8 @@ import { chatRoutes, closeActiveSseStreams } from './chat/routes.js';
 import { documentRoutes } from './documents/routes.js';
 import { toolRoutes } from './tools/routes.js';
 import { evalRoutes } from './eval/routes.js';
+import { retentionRoutes } from './retention/routes.js';
+import { startRetentionScheduler, stopRetentionScheduler } from './retention/scheduler.js';
 import { recoverIngestionJobs } from './documents/queue.js';
 import { pool, query } from './db/pool.js';
 
@@ -213,6 +216,7 @@ export async function buildServer(): Promise<FastifyInstance> {
     async (api) => {
       await api.register(healthRoutes);
       await api.register(authRoutes);
+      await api.register(oidcRoutes);
       await api.register(auditRoutes);
       await api.register(modelRoutes);
       await api.register(modelAdminRoutes);
@@ -222,9 +226,16 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(documentRoutes);
       await api.register(toolRoutes);
       await api.register(evalRoutes);
+      await api.register(retentionRoutes);
     },
     { prefix: '/api/v1' }
   );
+
+  // Retention purge scheduler (Phase 5c): in-process, every
+  // RETENTION_PURGE_INTERVAL_HOURS. Started here so it runs in every
+  // serving process; stopped on preClose. The timer is unref'd and runs
+  // never overlap.
+  startRetentionScheduler();
 
   // Root health endpoints
   await fastify.register(healthRoutes);
@@ -235,6 +246,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   // explicitly so a client holding a stream open cannot stall shutdown.
   fastify.addHook('preClose', async () => {
     closeActiveSseStreams();
+    stopRetentionScheduler();
   });
 
   return fastify;

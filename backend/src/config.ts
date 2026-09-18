@@ -161,6 +161,69 @@ const envSchema = z.object({
   MALWARE_SCAN_MODE: z.enum(['http', 'disabled-development']).default('disabled-development'),
   SYTELINE_BASE_URL: z.string().url().optional(),
   SYTELINE_API_TOKEN: z.string().optional().default(''),
+  // Per-request timeout for SyteLine adapter calls. Sits inside
+  // runToolCall's AI_TOOL_TIMEOUT_MS execution deadline: a hung upstream
+  // must not hold a chat turn or worker slot indefinitely.
+  SYTELINE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(15000),
+  // Row cap for list fields in SyteLine results (order lines, purchase
+  // orders, work orders, BOM components, inventory transactions). The
+  // adapter truncates longer lists and marks them `truncated: true` so the
+  // model knows the result is partial instead of reasoning as if it saw all.
+  SYTELINE_MAX_ROWS: z.coerce.number().int().min(1).max(1000).default(100),
+  // ---------------------------------------------------------------------------
+  // Enterprise OIDC login (Phase 5b): Authorization Code + PKCE as the
+  // primary enterprise login path, alongside password login. When
+  // OIDC_ENABLED, the required fields are validated at boot (fail fast);
+  // otherwise they are ignored.
+  // ---------------------------------------------------------------------------
+  OIDC_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(false),
+  OIDC_ISSUER: z.string().url().optional(),
+  OIDC_CLIENT_ID: z.string().min(1).optional(),
+  OIDC_CLIENT_SECRET: z.string().optional().default(''),
+  OIDC_REDIRECT_URI: z.string().url().optional(),
+  OIDC_SCOPES: z.string().min(1).default('openid email profile'),
+  // Claim in the ID token / userinfo carrying the user's IdP groups.
+  OIDC_GROUP_CLAIM: z.string().min(1).default('groups'),
+  // Claims carrying the user's email and display name. The defaults follow
+  // the OIDC standard claims; override when the IdP uses custom ones.
+  OIDC_EMAIL_CLAIM: z.string().min(1).default('email'),
+  OIDC_NAME_CLAIM: z.string().min(1).default('name'),
+  // JSON object mapping IdP group names to internal role names, e.g.
+  // '{"sso-admins":"Admin","sso-auditors":"Security Admin"}'. Groups with
+  // no mapping — or a mapping to a role that does not exist — fall back to
+  // the least-privilege 'User' role (fail closed).
+  OIDC_ROLE_MAPPING: z.string().default('{}'),
+  // Tenant that auto-provisioned OIDC users join. Explicit on purpose: the
+  // platform never guesses which tenant an enterprise identity belongs to.
+  OIDC_DEFAULT_TENANT_ID: z.string().uuid().optional(),
+  // Clearance for auto-provisioned OIDC users. Least-privilege default:
+  // an admin raises it after verifying the person.
+  OIDC_DEFAULT_CLEARANCE: z.enum(['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'PROPRIETARY', 'CUI']).default('PUBLIC'),
+  // Frontend page the IdP callback redirects to (tokens travel in the URL
+  // fragment, never the query string, so they stay out of server logs).
+  OIDC_FRONTEND_CALLBACK: z.string().url().optional(),
+  // ---------------------------------------------------------------------------
+  // DLP: assistant outbound boundary (Phase 5c). Built-in SSN / credit-card
+  // (Luhn) detectors redact with a visible marker; the optional external
+  // hook adds best-effort defense in depth. The platform runs without it.
+  // ---------------------------------------------------------------------------
+  DLP_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(true),
+  DLP_EXTERNAL_ENDPOINT: z.string().url().optional(),
+  DLP_EXTERNAL_API_KEY: z.string().optional().default(''),
+  DLP_EXTERNAL_TIMEOUT_MS: z.coerce.number().int().min(100).max(30000).default(2000),
+  // ---------------------------------------------------------------------------
+  // Retention (Phase 5c): per-tenant data retention for conversations,
+  // messages, and audit events. Null/0 disables purging for that table
+  // (keep forever). Per-tenant overrides live in retention_policies.
+  // ---------------------------------------------------------------------------
+  RETENTION_CONVERSATIONS_DAYS: z.coerce.number().int().min(0).nullable().default(365),
+  RETENTION_MESSAGES_DAYS: z.coerce.number().int().min(0).nullable().default(365),
+  RETENTION_AUDIT_EVENTS_DAYS: z.coerce.number().int().min(0).nullable().default(730),
+  RETENTION_PURGE_INTERVAL_HOURS: z.coerce.number().min(1).max(168).default(24),
   // ---------------------------------------------------------------------------
   // Observability (backend/src/observability/). /metrics is public in dev and
   // test for easy scraping; in production it defaults to hidden (404) and
@@ -277,6 +340,37 @@ if (config.NODE_ENV === 'production' && config.EMBEDDING_DIMENSIONS !== 1536) {
 if (config.INGEST_RETRY_MAX_DELAY_MS < config.INGEST_RETRY_BASE_DELAY_MS) {
   console.error('Configuration error: INGEST_RETRY_MAX_DELAY_MS must be >= INGEST_RETRY_BASE_DELAY_MS');
   process.exit(1);
+}
+
+// OIDC (enterprise login): when enabled, every field the flow needs must be
+// present and well-formed, otherwise the server refuses to boot rather than
+// serving a half-configured login path.
+if (config.OIDC_ENABLED) {
+  const missing: string[] = [];
+  if (!config.OIDC_ISSUER) missing.push('OIDC_ISSUER');
+  if (!config.OIDC_CLIENT_ID) missing.push('OIDC_CLIENT_ID');
+  if (!config.OIDC_CLIENT_SECRET) missing.push('OIDC_CLIENT_SECRET');
+  if (!config.OIDC_REDIRECT_URI) missing.push('OIDC_REDIRECT_URI');
+  if (!config.OIDC_DEFAULT_TENANT_ID) missing.push('OIDC_DEFAULT_TENANT_ID');
+  if (!config.OIDC_FRONTEND_CALLBACK) missing.push('OIDC_FRONTEND_CALLBACK');
+  if (missing.length > 0) {
+    console.error(`Configuration error: OIDC_ENABLED requires ${missing.join(', ')}`);
+    process.exit(1);
+  }
+  let roleMapping: unknown;
+  try {
+    roleMapping = JSON.parse(config.OIDC_ROLE_MAPPING);
+  } catch {
+    console.error('Configuration error: OIDC_ROLE_MAPPING is not valid JSON');
+    process.exit(1);
+  }
+  const mappingOk =
+    typeof roleMapping === 'object' && roleMapping !== null &&
+    Object.entries(roleMapping).every(([group, role]) => typeof group === 'string' && typeof role === 'string');
+  if (!mappingOk) {
+    console.error('Configuration error: OIDC_ROLE_MAPPING must be a JSON object of string group -> string role');
+    process.exit(1);
+  }
 }
 
 export type Config = typeof config;

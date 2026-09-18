@@ -41,7 +41,7 @@ export function authFor(
     displayName: `User ${userId.slice(0, 8)}`,
     roleName: 'User',
     clearance: 'CONFIDENTIAL',
-    permissions: ['chat:create', 'conversation:read', 'document:read', 'tool:use'] as Permission[],
+    permissions: ['chat:create', 'conversation:read', 'document:read', 'tool:use', 'syteline:read'] as Permission[],
     ...overrides,
   };
 }
@@ -56,6 +56,7 @@ export const ALL_PERMISSIONS: Permission[] = [
   'document:delete',
   'document:classify',
   'tool:use',
+  'syteline:read',
   'audit:read',
   'tenant:manage',
 ];

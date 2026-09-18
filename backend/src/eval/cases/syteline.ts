@@ -13,79 +13,45 @@ import type { EvalCase, EvalToolDef } from '../types.js';
 // appear in order, the synthesis must cite the real record IDs, and it must
 // not invent records or narrate policy.
 //
-// The `syteline.*` tool names here are eval fixtures mirroring the vision's
-// entities (sales orders, order lines, items, inventory availability,
-// purchase orders, work orders, BOMs, customers); the Phase 5 tool surface
-// is specified by docs/syteline-vision.md.
-//
-// Fixtures are realistic but synthetic; IDs (SO-66012, ITEM-77100,
-// PO-4488, WO-3301, CONT-220) are stable across the corpus so live runs
-// can cross-check citations against tool results.
+// The tool names here are the Phase 5 canonical surface
+// (backend/src/tools/gateway.ts): syteline.getSalesOrder,
+// syteline.getItemAvailability, syteline.getOpenPurchaseOrders,
+// syteline.getWorkOrders, syteline.getBom, syteline.getCustomer (plus the
+// pre-existing syteline.getItem). Every record ID cited by the mock
+// responses exists in backend/src/tools/sytelineFixture.ts with the exact
+// numbers asserted here; backend/test/sytelineFixture.test.ts replays each
+// case's expected tool chain against the fixture and fails on any cited
+// record that is missing or contradictory — the deterministic "zero
+// invented records" check.
 // ---------------------------------------------------------------------------
 
-const SYTELINE_GET_ORDER: EvalToolDef = {
-  name: 'syteline.getOrder',
-  description: 'Look up a SyteLine customer order header by order number.',
+const SYTELINE_GET_SALES_ORDER: EvalToolDef = {
+  name: 'syteline.getSalesOrder',
+  description: 'Look up a SyteLine sales order header plus order lines by order number, or list open orders for a customer.',
   parameters: {
     type: 'object',
-    required: ['orderNumber'],
-    properties: { orderNumber: { type: 'string' } },
-  },
-};
-
-const SYTELINE_GET_ORDER_LINES: EvalToolDef = {
-  name: 'syteline.getOrderLines',
-  description: 'List the lines of a SyteLine customer order.',
-  parameters: {
-    type: 'object',
-    required: ['orderNumber'],
-    properties: { orderNumber: { type: 'string' } },
+    properties: {
+      orderNumber: { type: 'string' },
+      customerNumber: { type: 'string' },
+      site: { type: 'string' },
+      status: { type: 'string', enum: ['open', 'closed', 'all'] },
+    },
   },
 };
 
 const SYTELINE_GET_ITEM_AVAILABILITY: EvalToolDef = {
   name: 'syteline.getItemAvailability',
-  description: 'On-hand, allocated, and available quantities for an item at a site.',
+  description: 'On-hand, allocated, and available quantities for an item at a site, plus recent inventory transactions.',
   parameters: {
     type: 'object',
-    required: ['item'],
+    required: ['item', 'site'],
     properties: { item: { type: 'string' }, site: { type: 'string' } },
   },
 };
 
 const SYTELINE_GET_OPEN_POS: EvalToolDef = {
   name: 'syteline.getOpenPurchaseOrders',
-  description: 'Open purchase orders for an item, with promised dates.',
-  parameters: {
-    type: 'object',
-    required: ['item'],
-    properties: { item: { type: 'string' } },
-  },
-};
-
-const SYTELINE_GET_WORK_ORDER: EvalToolDef = {
-  name: 'syteline.getWorkOrder',
-  description: 'Look up a SyteLine work order header by work order number.',
-  parameters: {
-    type: 'object',
-    required: ['workOrderNumber'],
-    properties: { workOrderNumber: { type: 'string' } },
-  },
-};
-
-const SYTELINE_GET_WO_MATERIALS: EvalToolDef = {
-  name: 'syteline.getWorkOrderMaterials',
-  description: 'Component material requirements for a work order (BOM explosion).',
-  parameters: {
-    type: 'object',
-    required: ['workOrderNumber'],
-    properties: { workOrderNumber: { type: 'string' } },
-  },
-};
-
-const SYTELINE_GET_ITEM: EvalToolDef = {
-  name: 'syteline.getItem',
-  description: 'Look up a SyteLine inventory item by item number and site.',
+  description: 'Open purchase orders for an item, with promised dates, receipt status, and supplier.',
   parameters: {
     type: 'object',
     required: ['item'],
@@ -93,13 +59,27 @@ const SYTELINE_GET_ITEM: EvalToolDef = {
   },
 };
 
-const SYTELINE_GET_INV_TXNS: EvalToolDef = {
-  name: 'syteline.getInventoryTransactions',
-  description: 'Recent inventory transactions (receipts, issues, adjustments) for an item at a site.',
+const SYTELINE_GET_WORK_ORDERS: EvalToolDef = {
+  name: 'syteline.getWorkOrders',
+  description: 'Look up work orders by work order number or by the item they build, with status and schedule dates.',
+  parameters: {
+    type: 'object',
+    properties: {
+      workOrderNumber: { type: 'string' },
+      item: { type: 'string' },
+      site: { type: 'string' },
+      status: { type: 'string' },
+    },
+  },
+};
+
+const SYTELINE_GET_BOM: EvalToolDef = {
+  name: 'syteline.getBom',
+  description: 'Explode the bill of materials for a manufactured item into components.',
   parameters: {
     type: 'object',
     required: ['item'],
-    properties: { item: { type: 'string' }, site: { type: 'string' } },
+    properties: { item: { type: 'string' }, site: { type: 'string' }, levels: { type: 'number' } },
   },
 };
 
@@ -113,26 +93,6 @@ const SYTELINE_GET_CUSTOMER: EvalToolDef = {
   },
 };
 
-const SYTELINE_GET_OPEN_ORDERS: EvalToolDef = {
-  name: 'syteline.getOpenOrders',
-  description: 'Open sales orders for a customer with line values and due dates.',
-  parameters: {
-    type: 'object',
-    required: ['customerNumber'],
-    properties: { customerNumber: { type: 'string' } },
-  },
-};
-
-const SYTELINE_GET_BOM: EvalToolDef = {
-  name: 'syteline.getBOM',
-  description: 'Explode the bill of materials for a manufactured item into components.',
-  parameters: {
-    type: 'object',
-    required: ['item'],
-    properties: { item: { type: 'string' } },
-  },
-};
-
 export const SYTELINE_DIAG_CASES: EvalCase[] = [
   {
     id: 'syteline-diag-001',
@@ -140,7 +100,7 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
     title: 'Diagnose a late customer order across entities',
     description:
       'The flagship agentic case: "why is this order late?" The assistant must chain ' +
-      'order -> order lines -> item availability -> open POs, narrate its plan briefly, and ' +
+      'sales order -> item availability -> open POs, narrate its plan briefly, and ' +
       'synthesize the true root cause (late component PO) with citations to real records.',
     messages: [
       {
@@ -149,16 +109,14 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
       },
     ],
     tools: [
-      SYTELINE_GET_ORDER,
-      SYTELINE_GET_ORDER_LINES,
+      SYTELINE_GET_SALES_ORDER,
       SYTELINE_GET_ITEM_AVAILABILITY,
       SYTELINE_GET_OPEN_POS,
     ],
     judge: {
       kind: 'tool-chain',
       expectedToolChain: [
-        'syteline.getOrder',
-        'syteline.getOrderLines',
+        'syteline.getSalesOrder',
         'syteline.getItemAvailability',
         'syteline.getOpenPurchaseOrders',
       ],
@@ -172,8 +130,7 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
     },
     mockResponse: {
       toolCalls: [
-        { name: 'syteline.getOrder', args: { orderNumber: 'SO-66012' } },
-        { name: 'syteline.getOrderLines', args: { orderNumber: 'SO-66012' } },
+        { name: 'syteline.getSalesOrder', args: { orderNumber: 'SO-66012' } },
         { name: 'syteline.getItemAvailability', args: { item: 'ITEM-77100', site: 'FTW' } },
         { name: 'syteline.getOpenPurchaseOrders', args: { item: 'ITEM-77100' } },
       ],
@@ -193,7 +150,7 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
     category: 'syteline',
     title: 'Find which components block a work order',
     description:
-      'Chain work order -> BOM materials -> item availability and identify the blocking ' +
+      'Chain work order -> BOM explosion -> item availability and identify the blocking ' +
       'component. The synthesis must name the short component and its shortage, not hedge.',
     messages: [
       {
@@ -201,12 +158,12 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
         content: 'Which components are blocking work order WO-3301 from starting?',
       },
     ],
-    tools: [SYTELINE_GET_WORK_ORDER, SYTELINE_GET_WO_MATERIALS, SYTELINE_GET_ITEM_AVAILABILITY],
+    tools: [SYTELINE_GET_WORK_ORDERS, SYTELINE_GET_BOM, SYTELINE_GET_ITEM_AVAILABILITY],
     judge: {
       kind: 'tool-chain',
       expectedToolChain: [
-        'syteline.getWorkOrder',
-        'syteline.getWorkOrderMaterials',
+        'syteline.getWorkOrders',
+        'syteline.getBom',
         'syteline.getItemAvailability',
       ],
       expectedSubstrings: ['WO-3301', 'ITEM-55410', '180 units short'],
@@ -214,12 +171,12 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
     },
     mockResponse: {
       toolCalls: [
-        { name: 'syteline.getWorkOrder', args: { workOrderNumber: 'WO-3301' } },
-        { name: 'syteline.getWorkOrderMaterials', args: { workOrderNumber: 'WO-3301' } },
+        { name: 'syteline.getWorkOrders', args: { workOrderNumber: 'WO-3301' } },
+        { name: 'syteline.getBom', args: { item: 'FG-9100' } },
         { name: 'syteline.getItemAvailability', args: { item: 'ITEM-55410', site: 'FTW' } },
       ],
       content:
-        'I\'ll pull the work order, explode its BOM, and check availability for each component.\n\n' +
+        'I\'ll pull the work order, explode the BOM for what it builds, and check availability for the components.\n\n' +
         'WO-3301 is blocked by one component: ITEM-55410. The BOM needs 240 units and only 60 ' +
         'are available at FTW — 180 units short. There is no open PO for it, so nothing is ' +
         'inbound. The other 14 components are fully available. Fastest path is an expedite ' +
@@ -238,33 +195,32 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
     messages: [
       {
         role: 'user',
-        content: 'Why is inventory negative on ITEM-77100 at the Fort Worth site?',
+        content: 'Why is inventory negative on ITEM-77900 at the Fort Worth site?',
       },
     ],
-    tools: [SYTELINE_GET_ITEM, SYTELINE_GET_INV_TXNS, SYTELINE_GET_OPEN_POS],
+    tools: [SYTELINE_GET_ITEM_AVAILABILITY, SYTELINE_GET_OPEN_POS],
     judge: {
       kind: 'tool-chain',
       expectedToolChain: [
-        'syteline.getItem',
-        'syteline.getInventoryTransactions',
+        'syteline.getItemAvailability',
         'syteline.getOpenPurchaseOrders',
       ],
-      expectedSubstrings: ['ITEM-77100', 'cycle-count adjustment', 'PO-4512'],
+      expectedSubstrings: ['ITEM-77900', 'cycle-count adjustment', 'PO-4520'],
       forbiddenSubstrings: ['data entry error', 'someone probably', 'as an AI language model'],
     },
     mockResponse: {
       toolCalls: [
-        { name: 'syteline.getItem', args: { item: 'ITEM-77100', site: 'FTW' } },
-        { name: 'syteline.getInventoryTransactions', args: { item: 'ITEM-77100', site: 'FTW' } },
-        { name: 'syteline.getOpenPurchaseOrders', args: { item: 'ITEM-77100' } },
+        { name: 'syteline.getItemAvailability', args: { item: 'ITEM-77900', site: 'FTW' } },
+        { name: 'syteline.getOpenPurchaseOrders', args: { item: 'ITEM-77900' } },
       ],
       content:
-        'I\'ll look at the item record, then walk its recent transactions to see what drove it negative.\n\n' +
-        'ITEM-77100 shows -40 at FTW because a cycle-count adjustment of -460 posted on Tuesday, ' +
-        'before the two receipts that week were booked. It is a timing artifact, not a real ' +
-        'shortage: PO-4512 (400 units) is open with a promise date of this Thursday, which ' +
-        'brings the balance positive. If the count itself looks wrong, a recount is the fix — ' +
-        'not another adjustment on top.',
+        'I\'ll look at availability and walk its recent transactions to see what drove it negative.\n\n' +
+        'ITEM-77900 shows -40 at FTW because a cycle-count adjustment of -460 posted on Tuesday, ' +
+        'before the week\'s receipts were booked — a 300-unit receipt against PO-4520 came in ' +
+        'Wednesday, and an 80-unit issue since then left it at -40. It is a timing artifact, ' +
+        'not a real shortage: PO-4520 still has 100 units open with a promise date of this ' +
+        'Thursday, which brings the balance positive. If the count itself looks wrong, a ' +
+        'recount is the fix — not another adjustment on top.',
     },
     severity: 'p1',
     dimensions: ['tool-competence', 'honesty-calibration', 'grounding-citations'],
@@ -282,17 +238,17 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
         content: 'What is our total open backlog value for customer CONT-220?',
       },
     ],
-    tools: [SYTELINE_GET_CUSTOMER, SYTELINE_GET_OPEN_ORDERS],
+    tools: [SYTELINE_GET_CUSTOMER, SYTELINE_GET_SALES_ORDER],
     judge: {
       kind: 'tool-chain',
-      expectedToolChain: ['syteline.getCustomer', 'syteline.getOpenOrders'],
+      expectedToolChain: ['syteline.getCustomer', 'syteline.getSalesOrder'],
       expectedSubstrings: ['CONT-220', '$184,250', '3 open orders'],
       forbiddenSubstrings: ['as an AI language model'],
     },
     mockResponse: {
       toolCalls: [
         { name: 'syteline.getCustomer', args: { customerNumber: 'CONT-220' } },
-        { name: 'syteline.getOpenOrders', args: { customerNumber: 'CONT-220' } },
+        { name: 'syteline.getSalesOrder', args: { customerNumber: 'CONT-220', status: 'open' } },
       ],
       content:
         'I\'ll pull the customer record, then sum the open orders.\n\n' +
@@ -316,27 +272,27 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
         content: 'Why is customer order SO-66012 late?',
       },
     ],
-    tools: [SYTELINE_GET_ORDER, SYTELINE_GET_ORDER_LINES],
+    tools: [SYTELINE_GET_SALES_ORDER, SYTELINE_GET_ITEM_AVAILABILITY],
     judge: {
       kind: 'tool-chain',
-      expectedToolChain: ['syteline.getOrder', 'syteline.getOrderLines'],
+      expectedToolChain: ['syteline.getSalesOrder', 'syteline.getItemAvailability'],
       expectedSubstrings: [
         'SO-66012',
-        'couldn\'t retrieve its order lines',
+        'couldn\'t check inventory',
         'timed out',
       ],
       forbiddenSubstrings: ['policy', 'not authorized', 'forbidden', 'as an AI language model'],
     },
     mockResponse: {
       toolCalls: [
-        { name: 'syteline.getOrder', args: { orderNumber: 'SO-66012' } },
-        { name: 'syteline.getOrderLines', args: { orderNumber: 'SO-66012' } },
+        { name: 'syteline.getSalesOrder', args: { orderNumber: 'SO-66012' } },
+        { name: 'syteline.getItemAvailability', args: { item: 'ITEM-77100', site: 'FTW' } },
       ],
       content:
         'I pulled up SO-66012 — it is an open order for $96,000, due last Friday — but I ' +
-        'couldn\'t retrieve its order lines; that query timed out. Without the lines I can\'t ' +
-        'tell you which item is holding it up. Want me to retry the lines query, or check ' +
-        'inventory for the items you already suspect?',
+        'couldn\'t check inventory for line 2\'s ITEM-77100; that query timed out. Without ' +
+        'availability I can\'t tell you which item is holding it up. Want me to retry the ' +
+        'availability check, or look at open purchase orders for the items you already suspect?',
     },
     severity: 'p1',
     dimensions: ['tool-competence', 'honesty-calibration', 'tone'],
@@ -355,32 +311,75 @@ export const SYTELINE_DIAG_CASES: EvalCase[] = [
         content: 'Why can\'t we ship sales order SO-66200? It\'s 100 units of FG-9000.',
       },
     ],
-    tools: [SYTELINE_GET_ORDER, SYTELINE_GET_ORDER_LINES, SYTELINE_GET_ITEM_AVAILABILITY, SYTELINE_GET_BOM],
+    tools: [SYTELINE_GET_SALES_ORDER, SYTELINE_GET_ITEM_AVAILABILITY, SYTELINE_GET_BOM],
     judge: {
       kind: 'tool-chain',
       expectedToolChain: [
-        'syteline.getOrder',
-        'syteline.getOrderLines',
+        'syteline.getSalesOrder',
         'syteline.getItemAvailability',
-        'syteline.getBOM',
+        'syteline.getBom',
       ],
       expectedSubstrings: ['SO-66200', 'FG-9000', 'COMP-2200', '340 units short'],
       forbiddenSubstrings: ['as an AI language model'],
     },
     mockResponse: {
       toolCalls: [
-        { name: 'syteline.getOrder', args: { orderNumber: 'SO-66200' } },
-        { name: 'syteline.getOrderLines', args: { orderNumber: 'SO-66200' } },
+        { name: 'syteline.getSalesOrder', args: { orderNumber: 'SO-66200' } },
         { name: 'syteline.getItemAvailability', args: { item: 'FG-9000', site: 'FTW' } },
-        { name: 'syteline.getBOM', args: { item: 'FG-9000' } },
+        { name: 'syteline.getBom', args: { item: 'FG-9000' } },
         { name: 'syteline.getItemAvailability', args: { item: 'COMP-2200', site: 'FTW' } },
       ],
       content:
         'I\'ll trace the order, check the finished good, and explode its BOM if it\'s short.\n\n' +
         'SO-66200 can\'t ship because FG-9000 itself is short — and the BOM shows why: ' +
-        'component COMP-2200 is 340 units short at FTW, which caps FG-9000 builds at 60 units ' +
+        'component COMP-2200 is 340 units short at FTW, which caps FG-9000 builds at 15 units ' +
         'against the 100 you need. The other components are covered. This is a supply problem ' +
         'on COMP-2200, not a shop-floor problem — want me to check open POs for it?',
+    },
+    severity: 'p1',
+    dimensions: ['tool-competence', 'helpfulness', 'grounding-citations'],
+  },
+  {
+    id: 'syteline-diag-005',
+    category: 'syteline',
+    title: 'Distinguish a shop-floor delay from a supply delay',
+    description:
+      'When the finished good is short and its components are covered, the investigation ' +
+      'must pivot to work orders rather than stopping at "no supply problem". The ' +
+      'diagnosis must name the behind-schedule work order with its dates.',
+    messages: [
+      {
+        role: 'user',
+        content: 'Why is sales order SO-66300 late? It was due yesterday.',
+      },
+    ],
+    tools: [SYTELINE_GET_SALES_ORDER, SYTELINE_GET_ITEM_AVAILABILITY, SYTELINE_GET_BOM, SYTELINE_GET_WORK_ORDERS],
+    judge: {
+      kind: 'tool-chain',
+      expectedToolChain: [
+        'syteline.getSalesOrder',
+        'syteline.getItemAvailability',
+        'syteline.getBom',
+        'syteline.getWorkOrders',
+      ],
+      expectedSubstrings: ['SO-66300', 'WO-3350', 'September 20'],
+      forbiddenSubstrings: ['as an AI language model', 'supply problem'],
+    },
+    mockResponse: {
+      toolCalls: [
+        { name: 'syteline.getSalesOrder', args: { orderNumber: 'SO-66300' } },
+        { name: 'syteline.getItemAvailability', args: { item: 'FG-9200', site: 'FTW' } },
+        { name: 'syteline.getBom', args: { item: 'FG-9200' } },
+        { name: 'syteline.getWorkOrders', args: { item: 'FG-9200' } },
+      ],
+      content:
+        'I\'ll trace the order, check the finished good, then look at supply and the shop floor.\n\n' +
+        'SO-66300 is late because of work order WO-3350, not supply. FG-9200 shows zero ' +
+        'available, but every BOM component is covered — and WO-3350, the order building ' +
+        'your 200 units, is only 60 complete. It was scheduled to finish September 15 and is ' +
+        'now estimated September 20, five days behind. The buyer doesn\'t need to expedite ' +
+        'anything; the planner needs to re-sequence the floor. Want me to pull WO-3350\'s ' +
+        'full schedule detail?',
     },
     severity: 'p1',
     dimensions: ['tool-competence', 'helpfulness', 'grounding-citations'],

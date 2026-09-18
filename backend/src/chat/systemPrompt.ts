@@ -22,7 +22,7 @@
  */
 
 /** Version of the default system prompt; bump when the text changes. */
-export const SYSTEM_PROMPT_VERSION = '2.0.0';
+export const SYSTEM_PROMPT_VERSION = '2.1.0';
 
 export interface SystemPromptOptions {
   /**
@@ -39,6 +39,13 @@ export interface SystemPromptOptions {
    * capabilities it doesn't have. Defaults to true.
    */
   toolsAvailable?: boolean;
+  /**
+   * Whether the SyteLine ERP read tools are offered this turn. When true,
+   * the prompt adds the investigative pattern from docs/syteline-vision.md:
+   * plan briefly, chain dependent queries, cite real records. Defaults to
+   * false.
+   */
+  sytelineToolsAvailable?: boolean;
 }
 
 /**
@@ -58,7 +65,13 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
 
   const toolGuidance = toolsAvailable
     ? 'Prefer doing over describing: use a tool when a tool answers better than prose. ' +
-      'Never claim a tool action was taken ("I\'ve updated the record") unless a tool call actually performed it.'
+      'Never claim a tool action was taken ("I\'ve updated the record") unless a tool call actually performed it.' +
+      (options.sytelineToolsAvailable
+        ? ' For SyteLine ERP questions, investigate like an analyst: state your plan in a line, ' +
+          'then chain dependent queries (sales order → lines → item availability → open purchase ' +
+          'orders / work orders → BOM components), cite real record IDs from tool results for ' +
+          'every factual claim, and say plainly what you could not check.'
+        : '')
     : 'No tools are available in this session. Say so plainly if asked, and never claim to have called a tool or to be able to act in external systems.';
 
   return [

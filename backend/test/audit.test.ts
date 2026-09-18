@@ -1,5 +1,13 @@
-import { describe, expect, it } from 'vitest';
-import { sanitizeReason } from '../src/audit/audit.js';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+
+const { queryMock } = vi.hoisted(() => ({ queryMock: vi.fn() }));
+vi.mock('../src/db/pool.js', () => ({ query: queryMock, tenantQuery: vi.fn() }));
+
+import { purgeGlobalAuditEvents, sanitizeReason } from '../src/audit/audit.js';
+
+beforeEach(() => {
+  queryMock.mockReset();
+});
 
 describe('audit reason sanitization', () => {
   it('redacts credential-shaped fragments', () => {
@@ -32,5 +40,31 @@ describe('audit reason sanitization', () => {
     expect(sanitizeReason(null)).toBeNull();
     expect(sanitizeReason(undefined)).toBeNull();
     expect(sanitizeReason('DOCUMENT_INGESTION_FAILED')).toBe('DOCUMENT_INGESTION_FAILED');
+  });
+});
+
+describe('purgeGlobalAuditEvents', () => {
+  it('deletes only NULL-tenant rows past the cutoff, honoring legal hold, in batches', async () => {
+    queryMock
+      .mockResolvedValueOnce({ rowCount: 3 })
+      .mockResolvedValueOnce({ rowCount: 1 });
+    const total = await purgeGlobalAuditEvents(90, 3);
+    expect(total).toBe(4);
+    expect(queryMock).toHaveBeenCalledTimes(2);
+    for (const [sql, params] of queryMock.mock.calls as Array<[string, unknown[]]>) {
+      expect(sql).toContain('DELETE FROM audit_events');
+      expect(sql).toContain('tenant_id IS NULL');
+      expect(sql).toContain('legal_hold = false');
+      // Tenant-scoped rows are never touched by the global purge.
+      expect(sql).not.toMatch(/tenant_id = \$\d/);
+      expect(params).toEqual(['90']);
+    }
+  });
+
+  it('stops when a batch comes back short', async () => {
+    queryMock.mockResolvedValueOnce({ rowCount: 2 });
+    const total = await purgeGlobalAuditEvents(30, 1000);
+    expect(total).toBe(2);
+    expect(queryMock).toHaveBeenCalledTimes(1);
   });
 });

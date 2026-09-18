@@ -24,8 +24,13 @@ const bodySchema = z.object({
 export const toolConcurrency = createToolConcurrencyLimiter();
 
 export async function toolRoutes(fastify: FastifyInstance): Promise<void> {
-  fastify.get('/tools', { preHandler: [requireAuth, requirePermission('tool:use')] }, async (_req, reply) => {
-    return reply.send({ tools: toolRegistry.map(({ name, description, action, destructive, allowedClassifications }) => ({ name, description, action, destructive, allowedClassifications })) });
+  fastify.get('/tools', { preHandler: [requireAuth, requirePermission('tool:use')] }, async (req, reply) => {
+    const auth = req.auth!;
+    return reply.send({
+      tools: toolRegistry
+        .filter((tool) => auth.permissions.includes(tool.permission ?? 'tool:use'))
+        .map(({ name, description, action, destructive, allowedClassifications }) => ({ name, description, action, destructive, allowedClassifications })),
+    });
   });
 
   fastify.post('/tools/:name/execute', {

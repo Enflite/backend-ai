@@ -133,6 +133,37 @@ export async function recordAudit(input: AuditInput): Promise<void> {
 }
 
 /**
+ * Delete platform-global (NULL-tenant) audit rows older than `days`,
+ * honoring legal hold. Runs in bounded batches via the raw pool query:
+ * there is no tenant context for global rows, and the audit_events RLS
+ * policy explicitly permits NULL-tenant rows when no context is set, so
+ * only global rows can ever match. Returns the total rows deleted.
+ *
+ * Tenant-scoped audit purging lives in retention/purge.ts and goes through
+ * tenantQuery so RLS applies there.
+ */
+export async function purgeGlobalAuditEvents(days: number, batchSize: number): Promise<number> {
+  let total = 0;
+  for (;;) {
+    const result = await query(
+      `DELETE FROM audit_events
+       WHERE id IN (
+         SELECT id FROM audit_events
+         WHERE tenant_id IS NULL
+           AND legal_hold = false
+           AND created_at < NOW() - ($1 || ' days')::interval
+         LIMIT ${Math.floor(batchSize)}
+       )`,
+      [String(days)]
+    );
+    const deleted = result.rowCount ?? 0;
+    total += deleted;
+    if (deleted < batchSize) break;
+  }
+  return total;
+}
+
+/**
  * Insert an audit row inside an existing transaction. Use this when the audit
  * event must commit atomically with the state change it describes (e.g. the
  * model enabled-toggle): a fail-closed audit failure then rolls the change

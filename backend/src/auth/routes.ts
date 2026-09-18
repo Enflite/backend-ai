@@ -30,7 +30,7 @@ const loginSchema = z.object({
 const devLoginSchema = loginSchema.pick({ email: true, tenantId: true });
 
 interface UserRow extends IdentityRecord {}
-interface MembershipRow {
+export interface MembershipRow {
   tenant_id: string;
   tenant_name: string;
   role_id: string;
@@ -59,7 +59,12 @@ function chooseMembership(memberships: MembershipRow[], tenantId?: string): Memb
   return selected;
 }
 
-async function buildAuth(user: UserRow, membership: MembershipRow): Promise<Omit<AuthContext, 'sessionId'>> {
+/**
+ * Builds the session auth context for a user+membership. Exported for the
+ * OIDC routes so enterprise SSO issues sessions through the same
+ * permission/clearance resolution as password login.
+ */
+export async function buildAuth(user: UserRow, membership: MembershipRow): Promise<Omit<AuthContext, 'sessionId'>> {
   const permissions = (
     await query<{ name: Permission }>(
       `SELECT p.name FROM permissions p JOIN role_permissions rp ON rp.permission_id = p.id

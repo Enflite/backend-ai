@@ -194,10 +194,13 @@ describe('static: raw query() is never used on tenant tables', () => {
     'ai/gateway/modelLifecycle.ts',
     'auth/identityProvider.ts',
     'auth/routes.ts',
+    'auth/oidc.ts',
+    'auth/oidcRoutes.ts',
     'documents/queue.ts',
     'health.ts',
     'server.ts',
     'eval/store.ts',
+    'retention/purge.ts',
   ]);
   const TENANT_TABLES = [
     'conversations', 'messages', 'audit_events', 'sessions', 'model_access',

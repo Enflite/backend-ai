@@ -17,7 +17,7 @@ vi.mock('../src/auth/middleware.js', () => ({
       displayName: 'User',
       roleName: 'User',
       clearance: 'INTERNAL',
-      permissions: ['tool:use'],
+      permissions: ['tool:use', 'syteline:read'],
     };
     done();
   },

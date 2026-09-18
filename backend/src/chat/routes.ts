@@ -18,6 +18,8 @@ import { canModelProcess } from '../policy/engine.js';
 import { config } from '../config.js';
 import { createChatConcurrencyLimiter, replyBusy } from '../ai/gateway/limits.js';
 import { recordChatTurn, recordRetrieval } from '../observability/metrics.js';
+import { DlpStreamGuard } from '../dlp/streamGuard.js';
+import type { DlpKind } from '../dlp/detectors.js';
 
 const chatBodySchema = z.object({
   conversationId: z.string().uuid().optional(),
@@ -226,6 +228,12 @@ export function createSseSender(raw: SseRawSocket, options: SseSenderOptions = {
 function buildProviderTools(auth: AuthContext, classification: Classification): ProviderToolDefinition[] {
   if (!auth.permissions.includes('tool:use')) return [];
   return toolRegistry
+    // Per-tool permission is enforced in application code here, at offer
+    // time, and again inside runToolCall at execution time: the model can
+    // never talk the server into running a tool the user couldn't run
+    // directly (e.g. syteline:read-gated ERP tools for a caller who only
+    // has generic tool:use).
+    .filter((tool) => auth.permissions.includes(tool.permission ?? 'tool:use'))
     .filter((tool) => canModelProcess(classification, tool.allowedClassifications).allowed)
     .map((tool) => ({
       type: 'function' as const,
@@ -344,6 +352,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       modelName: model.name,
       modelVersion: model.version,
       toolsAvailable: providerTools.length > 0,
+      sytelineToolsAvailable: providerTools.some((tool) => tool.function.name.startsWith('syteline.')),
     });
 
     // Context-window management: sliding window that always keeps the system
@@ -463,6 +472,12 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     let turnFailed = false;
     let truncatedByCap = false;
     let toolIterations = 0;
+    // DLP outbound boundary (Phase 5c): every assistant text chunk passes
+    // through the stream guard before reaching the client or the persisted
+    // transcript. Detections are tallied for the turn-end audit; matched
+    // text is never persisted or logged.
+    const dlpGuard = config.DLP_ENABLED ? new DlpStreamGuard(!!config.DLP_EXTERNAL_ENDPOINT) : null;
+    const dlpDetections: DlpKind[] = [];
     // The working message list grows as the agentic loop appends tool calls
     // and results; re-apply the window each round to stay within budget.
     let turnMessages: ChatMessage[] = windowed.messages;
@@ -503,10 +518,19 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
               chunk = chunk.slice(0, maxResponseChars - content.length);
               roundTruncated = true;
             }
-            content += chunk;
+            // DLP: redact before the client or the transcript ever sees it.
+            // `content` accumulates the redacted text, so the persisted
+            // message matches what was streamed.
+            let emit = chunk;
+            if (dlpGuard) {
+              const dlp = await dlpGuard.process(chunk);
+              emit = dlp.emit;
+              dlpDetections.push(...dlp.detections);
+            }
+            content += emit;
             // A failed send means the client is gone or too slow: stop
             // consuming provider events for an answer nobody will read.
-            if (chunk && !(await send('delta', { content: chunk }))) {
+            if (emit && !(await send('delta', { content: emit }))) {
               sendFailed = true;
               break;
             }
@@ -523,7 +547,11 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
             roundContextWindow = event.contextWindow;
             // Keep the pinned prompt honest about which model is serving: the
             // fallback's registry version is unknown here, so name only.
-            roundSystemPrompt = buildSystemPrompt({ modelName: event.modelName, toolsAvailable: providerTools.length > 0 });
+            roundSystemPrompt = buildSystemPrompt({
+              modelName: event.modelName,
+              toolsAvailable: providerTools.length > 0,
+              sytelineToolsAvailable: providerTools.some((tool) => tool.function.name.startsWith('syteline.')),
+            });
             if (!(await send('notice', { code: 'MODEL_FAILOVER', message: `Primary model unavailable; continued with ${event.modelName}`, model: { id: event.modelId, name: event.modelName } }))) {
               sendFailed = true;
               break;
@@ -589,6 +617,18 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           });
         }
       }
+      // DLP: flush the guard's held-back tail so the complete redacted
+      // answer is what the client received (delta before done) and what
+      // gets persisted below. On a dead client the text still lands in
+      // the transcript, redacted; send() safely no-ops on a dead socket.
+      if (dlpGuard) {
+        const flushed = await dlpGuard.flush();
+        dlpDetections.push(...flushed.detections);
+        if (flushed.emit) {
+          content += flushed.emit;
+          await send('delta', { content: flushed.emit });
+        }
+      }
       if (!abortController.signal.aborted || truncatedByCap) {
         doneDelivered = await send('done', {
           finishReason,
@@ -644,6 +684,20 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           [conversationId, auth.tenantId, content, servingModelName, servingModelId, JSON.stringify(citations), JSON.stringify(streamMetadata(interrupted ? 'interrupted' : 'completed'))]
         ).catch((error) => req.log.error({ err: error }, 'Failed to persist assistant message'));
         await tenantQuery(auth.tenantId, 'UPDATE conversations SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2', [conversationId, auth.tenantId]);
+        if (dlpDetections.length > 0) {
+          // DLP audit: kinds and counts only — matched text is never logged.
+          const counts: Record<string, number> = {};
+          for (const kind of dlpDetections) counts[kind] = (counts[kind] ?? 0) + 1;
+          await recordAudit({
+            action: 'DLP_DETECTION',
+            classification: 'INTERNAL',
+            tenantId: auth.tenantId,
+            userId: auth.userId,
+            requestId: req.requestId,
+            success: true,
+            metadata: { counts, redactedSpans: dlpDetections.length },
+          }).catch((error) => req.log.error({ err: error }, 'Failed to audit DLP detection'));
+        }
       }
       if (!reply.raw.writableEnded) reply.raw.end();
     }

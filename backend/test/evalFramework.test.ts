@@ -155,13 +155,13 @@ describe('judges', () => {
   describe('tool-chain', () => {
     const spec: EvalJudgeSpec = {
       kind: 'tool-chain',
-      expectedToolChain: ['syteline.getOrder', 'syteline.getOrderLines'],
+      expectedToolChain: ['syteline.getSalesOrder', 'syteline.getItemAvailability'],
       expectedSubstrings: ['SO-66012'],
       forbiddenSubstrings: ['as an AI language model'],
     };
     const chainCalls = [
-      { name: 'syteline.getOrder', args: { orderNumber: 'SO-66012' } },
-      { name: 'syteline.getOrderLines', args: { orderNumber: 'SO-66012' } },
+      { name: 'syteline.getSalesOrder', args: { orderNumber: 'SO-66012' } },
+      { name: 'syteline.getItemAvailability', args: { item: 'ITEM-77100', site: 'FTW' } },
     ];
     it('passes on ordered chain with cited evidence', () => {
       expect(judgeResponse(spec, { content: 'SO-66012 is late.', toolCalls: chainCalls }).passed).toBe(true);
@@ -637,15 +637,15 @@ describe('eval routes', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.provider).toBe('mock');
-    // Default corpus is the full 127-case suite; the 2 llm-judge cases skip
+    // Default corpus is the full 128-case suite; the 2 llm-judge cases skip
     // without a judge model (reported in `skipped`, excluded from totals,
     // never gated). saveCaseResult still persists one row per case.
-    expect(body.summary.total).toBe(125);
-    expect(body.summary.passed).toBe(125);
+    expect(body.summary.total).toBe(126);
+    expect(body.summary.passed).toBe(126);
     expect(body.summary.skipped).toBe(2);
     // One row per case, including skipped ones.
-    expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(127);
-    expect(vi.mocked(finishRun)).toHaveBeenCalledWith('run-1', expect.objectContaining({ total: 125 }));
+    expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(128);
+    expect(vi.mocked(finishRun)).toHaveBeenCalledWith('run-1', expect.objectContaining({ total: 126 }));
     await app.close();
   });
 

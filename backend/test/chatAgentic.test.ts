@@ -19,7 +19,7 @@ const { currentAuth } = vi.hoisted(() => ({
     displayName: 'User',
     roleName: 'User',
     clearance: 'INTERNAL',
-    permissions: ['chat:create', 'conversation:read', 'conversation:update', 'tool:use'],
+    permissions: ['chat:create', 'conversation:read', 'conversation:update', 'tool:use', 'syteline:read'],
   },
 }));
 
