@@ -74,7 +74,7 @@ export default function ModelSelector({ models, selected, onSelect, onClose }: M
         <div className="px-4 py-3" style={{ borderTop: '1px solid var(--border)' }}>
           <div className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--muted-foreground)' }}>
             <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--accent)' }} />
-            Local · On-premises inference · No data leaves your environment
+            Provider endpoints and credentials are controlled by the server.
           </div>
         </div>
       </div>

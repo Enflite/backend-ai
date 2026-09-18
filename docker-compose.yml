@@ -36,7 +36,7 @@ services:
       - "8080:8080"
     volumes:
       - ./backend:/app
-    command: sh -c "npm install && npm run migrate && npm run dev"
+    command: sh -c "npm ci && npm run migrate && npm run dev"
 
   vllm:
     profiles:

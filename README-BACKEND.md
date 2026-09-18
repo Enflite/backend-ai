@@ -1,121 +1,58 @@
-# Backend AI Foundation
+# Enflite private AI platform
 
-Private AI platform backend built with Fastify, TypeScript, PostgreSQL (with pgvector), JWT authentication with Argon2id, RBAC authorization, audit logging, and an approved-models AI Gateway with SSE streaming chat.
+Self-hosted React and Fastify application for authenticated chat, controlled internal models, tenant-scoped conversations, enterprise documents, secure pgvector retrieval, grounded citations, audited tools, and a SyteLine adapter boundary.
 
-## Quick Start
+## Local preparation
 
-### Option 1: Docker Compose
+Requirements are Node.js 20+ for the backend, the frontend toolchain from `frontend/.mise.toml`, PostgreSQL 16 with `pgcrypto` and `vector`, private S3-compatible storage, and the internal services needed for the flow being exercised.
 
-Start PostgreSQL and the backend:
-
-```bash
-docker compose up
-```
-
-To run with an internal vLLM instance using GPU:
-
-```bash
-docker compose --profile gpu up
-```
-
-### Option 2: Local Development
-
-Prerequisites: Node.js >= 20, PostgreSQL with `pgcrypto` and `vector` extensions.
-
-1. Install dependencies:
-   ```bash
-   cd backend
-   npm install
-   ```
-
-2. Configure environment:
-   ```bash
-   cp .env.example .env
-   # Edit .env to set your DATABASE_URL, JWT_SECRET, etc.
-   ```
-
-3. Run migrations:
-   ```bash
-   npm run migrate
-   ```
-
-4. Create an initial user:
-   ```bash
-   npm run create-user -- --email admin@example.com --password securePassword123! --role Admin
-   ```
-
-5. Start dev server:
-   ```bash
-   npm run dev
-   ```
-
-## Endpoints
-
-### Health & Readiness
-- `GET /health` — Health check (`{ "status": "ok" }`)
-- `GET /ready` — Readiness check verifying database connectivity
-
-### Authentication (`/api/v1/auth`)
-- `POST /api/v1/auth/login` — Authenticate with email and password, rate limited to 10 req/min
-- `POST /api/v1/auth/dev-login` — Development bypass login (disabled in production)
-- `GET /api/v1/me` — Return authenticated user context and permissions
-
-### Audit (`/api/v1/audit`)
-- `GET /api/v1/audit` — Tenant-scoped audit events (requires `audit:read`, supports `?action=&limit=&offset=`)
-
-### Models (`/api/v1/models`)
-- `GET /api/v1/models` — List approved models (requires `model:use`)
-
-### Conversations (`/api/v1/conversations`)
-- `GET /api/v1/conversations` — List user conversations in tenant (requires `conversation:read`)
-- `POST /api/v1/conversations` — Create a new conversation (requires `chat:create`)
-- `GET /api/v1/conversations/:id` — Get conversation details (requires `conversation:read`)
-- `GET /api/v1/conversations/:id/messages` — Get conversation messages (requires `conversation:read`)
-- `PATCH /api/v1/conversations/:id` — Update conversation title (requires `conversation:read`)
-- `DELETE /api/v1/conversations/:id` — Delete conversation and audit action (requires `conversation:delete`)
-
-### Chat Streaming (`/api/v1/chat`)
-- `POST /api/v1/chat` — Stream chat completions via Server-Sent Events (`text/event-stream`). Emits `meta`, `delta`, `done`, and `error` events.
-
-## Registering a Real vLLM Endpoint
-
-Models are managed exclusively via the database registry. To point the approved model to a production or external vLLM server:
-
-```sql
-UPDATE models
-SET endpoint = 'http://your-vllm-host:8000/v1'
-WHERE status = 'APPROVED';
-```
-
-Clients never supply provider endpoints; all inference calls route securely through the AI Gateway.
-
-## Testing & Verification
-
-Run tests:
 ```bash
 cd backend
-npm test
+npm ci
+cp .env.example .env
+npm run migrate
+npm run dev
 ```
 
-Run typechecking:
+In another terminal:
+
+```bash
+cd frontend
+pnpm install --frozen-lockfile
+cp .env.example .env
+pnpm dev
+```
+
+Docker Compose prepares PostgreSQL and the API for development. The optional GPU profile starts vLLM. Object storage, embeddings, malware scanning, binary extraction, and SyteLine still require configured internal services; the application does not substitute fake production responses.
+
+## API surface
+
+- `POST /api/v1/auth/login`, `/auth/refresh`, `/auth/logout`; `GET /api/v1/me`
+- `GET /api/v1/models`
+- CRUD under `/api/v1/conversations` and message history
+- `POST /api/v1/chat` using SSE `meta`, `delta`, `done`, and `error` events
+- `POST/GET/DELETE /api/v1/documents`, retry ingestion, and `POST /api/v1/rag/search`
+- `GET /api/v1/tools` and `POST /api/v1/tools/:name/execute`
+- `GET /api/v1/audit`, `/health`, and `/ready`
+
+The client sends model registry IDs only. Provider URLs, storage credentials, embedding credentials, and tool credentials remain server-side.
+
+## Validation
+
 ```bash
 cd backend
 npm run typecheck
-```
+npm test
+npm run build
+npm audit --omit=dev --audit-level=high
 
-Validate Docker Compose configuration:
-```bash
+cd ../frontend
+pnpm typecheck
+pnpm build
+
+cd ..
 docker compose config
+docker build --target prod -t enflite/backend-ai:local backend
 ```
 
-## Explicitly Out of Scope
-
-The following capabilities are tracked for subsequent PRs and are intentionally not present in PR 1:
-- RAG (Retrieval-Augmented Generation) pipeline
-- Document upload and ingestion
-- Vector embeddings and similarity search
-- Citations
-- Tool gateway and SyteLine integration
-- Model evaluation and red-teaming
-- OpenTelemetry instrumentation and metrics
-- Frontend UI integration
+See `docs/architecture-security.md`, `docs/deployment.md`, `docs/threat-model.md`, and `docs/cmmc-nist.md` for the implemented boundaries, infrastructure dependencies, residual risk, and compliance control areas.

@@ -10,6 +10,7 @@ interface SidebarProps {
   onRename: (id: string, title: string) => void;
   collapsed: boolean;
   onToggle: () => void;
+  identity: { name: string; role: string };
 }
 
 function timeAgo(date: Date): string {
@@ -33,7 +34,7 @@ function groupConversations(convs: Conversation[]) {
   return groups;
 }
 
-export default function Sidebar({ conversations, activeId, onSelect, onNew, onDelete, onRename, collapsed, onToggle }: SidebarProps) {
+export default function Sidebar({ conversations, activeId, onSelect, onNew, onDelete, onRename, collapsed, onToggle, identity }: SidebarProps) {
   const [search, setSearch] = useState('');
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -174,11 +175,11 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
         <div style={{ borderTop: '1px solid var(--border)' }} className="p-3">
           <div className="flex items-center gap-2.5 px-2 py-1.5 rounded-md hover:bg-secondary cursor-pointer" style={{ color: 'var(--secondary-foreground)' }}>
             <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold flex-shrink-0" style={{ background: 'var(--accent)', color: 'var(--accent-foreground)' }}>
-              JD
+              {identity.name.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate" style={{ color: 'var(--foreground)' }}>Jane Doe</p>
-              <p className="text-xs truncate" style={{ color: 'var(--muted-foreground)' }}>Power User · Acme Corp</p>
+              <p className="text-sm font-medium truncate" style={{ color: 'var(--foreground)' }}>{identity.name}</p>
+              <p className="text-xs truncate" style={{ color: 'var(--muted-foreground)' }}>{identity.role}</p>
             </div>
             <IconChevronUp />
           </div>

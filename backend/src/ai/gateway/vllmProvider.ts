@@ -35,12 +35,14 @@ export async function* streamChat({
       messages,
       stream: true,
     }),
-    signal,
+    signal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(config.AI_REQUEST_TIMEOUT_MS)])
+      : AbortSignal.timeout(config.AI_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
-    throw new Error(`vLLM upstream error (${response.status}): ${errorText}`);
+    throw new Error(`vLLM upstream error (${response.status}): ${errorText.slice(0, 500)}`);
   }
 
   if (!response.body) {

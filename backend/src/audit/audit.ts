@@ -1,4 +1,4 @@
-import { query } from '../db/pool.js';
+import { query, tenantQuery } from '../db/pool.js';
 
 export interface AuditInput {
   tenantId?: string | null;
@@ -48,7 +48,8 @@ function sanitizeMetadata(metadata?: Record<string, unknown>): Record<string, un
 export async function recordAudit(input: AuditInput): Promise<void> {
   try {
     const sanitizedMeta = sanitizeMetadata(input.metadata);
-    await query(
+    const execute = input.tenantId ? tenantQuery.bind(null, input.tenantId) : query;
+    await execute(
       `INSERT INTO audit_events (
         tenant_id, user_id, request_id, ip, action, resource,
         resource_id, classification, model, tool, success, reason, metadata

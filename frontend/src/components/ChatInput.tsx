@@ -54,6 +54,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
       size: f.size,
       type: f.type,
       status: 'ready',
+      file: f,
     }));
     setFiles((prev) => [...prev, ...newFiles]);
   }
@@ -74,7 +75,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
     return `${(bytes / 1048576).toFixed(1)} MB`;
   }
 
-  const canSend = (text.trim().length > 0 || files.length > 0) && !isStreaming && !disabled;
+  const canSend = text.trim().length > 0 && !isStreaming && !disabled;
 
   return (
     <div className="px-4 pb-4">
@@ -137,7 +138,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
               className="flex items-center gap-1 px-2 py-1 rounded-md text-xs hover:bg-secondary"
               style={{ color: 'var(--muted-foreground)', border: '1px solid var(--border)' }}
             >
-              <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: model.provider === 'local' ? 'var(--accent)' : '#f59e0b' }} />
+              <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: 'var(--accent)' }} />
               {model.name}
             </button>
           </div>
@@ -173,7 +174,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
       </div>
 
       <p className="text-center text-xs mt-2" style={{ color: 'var(--muted-foreground)' }}>
-        Responses processed entirely on internal infrastructure. Data does not leave your environment.
+        Requests are routed only through server-approved models and document policies.
       </p>
     </div>
   );

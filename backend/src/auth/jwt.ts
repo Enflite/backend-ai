@@ -14,6 +14,7 @@ export async function signToken(auth: AuthContext): Promise<string> {
     roleId: auth.roleId,
     roleName: auth.roleName,
     permissions: auth.permissions,
+    sid: auth.sessionId,
   })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
@@ -26,6 +27,11 @@ export async function verifyToken(token: string): Promise<AuthContext> {
     algorithms: ['HS256'],
   });
 
+  const requiredStringClaims = ['sub', 'email', 'displayName', 'tenantId', 'roleId', 'roleName', 'sid'] as const;
+  if (requiredStringClaims.some((claim) => typeof payload[claim] !== 'string')) {
+    throw new Error('Token is missing required claims');
+  }
+
   return {
     userId: payload.sub as string,
     email: payload['email'] as string,
@@ -35,5 +41,6 @@ export async function verifyToken(token: string): Promise<AuthContext> {
     roleId: payload['roleId'] as string,
     roleName: payload['roleName'] as string,
     permissions: (payload['permissions'] as Permission[]) ?? [],
+    sessionId: payload['sid'] as string,
   };
 }

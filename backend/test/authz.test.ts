@@ -15,6 +15,7 @@ describe('Authorization & Classification', () => {
         'CONFIDENTIAL',
         'PROPRIETARY',
         'CUI',
+        'UNKNOWN',
       ]);
 
       expect(classificationRank('PUBLIC')).toBe(0);
@@ -22,6 +23,13 @@ describe('Authorization & Classification', () => {
       expect(classificationRank('CONFIDENTIAL')).toBe(2);
       expect(classificationRank('PROPRIETARY')).toBe(3);
       expect(classificationRank('CUI')).toBe(4);
+      expect(classificationRank('UNKNOWN')).toBe(-1);
+    });
+
+    it('denies UNKNOWN in every direction', () => {
+      expect(canAccessClassification('CUI', 'UNKNOWN')).toBe(false);
+      expect(canAccessClassification('UNKNOWN', 'PUBLIC')).toBe(false);
+      expect(canAccessClassification('UNKNOWN', 'UNKNOWN')).toBe(false);
     });
 
     it('denies access when user clearance is lower than resource classification', () => {

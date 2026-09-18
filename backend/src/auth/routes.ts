@@ -1,34 +1,31 @@
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
-import { query } from '../db/pool.js';
+import { query, tenantQuery } from '../db/pool.js';
 import { Errors } from '../errors.js';
-import { verifyPassword } from './password.js';
-import { signToken } from './jwt.js';
 import { requireAuth } from './middleware.js';
 import { recordAudit } from '../audit/audit.js';
-import { AuthContext, Classification, Permission, ROLE_PERMISSIONS } from '../authz/permissions.js';
+import { AuthContext, Classification, Permission } from '../authz/permissions.js';
+import {
+  REFRESH_COOKIE,
+  clearRefreshCookie,
+  createSession,
+  hashRefreshToken,
+  refreshTokenTenant,
+  revokeSession,
+  rotateRefreshToken,
+  setRefreshCookie,
+} from './sessions.js';
+import { identityProvider, IdentityRecord } from './identityProvider.js';
 
 const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
+  email: z.string().email().transform((value) => value.toLowerCase()),
+  password: z.string().min(1).max(1024),
   tenantId: z.string().uuid().optional(),
 });
+const devLoginSchema = loginSchema.pick({ email: true, tenantId: true });
 
-const devLoginSchema = z.object({
-  email: z.string().email(),
-  tenantId: z.string().uuid().optional(),
-});
-
-interface UserRow {
-  id: string;
-  email: string;
-  password_hash: string;
-  display_name: string;
-  is_active: boolean;
-  clearance: Classification;
-}
-
+interface UserRow extends IdentityRecord {}
 interface MembershipRow {
   tenant_id: string;
   tenant_name: string;
@@ -36,229 +33,120 @@ interface MembershipRow {
   role_name: string;
 }
 
+async function membershipsFor(userId: string): Promise<MembershipRow[]> {
+  return (
+    await query<MembershipRow>(
+      `SELECT m.tenant_id, t.name AS tenant_name, r.id AS role_id, r.name AS role_name
+       FROM memberships m JOIN tenants t ON t.id = m.tenant_id JOIN roles r ON r.id = m.role_id
+       WHERE m.user_id = $1 ORDER BY t.name`,
+      [userId]
+    )
+  ).rows;
+}
+
+function chooseMembership(memberships: MembershipRow[], tenantId?: string): MembershipRow {
+  const selected = tenantId ? memberships.find((item) => item.tenant_id === tenantId) : memberships[0];
+  if (!selected) {
+    throw Errors.forbidden(
+      tenantId ? 'INVALID_TENANT' : 'NO_TENANT_MEMBERSHIP',
+      tenantId ? 'User is not a member of the requested tenant' : 'User has no tenant memberships'
+    );
+  }
+  return selected;
+}
+
+async function buildAuth(user: UserRow, membership: MembershipRow): Promise<Omit<AuthContext, 'sessionId'>> {
+  const permissions = (
+    await query<{ name: Permission }>(
+      `SELECT p.name FROM permissions p JOIN role_permissions rp ON rp.permission_id = p.id
+       WHERE rp.role_id = $1`,
+      [membership.role_id]
+    )
+  ).rows.map((row) => row.name);
+  return {
+    userId: user.id,
+    email: user.email,
+    displayName: user.display_name,
+    clearance: user.clearance,
+    tenantId: membership.tenant_id,
+    roleId: membership.role_id,
+    roleName: membership.role_name,
+    permissions,
+  };
+}
+
+async function issueLogin(user: UserRow, membership: MembershipRow, reply: FastifyReply) {
+  const session = await createSession(await buildAuth(user, membership));
+  setRefreshCookie(reply, session.refreshToken);
+  return {
+    accessToken: session.accessToken,
+    expiresIn: config.JWT_EXPIRES_IN,
+    user: session.auth,
+    tenant: { id: membership.tenant_id, name: membership.tenant_name },
+  };
+}
+
 export async function authRoutes(fastify: FastifyInstance): Promise<void> {
-  // POST /auth/login
-  fastify.post(
-    '/auth/login',
-    {
-      config: {
-        rateLimit: {
-          max: 10,
-          timeWindow: '1 minute',
-        },
-      },
-    },
-    async (req, reply) => {
-      const parsed = loginSchema.safeParse(req.body);
-      if (!parsed.success) {
-        throw Errors.badRequest('INVALID_REQUEST', 'Invalid login request', parsed.error.format());
-      }
-
-      const { email, password, tenantId } = parsed.data;
-
-      const userRes = await query<UserRow>(
-        'SELECT id, email, password_hash, display_name, is_active, clearance FROM users WHERE email = $1',
-        [email]
-      );
-
-      const user = userRes.rows[0];
-      if (!user || !user.is_active) {
-        await recordAudit({
-          action: 'LOGIN',
-          success: false,
-          reason: 'Invalid credentials or inactive user',
-          ip: req.ip,
-          requestId: req.requestId,
-        });
-        throw Errors.unauthorized('INVALID_CREDENTIALS', 'Invalid email or password');
-      }
-
-      const isValidPassword = await verifyPassword(password, user.password_hash);
-      if (!isValidPassword) {
-        await recordAudit({
-          userId: user.id,
-          action: 'LOGIN',
-          success: false,
-          reason: 'Invalid credentials',
-          ip: req.ip,
-          requestId: req.requestId,
-        });
-        throw Errors.unauthorized('INVALID_CREDENTIALS', 'Invalid email or password');
-      }
-
-      const memberRes = await query<MembershipRow>(
-        `SELECT m.tenant_id, t.name as tenant_name, r.id as role_id, r.name as role_name
-         FROM memberships m
-         JOIN tenants t ON t.id = m.tenant_id
-         JOIN roles r ON r.id = m.role_id
-         WHERE m.user_id = $1`,
-        [user.id]
-      );
-
-      if (memberRes.rows.length === 0) {
-        await recordAudit({
-          userId: user.id,
-          action: 'LOGIN',
-          success: false,
-          reason: 'No tenant membership',
-          ip: req.ip,
-          requestId: req.requestId,
-        });
-        throw Errors.forbidden('NO_TENANT_MEMBERSHIP', 'User has no tenant memberships');
-      }
-
-      let selectedMembership: MembershipRow;
-      if (tenantId) {
-        const found = memberRes.rows.find((m) => m.tenant_id === tenantId);
-        if (!found) {
-          throw Errors.forbidden('INVALID_TENANT', 'User is not a member of the requested tenant');
-        }
-        selectedMembership = found;
-      } else {
-        selectedMembership = memberRes.rows[0]!;
-      }
-
-      // Load permissions from DB and fallback/merge with ROLE_PERMISSIONS
-      const permRes = await query<{ name: Permission }>(
-        `SELECT p.name FROM permissions p
-         JOIN role_permissions rp ON rp.permission_id = p.id
-         WHERE rp.role_id = $1`,
-        [selectedMembership.role_id]
-      );
-
-      const staticPerms = ROLE_PERMISSIONS[selectedMembership.role_name] ?? [];
-      const dbPerms = permRes.rows.map((r) => r.name);
-      const permissions = Array.from(new Set([...staticPerms, ...dbPerms])) as Permission[];
-
-      const authContext: AuthContext = {
-        userId: user.id,
-        email: user.email,
-        displayName: user.display_name,
-        clearance: user.clearance,
-        tenantId: selectedMembership.tenant_id,
-        roleId: selectedMembership.role_id,
-        roleName: selectedMembership.role_name,
-        permissions,
-      };
-
-      const token = await signToken(authContext);
-
-      await recordAudit({
-        tenantId: authContext.tenantId,
-        userId: authContext.userId,
-        requestId: req.requestId,
-        ip: req.ip,
-        action: 'LOGIN',
-        success: true,
-      });
-
-      return reply.send({
-        token,
-        user: authContext,
-        tenant: {
-          id: selectedMembership.tenant_id,
-          name: selectedMembership.tenant_name,
-        },
-      });
+  fastify.post('/auth/login', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const parsed = loginSchema.safeParse(req.body);
+    if (!parsed.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid login request');
+    const user = await identityProvider.authenticate(parsed.data);
+    if (!user) {
+      await recordAudit({ action: 'AUTHENTICATION_FAILURE', success: false, reason: 'INVALID_CREDENTIALS', ip: req.ip, requestId: req.requestId });
+      throw Errors.unauthorized('INVALID_CREDENTIALS', 'Invalid email or password');
     }
-  );
+    const membership = chooseMembership(await membershipsFor(user.id), parsed.data.tenantId);
+    const response = await issueLogin(user, membership, reply);
+    await recordAudit({ tenantId: membership.tenant_id, userId: user.id, action: 'LOGIN', requestId: req.requestId, ip: req.ip });
+    return reply.send(response);
+  });
 
-  // POST /auth/dev-login (only if DEV_AUTH_ENABLED)
+  fastify.post('/auth/refresh', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const refreshToken = req.cookies[REFRESH_COOKIE];
+    const tenantId = refreshToken ? refreshTokenTenant(refreshToken) : null;
+    if (!refreshToken || !tenantId) throw Errors.unauthorized('INVALID_REFRESH_TOKEN', 'Refresh token required');
+    const row = (
+      await tenantQuery<UserRow & MembershipRow & { session_id: string }>(
+        tenantId,
+        `SELECT u.id, u.email, u.password_hash, u.display_name, u.is_active, u.clearance,
+                s.id AS session_id, m.tenant_id, t.name AS tenant_name, r.id AS role_id, r.name AS role_name
+         FROM sessions s JOIN users u ON u.id = s.user_id
+         JOIN memberships m ON m.user_id = u.id AND m.tenant_id = s.tenant_id
+         JOIN tenants t ON t.id = m.tenant_id JOIN roles r ON r.id = m.role_id
+         WHERE s.refresh_token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > NOW() AND u.is_active`,
+        [hashRefreshToken(refreshToken)]
+      )
+    ).rows[0];
+    if (!row) {
+      clearRefreshCookie(reply);
+      throw Errors.unauthorized('INVALID_REFRESH_TOKEN', 'Refresh session is invalid or expired');
+    }
+    const rotated = await rotateRefreshToken(refreshToken, await buildAuth(row, row), row.session_id);
+    setRefreshCookie(reply, rotated.refreshToken);
+    return reply.send({ accessToken: rotated.accessToken, expiresIn: config.JWT_EXPIRES_IN, user: rotated.auth });
+  });
+
+  fastify.post('/auth/logout', { preHandler: [requireAuth] }, async (req, reply) => {
+    await revokeSession(req.auth!.tenantId, req.auth!.sessionId);
+    clearRefreshCookie(reply);
+    await recordAudit({ tenantId: req.auth!.tenantId, userId: req.auth!.userId, action: 'LOGOUT', requestId: req.requestId, ip: req.ip });
+    return reply.status(204).send();
+  });
+
   if (config.DEV_AUTH_ENABLED) {
     fastify.post('/auth/dev-login', async (req, reply) => {
       const parsed = devLoginSchema.safeParse(req.body);
-      if (!parsed.success) {
-        throw Errors.badRequest('INVALID_REQUEST', 'Invalid dev-login request', parsed.error.format());
-      }
-
-      const { email, tenantId } = parsed.data;
-
-      const userRes = await query<UserRow>(
-        'SELECT id, email, password_hash, display_name, is_active, clearance FROM users WHERE email = $1',
-        [email]
-      );
-
-      const user = userRes.rows[0];
-      if (!user || !user.is_active) {
-        throw Errors.unauthorized('USER_NOT_FOUND', 'Dev user not found or inactive');
-      }
-
-      const memberRes = await query<MembershipRow>(
-        `SELECT m.tenant_id, t.name as tenant_name, r.id as role_id, r.name as role_name
-         FROM memberships m
-         JOIN tenants t ON t.id = m.tenant_id
-         JOIN roles r ON r.id = m.role_id
-         WHERE m.user_id = $1`,
-        [user.id]
-      );
-
-      if (memberRes.rows.length === 0) {
-        throw Errors.forbidden('NO_TENANT_MEMBERSHIP', 'Dev user has no tenant memberships');
-      }
-
-      let selectedMembership: MembershipRow;
-      if (tenantId) {
-        const found = memberRes.rows.find((m) => m.tenant_id === tenantId);
-        if (!found) {
-          throw Errors.forbidden('INVALID_TENANT', 'User is not a member of the requested tenant');
-        }
-        selectedMembership = found;
-      } else {
-        selectedMembership = memberRes.rows[0]!;
-      }
-
-      const permRes = await query<{ name: Permission }>(
-        `SELECT p.name FROM permissions p
-         JOIN role_permissions rp ON rp.permission_id = p.id
-         WHERE rp.role_id = $1`,
-        [selectedMembership.role_id]
-      );
-
-      const staticPerms = ROLE_PERMISSIONS[selectedMembership.role_name] ?? [];
-      const dbPerms = permRes.rows.map((r) => r.name);
-      const permissions = Array.from(new Set([...staticPerms, ...dbPerms])) as Permission[];
-
-      const authContext: AuthContext = {
-        userId: user.id,
-        email: user.email,
-        displayName: user.display_name,
-        clearance: user.clearance,
-        tenantId: selectedMembership.tenant_id,
-        roleId: selectedMembership.role_id,
-        roleName: selectedMembership.role_name,
-        permissions,
-      };
-
-      const token = await signToken(authContext);
-
-      await recordAudit({
-        tenantId: authContext.tenantId,
-        userId: authContext.userId,
-        requestId: req.requestId,
-        ip: req.ip,
-        action: 'DEV_LOGIN',
-        success: true,
-      });
-
-      return reply.send({
-        token,
-        user: authContext,
-        tenant: {
-          id: selectedMembership.tenant_id,
-          name: selectedMembership.tenant_name,
-        },
-      });
+      if (!parsed.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid development login request');
+      const user = (
+        await query<UserRow>('SELECT id, email, password_hash, display_name, is_active, clearance FROM users WHERE lower(email) = $1', [parsed.data.email])
+      ).rows[0];
+      if (!user?.is_active) throw Errors.unauthorized('USER_NOT_FOUND', 'Development user not found or inactive');
+      const membership = chooseMembership(await membershipsFor(user.id), parsed.data.tenantId);
+      const response = await issueLogin(user, membership, reply);
+      await recordAudit({ tenantId: membership.tenant_id, userId: user.id, action: 'DEV_LOGIN', requestId: req.requestId, ip: req.ip });
+      return reply.send(response);
     });
   }
 
-  // GET /me
-  fastify.get(
-    '/me',
-    {
-      preHandler: [requireAuth],
-    },
-    async (req, reply) => {
-      return reply.send(req.auth);
-    }
-  );
+  fastify.get('/me', { preHandler: [requireAuth] }, async (req, reply) => reply.send(req.auth));
 }

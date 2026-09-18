@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
-import { query } from '../db/pool.js';
+import { tenantQuery } from '../db/pool.js';
 import { Errors } from '../errors.js';
 
 const querySchema = z.object({
@@ -44,7 +44,7 @@ export async function auditRoutes(fastify: FastifyInstance): Promise<void> {
       params.push(offset);
       sql += ` OFFSET $${params.length}`;
 
-      const result = await query(sql, params);
+      const result = await tenantQuery(tenantId, sql, params);
       return reply.send({ events: result.rows, limit, offset });
     }
   );
