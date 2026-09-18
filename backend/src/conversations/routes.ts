@@ -13,7 +13,10 @@ const idSchema = z.object({ id: z.string().uuid() });
 const createSchema = z.object({
   title: z.string().trim().min(1).max(255).optional(),
   modelId: z.string().uuid().optional(),
-  classification: z.enum(CLASSIFICATIONS).default('INTERNAL'),
+  // Optional: an omitted classification resolves to the caller's own clearance
+  // floor (PUBLIC for public-only callers) so valid PUBLIC callers are not
+  // forced into a classification they are not cleared for.
+  classification: z.enum(CLASSIFICATIONS).optional(),
 }).strict();
 const updateSchema = z.object({ title: z.string().trim().min(1).max(255) }).strict();
 const paginationSchema = z.object({
@@ -39,7 +42,10 @@ export async function conversationRoutes(fastify: FastifyInstance): Promise<void
     const auth = req.auth!;
     const body = createSchema.safeParse(req.body ?? {});
     if (!body.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid conversation parameters');
-    assertClassificationAllowed(auth.clearance, body.data.classification);
+    // Clearance-aware default: a PUBLIC caller omitting classification gets
+    // PUBLIC, not INTERNAL (which they are not cleared for).
+    const classification = body.data.classification ?? (auth.clearance === 'PUBLIC' ? 'PUBLIC' : 'INTERNAL');
+    assertClassificationAllowed(auth.clearance, classification);
     const modelId = body.data.modelId ?? (await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId))[0]?.id;
     if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
     const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
@@ -48,7 +54,7 @@ export async function conversationRoutes(fastify: FastifyInstance): Promise<void
       `INSERT INTO conversations (tenant_id, user_id, title, model, model_id, classification)
        VALUES ($1,$2,$3,$4,$5,$6)
        RETURNING id, tenant_id, user_id, title, model_id, classification, created_at, updated_at`,
-      [auth.tenantId, auth.userId, body.data.title ?? 'New Conversation', model.name, modelId, body.data.classification]
+      [auth.tenantId, auth.userId, body.data.title ?? 'New Conversation', model.name, modelId, classification]
     );
     return reply.status(201).send({ conversation: result.rows[0] });
   });

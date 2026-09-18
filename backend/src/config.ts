@@ -100,6 +100,9 @@ export function parseExpiresInToMs(value: string): number {
   const match = EXPIRES_IN_PATTERN.exec(value.trim());
   if (!match) throw new Error(`Invalid JWT_EXPIRES_IN format: '${value}'`);
   const amount = Number.parseInt(match[1]!, 10);
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    throw new Error(`JWT_EXPIRES_IN must be a positive duration: '${value}'`);
+  }
   const unit = (match[2] ?? 's').toLowerCase();
   const multipliers: Record<string, number> = {
     ms: 1, s: 1000, sec: 1000, secs: 1000, second: 1000, seconds: 1000,

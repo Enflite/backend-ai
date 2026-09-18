@@ -16,7 +16,7 @@ import { authRoutes } from './auth/routes.js';
 import { auditRoutes } from './audit/routes.js';
 import { modelRoutes } from './ai/gateway/routes.js';
 import { conversationRoutes } from './conversations/routes.js';
-import { chatRoutes } from './chat/routes.js';
+import { chatRoutes, closeActiveSseStreams } from './chat/routes.js';
 import { documentRoutes } from './documents/routes.js';
 import { toolRoutes } from './tools/routes.js';
 import { recoverIngestionJobs } from './documents/queue.js';
@@ -157,6 +157,12 @@ export async function buildServer(): Promise<FastifyInstance> {
   // Root health endpoints
   await fastify.register(healthRoutes);
 
+  // Hijacked SSE responses are invisible to server.close(): end them
+  // explicitly so a client holding a stream open cannot stall shutdown.
+  fastify.addHook('preClose', async () => {
+    closeActiveSseStreams();
+  });
+
   return fastify;
 }
 
@@ -165,16 +171,40 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename
   const server = await buildServer();
   // Graceful shutdown: stop accepting connections, let in-flight requests
   // (including SSE streams and ingestion callbacks) finish, then drain the DB
-  // pool. SIGKILL remains the last resort via container orchestration.
+  // pool. The drain is bounded: if it does not complete within
+  // SHUTDOWN_DRAIN_MS, remaining connections are force-closed so a stuck
+  // client cannot delay shutdown past the platform's SIGKILL. SIGKILL remains
+  // the last resort via container orchestration.
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`Received ${signal}; shutting down gracefully...`);
+    const drainMs = Number.parseInt(process.env.SHUTDOWN_DRAIN_MS ?? '15000', 10);
+    let drainTimer: NodeJS.Timeout | undefined;
     try {
-      await server.close();
+      await Promise.race([
+        server.close(),
+        new Promise<void>((resolve) => {
+          drainTimer = setTimeout(() => {
+            server.log.warn(
+              { drainMs },
+              'Shutdown drain timed out; force-closing remaining connections'
+            );
+            try {
+              (server.server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
+            } catch (error) {
+              server.log.error({ err: error }, 'Error force-closing connections during shutdown');
+            }
+            resolve();
+          }, Number.isSafeInteger(drainMs) && drainMs > 0 ? drainMs : 15000);
+          drainTimer.unref?.();
+        }),
+      ]);
     } catch (error) {
       server.log.error({ err: error }, 'Error during server close');
+    } finally {
+      if (drainTimer) clearTimeout(drainTimer);
     }
     await pool.end().catch((error) => server.log.error({ err: error }, 'Error draining database pool'));
     process.exit(0);

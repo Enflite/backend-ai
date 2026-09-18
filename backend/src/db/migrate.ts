@@ -6,6 +6,105 @@ import { pool, withTx, query } from './pool.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * A migration file opts into non-transactional execution by starting with a
+ * header line `-- migrate: non-transactional` (before any statement). This
+ * exists for operations PostgreSQL forbids inside a transaction block, such
+ * as `CREATE INDEX CONCURRENTLY` on populated production tables.
+ *
+ * Non-transactional migrations run statement-by-statement outside a
+ * transaction, so a failure can leave earlier statements applied: keep them
+ * to a single idempotent statement (e.g. one `CREATE INDEX CONCURRENTLY IF
+ * NOT EXISTS`) and validate the upgrade on staging first.
+ */
+export function isNonTransactionalMigration(sql: string): boolean {
+  for (const line of sql.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('--')) {
+      if (/^--\s*migrate:\s*non-transactional\s*$/i.test(trimmed)) return true;
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Split SQL text into individual statements, respecting single-quoted
+ * strings, double-quoted identifiers, line/block comments, and
+ * dollar-quoted bodies. Only used for explicitly non-transactional
+ * migrations; transactional migrations keep the existing whole-file path.
+ */
+export function splitStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let current = '';
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const ch = sql[i]!;
+    // Line comment
+    if (ch === '-' && sql[i + 1] === '-') {
+      const end = sql.indexOf('\n', i);
+      current += sql.slice(i, end === -1 ? n : end);
+      i = end === -1 ? n : end;
+      continue;
+    }
+    // Block comment
+    if (ch === '/' && sql[i + 1] === '*') {
+      const end = sql.indexOf('*/', i + 2);
+      const stop = end === -1 ? n : end + 2;
+      current += sql.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    // Quoted string or identifier: '...' / "...", with '' / "" escapes.
+    if (ch === "'" || ch === '"') {
+      let j = i + 1;
+      while (j < n) {
+        if (sql[j] === ch) {
+          if (sql[j + 1] === ch) {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      current += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    // Dollar-quoted body: $tag$ ... $tag$
+    if (ch === '$') {
+      const tagMatch = /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/.exec(sql.slice(i));
+      if (tagMatch) {
+        const tag = tagMatch[0];
+        const end = sql.indexOf(tag, i + tag.length);
+        const stop = end === -1 ? n : end + tag.length;
+        current += sql.slice(i, stop);
+        i = stop;
+        continue;
+      }
+      current += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === ';') {
+      current += ch;
+      const statement = current.trim();
+      if (statement) statements.push(statement);
+      current = '';
+      i += 1;
+      continue;
+    }
+    current += ch;
+    i += 1;
+  }
+  if (current.trim()) statements.push(current.trim());
+  return statements;
+}
+
 export async function runMigrations(): Promise<void> {
   const migrationsDir = path.join(__dirname, 'migrations');
 
@@ -34,13 +133,30 @@ export async function runMigrations(): Promise<void> {
     const filePath = path.join(migrationsDir, file);
     const sql = await readFile(filePath, 'utf-8');
 
-    await withTx(async (client) => {
-      await client.query(sql);
-      await client.query(
-        'INSERT INTO schema_migrations (version) VALUES ($1)',
-        [file]
-      );
-    });
+    if (isNonTransactionalMigration(sql)) {
+      // Runs outside a transaction (e.g. CREATE INDEX CONCURRENTLY). A
+      // failure can leave earlier statements applied, so keep these
+      // migrations to a single idempotent statement and prefer re-runnable
+      // forms such as `IF NOT EXISTS`.
+      const statements = splitStatements(sql);
+      if (statements.length !== 1) {
+        throw new Error(
+          `Non-transactional migration ${file} must contain exactly one statement (found ${statements.length}); ` +
+            'split multi-statement migrations into one file per statement.'
+        );
+      }
+      const statement = statements[0]!;
+      await pool.query(statement);
+      await query('INSERT INTO schema_migrations (version) VALUES ($1)', [file]);
+    } else {
+      await withTx(async (client) => {
+        await client.query(sql);
+        await client.query(
+          'INSERT INTO schema_migrations (version) VALUES ($1)',
+          [file]
+        );
+      });
+    }
 
     console.log(`Successfully applied migration: ${file}`);
   }

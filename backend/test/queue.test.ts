@@ -49,6 +49,39 @@ describe('ingestion job recovery', () => {
     expect(completedAudit).toBeTruthy();
   });
 
+  it('drains orphaned documents across batches', async () => {
+    query.mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT id FROM tenants')) return { rows: [{ id: 't1' }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    let orphanCalls = 0;
+    tenantQuery.mockImplementation(async (_tenant: string, sql?: string) => {
+      const text = sql ?? '';
+      if (text.includes('WHERE status = \'PROCESSING\' AND locked_at')) return { rows: [], rowCount: 0 };
+      if (text.includes('FROM documents d')) {
+        orphanCalls += 1;
+        // First batch is full (more may remain); second batch is empty.
+        if (orphanCalls === 1) {
+          return {
+            rows: Array.from({ length: 20 }, (_, i) => ({ id: `d${i}`, owner_id: 'u1' })),
+            rowCount: 20,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes('INSERT INTO document_ingestion_jobs')) return { rows: [{ id: 'job-1' }], rowCount: 1 };
+      if (text.includes('FROM document_ingestion_jobs WHERE status = \'PENDING\'')) return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 0 };
+    });
+
+    await recoverIngestionJobs();
+    const enqueues = tenantQuery.mock.calls.filter(([, sql]: any[]) =>
+      (sql as string).includes('INSERT INTO document_ingestion_jobs')
+    );
+    expect(enqueues).toHaveLength(20);
+    expect(orphanCalls).toBe(2);
+  });
+
   it('reclaims crashed PROCESSING jobs back to PENDING', async () => {
     query.mockResolvedValue({ rows: [{ id: 't1' }], rowCount: 1 });
     tenantQuery.mockImplementation(async (_tenant: string, sql?: string) => {

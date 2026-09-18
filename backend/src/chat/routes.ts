@@ -18,11 +18,42 @@ const chatBodySchema = z.object({
   conversationId: z.string().uuid().optional(),
   content: z.string().trim().min(1).max(32000),
   modelId: z.string().uuid().optional(),
-  classification: z.enum(CLASSIFICATIONS).default('INTERNAL'),
+  // Optional: when /chat creates a conversation, an omitted classification
+  // resolves to the caller's clearance floor (PUBLIC for public-only callers).
+  classification: z.enum(CLASSIFICATIONS).optional(),
   documentIds: z.array(z.string().uuid()).max(100).optional(),
 }).strict();
 
 const HEARTBEAT_INTERVAL_MS = 15000;
+
+/**
+ * Active hijacked SSE responses. Hijacked responses are not tracked by the
+ * HTTP server, so `server.close()` cannot drain them on its own — a client
+ * that keeps a stream open would stall shutdown indefinitely. Shutdown ends
+ * these explicitly (see `closeActiveSseStreams`, called from a `preClose`
+ * hook in server.ts).
+ */
+interface ActiveSseStream {
+  end: () => void;
+  abort: () => void;
+}
+const activeSseStreams = new Set<ActiveSseStream>();
+
+export function closeActiveSseStreams(): void {
+  for (const stream of activeSseStreams) {
+    try {
+      stream.abort();
+    } catch {
+      // Provider stream already finished; ending the response is enough.
+    }
+    try {
+      stream.end();
+    } catch {
+      // Client already gone.
+    }
+  }
+  activeSseStreams.clear();
+}
 
 function escapeUntrusted(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -59,7 +90,10 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
 
     let conversationId = parsed.data.conversationId;
     let modelId = parsed.data.modelId;
-    let classification = parsed.data.classification as Classification;
+    // Clearance-aware default for newly created conversations: a PUBLIC caller
+    // omitting classification gets PUBLIC, not INTERNAL (which they are not
+    // cleared for). Existing conversations keep their stored classification.
+    let classification = (parsed.data.classification ?? (auth.clearance === 'PUBLIC' ? 'PUBLIC' : 'INTERNAL')) as Classification;
     if (conversationId) {
       const conversation = (
         await tenantQuery<{ model: string; classification: Classification }>(
@@ -146,10 +180,18 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     reply.hijack();
     reply.raw.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
+      'Cache-Control': 'no-store, no-transform',
       Connection: 'keep-alive',
       'x-request-id': req.requestId,
     });
+    // Register the hijacked response so shutdown can end it explicitly.
+    const activeStream: ActiveSseStream = {
+      end: () => {
+        if (!reply.raw.writableEnded) reply.raw.end();
+      },
+      abort: () => abortController.abort(),
+    };
+    activeSseStreams.add(activeStream);
     const send = (event: string, data: unknown) => {
       try {
         if (!reply.raw.writableEnded && !reply.raw.destroyed) {
@@ -298,12 +340,20 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       send('error', { code, message: error instanceof AppError ? error.message : 'Model request failed', requestId: req.requestId });
     } finally {
       clearInterval(heartbeat);
+      activeSseStreams.delete(activeStream);
+      // Persist the model that actually served the turn: after a mid-turn
+      // failover the transcript must name the fallback model, not the failed
+      // primary.
+      const servingModelId =
+        telemetry.fallbackUsed && telemetry.fallbackModelId ? telemetry.fallbackModelId : modelId;
+      const servingModelName =
+        telemetry.fallbackUsed && telemetry.fallbackModelName ? telemetry.fallbackModelName : model.name;
       if (content) {
         await tenantQuery(
           auth.tenantId,
           `INSERT INTO messages (conversation_id, tenant_id, role, content, model, model_id, citations)
            VALUES ($1,$2,'assistant',$3,$4,$5,$6)`,
-          [conversationId, auth.tenantId, content, model.name, modelId, JSON.stringify(citations)]
+          [conversationId, auth.tenantId, content, servingModelName, servingModelId, JSON.stringify(citations)]
         ).catch((error) => req.log.error({ err: error }, 'Failed to persist assistant message'));
         await tenantQuery(auth.tenantId, 'UPDATE conversations SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2', [conversationId, auth.tenantId]);
       }

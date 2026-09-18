@@ -18,14 +18,16 @@ export function resolveUploadClassification(
   requested: string | undefined,
   canClassify: boolean
 ): Classification {
-  if (requested && !canClassify) {
+  // An explicitly provided empty string counts as a request (e.g. an empty
+  // multipart field): only an absent value falls back to the safe default.
+  if (requested !== undefined && !canClassify) {
     throw Errors.forbidden(
       'CLASSIFICATION_DENIED',
       'Requesting a classification requires the document:classify permission'
     );
   }
   let classification: Classification = clearance === 'PUBLIC' ? 'PUBLIC' : 'INTERNAL';
-  if (canClassify && requested) {
+  if (canClassify && requested !== undefined) {
     if (!CLASSIFICATIONS.includes(requested as Classification) || requested === 'UNKNOWN') {
       throw Errors.badRequest('INVALID_CLASSIFICATION', 'Invalid data classification');
     }

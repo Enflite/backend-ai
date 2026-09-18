@@ -2,7 +2,7 @@
 
 ## Implemented flow
 
-Authenticated uploads are size-limited, filename/extension/signature checked, hashed, and written under a random tenant/document object key. The server assigns the default classification (`PUBLIC` for public-only users, otherwise `INTERNAL`); only `document:classify` holders can request or change a classification.
+Authenticated uploads are size-limited, filename/extension/signature checked, hashed, and written under a random tenant/document object key. The server assigns the default classification (`PUBLIC` for public-only users, otherwise `INTERNAL`); only `document:classify` holders can request or change a classification. An explicitly provided empty classification counts as a request (403 without the permission, 400 with it) — only an absent value falls back to the default.
 
 An append-only database job is queued after storage. A bounded worker scans, extracts, normalizes, chunks, embeds, and indexes the document. Jobs survive process restarts and stale jobs are reclaimed. Supported local extractors are PDF, DOCX, XLSX, TXT, CSV, Markdown, and HTML. Office archives have entry-count, expanded-size, and compression-ratio limits. Citation page, sheet, section, and source-location metadata is retained where the parser provides it.
 

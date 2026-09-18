@@ -110,18 +110,34 @@ export async function recoverIngestionJobs(): Promise<void> {
     // Heal documents stuck in PENDING/PROCESSING without an active job row
     // (e.g. the /retry route reset the status but the enqueue INSERT failed).
     // enqueueIngestion is idempotent per document, so re-enqueueing is safe.
-    const orphaned = await tenantQuery<{ id: string; owner_id: string }>(tenant.id,
-      `SELECT d.id, d.owner_id FROM documents d
-       LEFT JOIN document_ingestion_jobs j
-         ON j.document_id = d.id AND j.status IN ('PENDING', 'PROCESSING')
-       WHERE d.tenant_id = $1 AND d.deleted_at IS NULL
-         AND d.status IN ('PENDING', 'PROCESSING')
-         AND d.classification <> 'UNKNOWN'
-         AND j.id IS NULL
-       LIMIT 20`,
-      [tenant.id]);
-    for (const document of orphaned.rows) {
-      await enqueueIngestion({ documentId: document.id, tenantId: tenant.id, requestedBy: document.owner_id });
+    // Recovery runs only at startup, so drain in batches until a batch comes
+    // back short instead of healing only the first page. The batch cap is a
+    // backstop: if enqueueing never clears the orphan rows (e.g. the INSERT
+    // keeps failing), recovery must not spin forever.
+    const ORPHAN_BATCH_SIZE = 20;
+    const ORPHAN_MAX_BATCHES = 500;
+    for (let batch = 0; batch < ORPHAN_MAX_BATCHES; batch += 1) {
+      const orphaned = await tenantQuery<{ id: string; owner_id: string }>(tenant.id,
+        `SELECT d.id, d.owner_id FROM documents d
+         LEFT JOIN document_ingestion_jobs j
+           ON j.document_id = d.id AND j.status IN ('PENDING', 'PROCESSING')
+         WHERE d.tenant_id = $1 AND d.deleted_at IS NULL
+           AND d.status IN ('PENDING', 'PROCESSING')
+           AND d.classification <> 'UNKNOWN'
+           AND j.id IS NULL
+         LIMIT $2`,
+        [tenant.id, ORPHAN_BATCH_SIZE]);
+      if (orphaned.rows.length === 0) break;
+      for (const document of orphaned.rows) {
+        await enqueueIngestion({ documentId: document.id, tenantId: tenant.id, requestedBy: document.owner_id });
+      }
+      if (orphaned.rows.length < ORPHAN_BATCH_SIZE) break;
+      if (batch === ORPHAN_MAX_BATCHES - 1) {
+        console.warn(
+          `Orphan recovery for tenant ${tenant.id} hit the ${ORPHAN_MAX_BATCHES}-batch cap; ` +
+          'remaining orphans will be retried on the next restart'
+        );
+      }
     }
     const pending = await tenantQuery<{ id: string; document_id: string; requested_by: string; request_id: string | null }>(tenant.id,
       "SELECT id, document_id, requested_by, request_id FROM document_ingestion_jobs WHERE status = 'PENDING' ORDER BY created_at LIMIT 20");

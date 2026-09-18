@@ -95,6 +95,23 @@ describe('resolveUploadClassification', () => {
     throw new Error('expected rejection');
   });
 
+  it('rejects an explicitly empty classification value', () => {
+    // Without document:classify: 403 (it is a request, not an omission).
+    try {
+      resolveUploadClassification('INTERNAL', '', false);
+      throw new Error('expected CLASSIFICATION_DENIED');
+    } catch (error) {
+      expect((error as AppError).code).toBe('CLASSIFICATION_DENIED');
+    }
+    // With document:classify: 400 (empty is not a valid label).
+    try {
+      resolveUploadClassification('INTERNAL', '', true);
+      throw new Error('expected INVALID_CLASSIFICATION');
+    } catch (error) {
+      expect((error as AppError).code).toBe('INVALID_CLASSIFICATION');
+    }
+  });
+
   it('lets document:classify holders request at-or-below clearance', () => {
     expect(resolveUploadClassification('CONFIDENTIAL', 'INTERNAL', true)).toBe('INTERNAL');
     expect(resolveUploadClassification('CONFIDENTIAL', 'CONFIDENTIAL', true)).toBe('CONFIDENTIAL');

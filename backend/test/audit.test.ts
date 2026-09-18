@@ -8,6 +8,16 @@ describe('audit reason sanitization', () => {
     expect(sanitizeReason('api_key: xyz789')).toBe('api_key=[REDACTED]');
   });
 
+  it('redacts quoted keys and fully-quoted values', () => {
+    expect(sanitizeReason('upstream said {"password":"supersecret"}')).toBe(
+      'upstream said {password=[REDACTED]}'
+    );
+    expect(sanitizeReason("config had password='correct horse' set")).toBe(
+      'config had password=[REDACTED] set'
+    );
+    expect(sanitizeReason('token: "abc 123" rejected')).toBe('token=[REDACTED] rejected');
+  });
+
   it('strips URL userinfo', () => {
     expect(sanitizeReason('fetch https://admin:s3cret@internal:8080/x failed')).toBe(
       'fetch https://[REDACTED]@internal:8080/x failed'

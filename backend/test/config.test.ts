@@ -20,6 +20,12 @@ describe('configuration primitives', () => {
       expect(() => parseExpiresInToMs('-5m')).toThrow();
       expect(() => parseExpiresInToMs('15months')).toThrow();
     });
+
+    it('rejects zero durations so tokens do not expire immediately', () => {
+      expect(() => parseExpiresInToMs('0')).toThrow();
+      expect(() => parseExpiresInToMs('0s')).toThrow();
+      expect(() => parseExpiresInToMs('0m')).toThrow();
+    });
   });
 
   describe('isPlaceholderSecret', () => {

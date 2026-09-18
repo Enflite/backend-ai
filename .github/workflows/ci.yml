@@ -19,11 +19,19 @@ on:
     branches: ['**']
   pull_request:
 
+# Least privilege: jobs only need to read the repository.
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -55,6 +63,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -77,5 +87,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Validate compose file syntax
         run: docker compose config --quiet

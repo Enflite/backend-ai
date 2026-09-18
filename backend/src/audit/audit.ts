@@ -49,12 +49,18 @@ const MAX_REASON_LENGTH = 500;
 
 // Upstream error messages can embed internal hostnames, URLs, or fragments of
 // request data. Audit reasons are stored, not shown to end users, but keep them
-// bounded and free of credential-shaped material anyway.
+// bounded and free of credential-shaped material anyway. The credential pattern
+// also matches quoted keys (`"password":"..."`) and quoted values
+// (`password="correct horse"`); a bare \S+ value would stop at the first space
+// and leak the rest.
 export function sanitizeReason(reason?: string | null): string | null {
   if (reason == null) return null;
   return reason
     .replace(/\bbearer\s+\S+/gi, 'Bearer=[REDACTED]')
-    .replace(/(token|api[_-]?key|secret|password)\s*[:=]\s*\S+/gi, '$1=[REDACTED]')
+    .replace(
+      /["']?(token|api[_-]?key|secret|password)["']?\s*[:=]\s*("[^"\r\n]*"|'[^'\r\n]*'|\S+)/gi,
+      '$1=[REDACTED]'
+    )
     .replace(/:\/\/[^/\s:]+:[^/\s@]+@/g, '://[REDACTED]@')
     .slice(0, MAX_REASON_LENGTH);
 }

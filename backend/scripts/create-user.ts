@@ -18,21 +18,29 @@ function promptPassword(prompt: string): Promise<string> {
     stdin.setRawMode(true);
     stdin.resume();
     let password = '';
+    // A data event can carry several characters at once (e.g. pasted input
+    // arriving as `password\r`), so handle the chunk character by character:
+    // comparing the whole chunk against a terminator would append a trailing
+    // carriage return to the password.
     const onData = (chunk: Buffer): void => {
-      const char = chunk.toString('utf8');
-      if (char === '\n' || char === '\r' || char === '\u0004') {
-        stdin.setRawMode(false);
-        stdin.pause();
-        stdin.removeListener('data', onData);
-        process.stdout.write('\n');
-        resolve(password);
-      } else if (char === '\u0003') {
-        process.stdout.write('\n');
-        process.exit(1);
-      } else if (char === '\u007f' || char === '\b') {
-        password = password.slice(0, -1);
-      } else if (char >= ' ') {
-        password += char;
+      for (const char of chunk.toString('utf8')) {
+        if (char === '\n' || char === '\r' || char === '\u0004') {
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.removeListener('data', onData);
+          process.stdout.write('\n');
+          resolve(password);
+          return;
+        }
+        if (char === '\u0003') {
+          process.stdout.write('\n');
+          process.exit(1);
+        }
+        if (char === '\u007f' || char === '\b') {
+          password = password.slice(0, -1);
+        } else if (char >= ' ') {
+          password += char;
+        }
       }
     };
     stdin.on('data', onData);
