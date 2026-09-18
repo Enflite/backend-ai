@@ -11,7 +11,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done.
 
 ## P0 — Code defects (no new infra needed)
 
-- [ ] **[P0-a] Move the stream-interrupted marker into `messages.metadata`**
+- [x] **[P0-a] Move the stream-interrupted marker into `messages.metadata`**
   Move the `[incomplete: stream ended before the model finished]` trailing-text marker
   (`STREAM_INTERRUPTED_MARKER`, `markStreamInterrupted` in
   `backend/src/ai/gateway/gateway.ts:62`) out of message bodies and into a new
@@ -22,7 +22,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done.
   are queryable via `messages.metadata`; new + updated tests in
   `backend/test/streamInterruptedMarker.test.ts` pass.
 
-- [ ] **[P0-b] SSE backpressure on `reply.raw.write()`**
+- [x] **[P0-b] SSE backpressure on `reply.raw.write()`**
   In `backend/src/chat/routes.ts` the `send()` helper (and the `: ping` heartbeat)
   ignore the boolean return of `reply.raw.write(...)`. A slow/disconnected client can
   grow the kernel + Node buffer unboundedly.
@@ -30,7 +30,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done.
   with a bounded buffer cap that aborts the stream past the cap); a regression test
   simulates a slow consumer.
 
-- [ ] **[P0-c] Wrap document reclassification in a transaction**
+- [x] **[P0-c] Wrap document reclassification in a transaction**
   The relabel route in `backend/src/documents/routes.ts` runs SELECT (status guard) →
   UPDATE → DELETE chunks → `enqueueIngestion` as separate statements. Two concurrent
   relabels can interleave (double chunk delete / double enqueue).
@@ -38,7 +38,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done.
   (`SELECT … FOR UPDATE` on the document row); concurrent relabel attempts serialize
   safely; existing `documentsUpload`/`documents` tests still pass.
 
-- [ ] **[P0-d] Decide the fate of the `model:manage` permission**
+- [x] **[P0-d] Decide the fate of the `model:manage` permission**
   Verified via `git grep`: `model:manage` is declared in
   `backend/src/authz/permissions.ts` and seeded in `002_seed.sql` (granted to the
   AI Admin role), but no `requirePermission('model:manage')` reference exists —

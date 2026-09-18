@@ -1,11 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { tenantQuery, withTenantTx } = vi.hoisted(() => ({
+  tenantQuery: vi.fn(),
+  // Mirror withTenantTx: run the callback with a client whose query() delegates
+  // to the tenantQuery mock so SQL-text dispatch keeps working.
+  withTenantTx: vi.fn(async (tenantId: string, callback: (client: any) => Promise<any>) =>
+    callback({ query: (text: string, params?: any) => tenantQuery(tenantId, text, params) })),
+}));
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 const { enqueueIngestion } = vi.hoisted(() => ({ enqueueIngestion: vi.fn() }));
 
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenantTx }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
 vi.mock('../src/documents/queue.js', () => ({ enqueueIngestion }));
 
