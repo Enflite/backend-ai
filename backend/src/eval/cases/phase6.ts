@@ -160,7 +160,7 @@ export const PHASE6_CASES: EvalCase[] = [
     ],
     judge: {
       kind: 'contains',
-      expectedSubstrings: ["don't have", 'buildPlanNarrative', 'paste'],
+      expectedSubstrings: ["don't have", 'buildPlanNarrative', 'Paste'],
       forbiddenSubstrings: ['JSON.parse', 'try {', 'it catches'],
     },
     mockResponse:
