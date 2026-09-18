@@ -17,11 +17,19 @@
 --   (existing approved models keep serving), DISABLED -> DISABLED,
 --   RETIRED -> RETIRED.
 
+-- The legacy check constraint (auto-named models_status_check by 001_init.sql)
+-- must be dropped BEFORE the status remap below: the new lifecycle states
+-- ('REGISTERED', 'ACTIVE', ...) are not in the legacy list, so the UPDATEs
+-- would violate the old constraint on any database (fresh or upgraded).
+-- 017 never succeeded anywhere in its previous ordering (migrations are
+-- transactional, so the failed file was never recorded), making this
+-- reorder safe to apply in place.
+ALTER TABLE models DROP CONSTRAINT IF EXISTS models_status_check;
+
 UPDATE models SET status = 'REGISTERED' WHERE status = 'UNVERIFIED';
 UPDATE models SET status = 'EVALUATING' WHERE status = 'TESTING';
 UPDATE models SET status = 'ACTIVE' WHERE status = 'APPROVED';
 
-ALTER TABLE models DROP CONSTRAINT IF EXISTS models_status_check;
 ALTER TABLE models ADD CONSTRAINT models_status_check CHECK (status IN (
   'REGISTERED', 'DOWNLOADING', 'VALIDATING', 'EVALUATING', 'PENDING_APPROVAL',
   'APPROVED', 'CANARY', 'ACTIVE', 'DEPRECATED', 'DISABLED', 'RETIRED'

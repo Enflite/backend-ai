@@ -13,10 +13,12 @@
     "migrate": "tsx src/db/migrate.ts",
     "migrate:prod": "node dist/src/db/migrate.js",
     "create-user": "tsx scripts/create-user.ts",
+    "verify:restore": "bash scripts/verify-restore.sh",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "eval": "tsx src/eval/cli.ts"
+    "eval": "tsx src/eval/cli.ts",
+    "loadtest:smoke": "node scripts/load-test.mjs --scenario smoke"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1135.0",

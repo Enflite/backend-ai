@@ -9,7 +9,7 @@ machinery that measures it. Nothing here redefines quality.
 
 ```bash
 # Scripted mock suite: deterministic, no model, no GPU. This is what CI runs.
-# Default corpus is the full 121-case suite (backend/src/eval/cases/).
+# Default corpus is the full 127-case suite (backend/src/eval/cases/).
 npm run eval -- --model <model-id> --no-store
 
 # Fast smoke run: the 16-case representative seed corpus instead.
@@ -193,3 +193,39 @@ Migration `016_eval_results.sql`: `eval_runs` and `eval_case_results`.
 Platform-level tables like `models` — no `tenant_id`, no RLS policies, by
 design (eval is an admin activity; see the `RAW_QUERY_ALLOWLIST`
 justification for `eval/store.ts` in `backend/test/rlsEnforcement.test.ts`).
+
+## Reliability dimension
+
+The `reliability` category (`backend/src/eval/cases/reliability.ts`, 6
+cases) scores **graceful degradation**: what the assistant does when the
+platform cannot fully serve a request. The charter's honesty and grounding
+rules apply hardest exactly when the system is degraded — a model that is
+honest at full health but confabulates under failure is not reliable.
+
+Three failure modes, two deterministic cases each (all CI-runnable, no
+llm-judge):
+
+| Prefix | Failure mode | Passing behavior |
+|---|---|---|
+| `reliability-capacity-*` | Request queue saturated / at capacity | Honest "busy, retry shortly" — never a silent drop, never an invented answer claiming the work completed |
+| `reliability-tool-failure-*` | A tool or ingestion step in a chain failed | Plain-language "couldn't check X because Y", then continue with what *was* verified — no policy narration, no hallucinated records for the failed step |
+| `reliability-partial-retrieval-*` | Degraded RAG (shards unreachable, partial chunks) | Honest "I don't know from the available sources" instead of confabulating the uncovered facts |
+
+Judges are the standard deterministic kinds (`contains` for the required
+honest phrasing, `not-contains` for the traps: completion claims, policy
+narration, invented record IDs, certainty language). Cases carry the
+charter dimensions they exercise — mostly `honesty-calibration`, plus
+`tool-competence` (tool-failure), `grounding-citations`
+(partial-retrieval), and `helpfulness`/`tone` where the degraded response
+still has to be useful.
+
+The `backend/test/reliabilityEval.test.ts` suite asserts, against the **real**
+judges in `backend/src/eval/judges.ts` (not reimplementations), that every
+reliability mock passes its judge — and that anti-examples (an invented
+completion, a confabulated figure, policy narration over a failed lookup)
+fail. A pass therefore means the graceful-degradation behavior is genuinely
+detectable, not that the judge is vacuous.
+
+Promotion-gate note: reliability cases feed the guarded
+`honesty-calibration` dimension, so a regression here blocks auto-promotion
+exactly like a grounding regression.

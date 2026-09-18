@@ -13,6 +13,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { judgeResponse } from './judges.js';
+import { recordEvalRun } from '../observability/metrics.js';
 import {
   defaultRubric,
   evaluateWithJudgeModel,
@@ -161,6 +162,7 @@ export async function runEval(
   opts: RunEvalOptions
 ): Promise<{ results: EvalCaseResult[]; summary: EvalRunSummary }> {
   const runId = randomUUID();
+  const runStart = Date.now();
   const filtered = cases.filter(
     (c) =>
       (!opts.categories || opts.categories.includes(c.category)) &&
@@ -272,5 +274,11 @@ export async function runEval(
     byDimension,
     skipped,
   };
+  // Domain RED metric for eval runs: a failed P0 gate is an 'error'-grade
+  // signal for operators watching the promotion pipeline.
+  recordEvalRun(
+    p0Failed.length > 0 ? 'error' : summary.failed > 0 ? 'failed' : 'passed',
+    (Date.now() - runStart) / 1000
+  );
   return { results, summary };
 }

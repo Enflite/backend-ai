@@ -16,6 +16,8 @@ import { buildSystemPrompt, wrapRetrievedContext, wrapToolResult, buildNoEvidenc
 import { runToolCallWithRecovery } from './toolRecovery.js';
 import { canModelProcess } from '../policy/engine.js';
 import { config } from '../config.js';
+import { createChatConcurrencyLimiter, replyBusy } from '../ai/gateway/limits.js';
+import { recordChatTurn, recordRetrieval } from '../observability/metrics.js';
 
 const chatBodySchema = z.object({
   conversationId: z.string().uuid().optional(),
@@ -28,6 +30,14 @@ const chatBodySchema = z.object({
 }).strict();
 
 const HEARTBEAT_INTERVAL_MS = 15000;
+
+/**
+ * Concurrency limiter for chat streams (Phase 4b gateway fairness): one slot
+ * per in-flight stream, held for the whole SSE response including agentic
+ * tool rounds and released on close/error/abort. Exported for tests and
+ * operational introspection.
+ */
+export const chatConcurrency = createChatConcurrencyLimiter();
 
 /**
  * Active hijacked SSE responses. Hijacked responses are not tracked by the
@@ -230,9 +240,13 @@ function buildProviderTools(auth: AuthContext, classification: Classification): 
 export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post('/chat', {
     preHandler: [requireAuth, requirePermission('chat:create')],
-    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    // Sustained request rate (config CHAT_RATE_LIMIT_PER_MIN). The stream is
+    // long-lived, so burst protection for provider cost also comes from the
+    // concurrency cap below. Documented in docs/deployment.md.
+    config: { rateLimit: { max: config.CHAT_RATE_LIMIT_PER_MIN, timeWindow: '1 minute' } },
   }, async (req, reply) => {
     const auth = req.auth!;
+    const turnStart = Date.now();
     const parsed = chatBodySchema.safeParse(req.body);
     if (!parsed.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid chat request body', parsed.error.format());
 
@@ -296,7 +310,15 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
 
     let citations: Awaited<ReturnType<typeof retrieveAuthorizedContext>>['citations'] = [];
     if (parsed.data.documentIds?.length) {
-      const retrieval = await retrieveAuthorizedContext(auth, parsed.data.content, parsed.data.documentIds);
+      const retrievalStart = Date.now();
+      let retrieval: Awaited<ReturnType<typeof retrieveAuthorizedContext>>;
+      try {
+        retrieval = await retrieveAuthorizedContext(auth, parsed.data.content, parsed.data.documentIds);
+      } catch (error) {
+        recordRetrieval('error', (Date.now() - retrievalStart) / 1000);
+        throw error;
+      }
+      recordRetrieval(retrieval.context ? 'hit' : 'empty', (Date.now() - retrievalStart) / 1000);
       citations = retrieval.citations;
       if (retrieval.context) {
         history.pop();
@@ -330,6 +352,20 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     const windowed = applyContextWindow(history, model.context_window, undefined, chatSystemPrompt);
     if (windowed.dropped > 0) {
       req.log.info({ requestId: req.requestId, conversationId, dropped: windowed.dropped }, 'context window truncated oldest messages');
+    }
+
+    // Concurrency cap (gateway fairness): acquire one slot before the stream
+    // starts and hold it for the whole SSE response, released in the finally
+    // below on normal close, error, client abort, or server shutdown. The
+    // check happens BEFORE reply.hijack() so an over-capacity request gets a
+    // normal JSON 429 instead of a half-hijacked stream. Nothing between the
+    // acquire and the try block below early-returns; everything that can
+    // throw or await (DB, gateway, tool calls) lives inside it, so the slot
+    // cannot leak.
+    const concurrencySlot = chatConcurrency.tryAcquire(auth.tenantId, auth.userId);
+    if (!concurrencySlot.ok) {
+      recordChatTurn(model.name, 'rate_limited', (Date.now() - turnStart) / 1000);
+      return replyBusy(reply, concurrencySlot.retryAfterSeconds);
     }
 
     // Take over the raw response for SSE. hijack() is required: without it
@@ -421,6 +457,10 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     // persisted message gets stream_interrupted metadata so a truncated
     // reply is never mistaken for a finished one.
     let streamInterrupted = false;
+    // Set when the stream's try block throws: the turn outcome for metrics is
+    // 'error' even when no partial content was produced (streamInterrupted
+    // only covers the partial-output case).
+    let turnFailed = false;
     let truncatedByCap = false;
     let toolIterations = 0;
     // The working message list grows as the agentic loop appends tool calls
@@ -560,10 +600,14 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
         });
       }
     } catch (error) {
+      turnFailed = true;
       if (content) streamInterrupted = true;
       const code = error instanceof AppError ? error.code : 'STREAM_ERROR';
       await send('error', { code, message: error instanceof AppError ? error.message : 'Model request failed', requestId: req.requestId });
     } finally {
+      // Release the concurrency slot first: the stream is over (normal close,
+      // error, abort, or shutdown), so the next waiting request may proceed.
+      concurrencySlot.release();
       clearInterval(heartbeat);
       // The response uses Connection: keep-alive, so the socket can serve
       // later requests: remove the per-request listener or each request leaks
@@ -577,6 +621,14 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
         telemetry.fallbackUsed && telemetry.fallbackModelId ? telemetry.fallbackModelId : modelId;
       const servingModelName =
         telemetry.fallbackUsed && telemetry.fallbackModelName ? telemetry.fallbackModelName : model.name;
+      // Domain RED metric for the turn: outcome reflects what the user
+      // experienced (completed / error / aborted by disconnect).
+      recordChatTurn(
+        servingModelName,
+        clientDisconnected ? 'aborted' : turnFailed || streamInterrupted ? 'error' : 'completed',
+        (Date.now() - turnStart) / 1000,
+        telemetry.timeToFirstTokenMs !== undefined ? telemetry.timeToFirstTokenMs / 1000 : undefined
+      );
       if (content) {
         // Stream status travels in metadata, never in the message text: a
         // reconnecting client reading history can distinguish a completed

@@ -10,8 +10,10 @@ import { createHash } from 'node:crypto';
 
 import { config } from './config.js';
 import { AppError, Errors } from './errors.js';
+import { busyBody, retryAfterSecondsFromReply } from './ai/gateway/limits.js';
 import { requestIdHook } from './requestId.js';
 import { healthRoutes } from './health.js';
+import { metricsRoutes, recordHttpRequest } from './observability/metrics.js';
 import { authRoutes } from './auth/routes.js';
 import { auditRoutes } from './audit/routes.js';
 import { modelRoutes, modelAdminRoutes, modelArtifactRoutes } from './ai/gateway/routes.js';
@@ -24,19 +26,43 @@ import { recoverIngestionJobs } from './documents/queue.js';
 import { pool, query } from './db/pool.js';
 
 /**
+ * Retry-After (seconds) attached to 429s from the instance-global ceiling.
+ * The ceiling resets on a one-minute window, so 30s is a reasonable
+ * ask-the-client-to-wait that stays under the next window.
+ */
+const GLOBAL_RATE_LIMIT_RETRY_AFTER_SECONDS = 30;
+
+/**
+ * Fallback Retry-After when a framework 429 arrives without the Retry-After
+ * header @fastify/rate-limit normally sets (e.g. in unit tests).
+ */
+const DEFAULT_FRAMEWORK_429_RETRY_AFTER_SECONDS = 30;
+
+/**
  * Custom error handler for the API server.
  *
  * - AppError: honor its status code (includes AuditPersistenceError → 503).
  * - Fastify validation errors: 400.
  * - Framework-level errors (rate limiting, payload too large) carry a numeric
  *   statusCode that is not an AppError; honor known 4xx codes (429/413) so
- *   clients see real responses instead of a misleading 500.
+ *   clients see real responses instead of a misleading 500. Every 429 —
+ *   framework or AppError — uses the friendly 'busy' body from
+ *   ai/gateway/limits.ts plus a Retry-After header.
  * - Everything else: generic 500 that never leaks internal details.
  */
 export function serverErrorHandler(error: unknown, req: FastifyRequest, reply: FastifyReply): unknown {
   const requestId = req.requestId;
 
   if (error instanceof AppError) {
+    if (error.statusCode === 429) {
+      // e.g. the instance-global ceiling: same friendly 'busy' body as every
+      // other 429, so clients see one honest capacity message everywhere.
+      const retryAfterSeconds = GLOBAL_RATE_LIMIT_RETRY_AFTER_SECONDS;
+      return reply
+        .header('Retry-After', String(retryAfterSeconds))
+        .status(429)
+        .send(busyBody(retryAfterSeconds));
+    }
     return reply.status(error.statusCode).send({
       error: {
         code: error.code,
@@ -62,11 +88,23 @@ export function serverErrorHandler(error: unknown, req: FastifyRequest, reply: F
     typeof (error as { statusCode?: unknown } | null)?.statusCode === 'number'
       ? (error as { statusCode: number }).statusCode
       : undefined;
-  if (statusCode === 429 || statusCode === 413) {
+  if (statusCode === 429) {
+    // Rate limiting is capacity signaling, not a client fault: every 429 —
+    // from @fastify/rate-limit's per-route buckets or the concurrency caps —
+    // speaks the same friendly 'busy' body. The plugin already set
+    // Retry-After on the reply before throwing; reuse it so the body and the
+    // header agree.
+    const retryAfterSeconds = retryAfterSecondsFromReply(reply, DEFAULT_FRAMEWORK_429_RETRY_AFTER_SECONDS);
+    return reply
+      .header('Retry-After', String(retryAfterSeconds))
+      .status(429)
+      .send(busyBody(retryAfterSeconds));
+  }
+  if (statusCode === 413) {
     return reply.status(statusCode).send({
       error: {
-        code: statusCode === 429 ? 'RATE_LIMITED' : 'PAYLOAD_TOO_LARGE',
-        message: statusCode === 429 ? 'Too many requests' : 'Payload too large',
+        code: 'PAYLOAD_TOO_LARGE',
+        message: 'Payload too large',
         requestId,
       },
     });
@@ -94,6 +132,12 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   // Request ID
   fastify.addHook('onRequest', requestIdHook);
+  // Trace correlation: rebind the per-request logger with requestId/traceId
+  // so every log line emitted through req.log — routes, gateway, providers,
+  // tool calls — carries both fields. See docs/scale.md.
+  fastify.addHook('onRequest', async (req) => {
+    req.log = req.log.child({ requestId: req.requestId, traceId: req.traceId });
+  });
   fastify.addHook('onResponse', async (req, reply) => {
     req.log.info({
       requestId: req.requestId,
@@ -104,6 +148,17 @@ export async function buildServer(): Promise<FastifyInstance> {
       statusCode: reply.statusCode,
       latencyMs: reply.elapsedTime,
     }, 'request completed');
+    // HTTP RED triplet for /metrics. The scrape endpoint itself is excluded
+    // so Prometheus polling does not pollute the request-rate series.
+    const route = req.routeOptions.url ?? 'unmatched';
+    if (route !== '/metrics') {
+      recordHttpRequest(
+        req.method,
+        route,
+        `${Math.floor(reply.statusCode / 100)}xx`,
+        reply.elapsedTime / 1000
+      );
+    }
   });
 
   await fastify.register(helmet);
@@ -173,6 +228,8 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   // Root health endpoints
   await fastify.register(healthRoutes);
+  // Prometheus exposition (gated by METRICS_PUBLIC; see observability/metrics.ts)
+  await fastify.register(metricsRoutes);
 
   // Hijacked SSE responses are invisible to server.close(): end them
   // explicitly so a client holding a stream open cannot stall shutdown.

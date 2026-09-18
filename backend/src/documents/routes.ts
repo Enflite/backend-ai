@@ -12,7 +12,7 @@ import { recordAudit } from '../audit/audit.js';
 import { s3Storage } from '../storage/storage.js';
 import { detectMimeType, sanitizeFilename } from './fileValidation.js';
 import { retrieveAuthorizedContext } from '../rag/retrieval.js';
-import { enqueueIngestion } from './queue.js';
+import { enqueueIngestion, cancelIngestionJob, requeueIngestionJob } from './queue.js';
 import { config } from '../config.js';
 
 const idSchema = z.object({ id: z.string().uuid() });
@@ -155,6 +155,45 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
     const jobId = await enqueueIngestion({ documentId: parsed.data.id, tenantId: req.auth!.tenantId,
       requestedBy: req.auth!.userId, requestId: req.requestId });
     return reply.status(202).send({ status: 'PENDING', jobId });
+  });
+
+  // Cancel an ingestion job. A PENDING job is canceled immediately; a
+  // PROCESSING job is marked cancel-requested and the worker aborts it at the
+  // next pipeline stage boundary (202 = accepted, still winding down).
+  fastify.post('/documents/jobs/:id/cancel', {
+    preHandler: [requireAuth, requirePermission('document:upload')],
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const parsed = idSchema.safeParse(req.params);
+    if (!parsed.success) throw Errors.badRequest('INVALID_ID', 'Invalid job ID');
+    const result = await cancelIngestionJob({
+      jobId: parsed.data.id,
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      // The requesting user or a platform admin (tenant:manage) may cancel.
+      isAdmin: auth.permissions.includes('tenant:manage'),
+      requestId: req.requestId,
+    });
+    return reply.status(result.status === 'cancel-requested' ? 202 : 200).send(result);
+  });
+
+  // Admin requeue of a quarantined (or failed) job. Quarantined jobs are never
+  // auto-retried; this audited endpoint is the only way back.
+  fastify.post('/documents/jobs/:id/requeue', {
+    preHandler: [requireAuth, requirePermission('tenant:manage')],
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const parsed = idSchema.safeParse(req.params);
+    if (!parsed.success) throw Errors.badRequest('INVALID_ID', 'Invalid job ID');
+    const result = await requeueIngestionJob({
+      jobId: parsed.data.id,
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      requestId: req.requestId,
+    });
+    return reply.status(202).send(result);
   });
 
   fastify.patch('/documents/:id/classification', {
