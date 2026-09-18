@@ -40,8 +40,7 @@ services:
       # environment; the checked-in default must never be used beyond local dev.
       JWT_SECRET: ${JWT_SECRET:-dev-only-secret-do-not-use-in-production-min-32-chars}
       JWT_EXPIRES_IN: 15m
-      VLLM_BASE_URL: http://vllm:8000/v1
-      VLLM_MODEL: meta-llama/Meta-Llama-3.1-8B-Instruct
+      # Model endpoints come from the model registry (models.endpoint), not env.
       # Dev-only convenience. config.ts refuses to boot with DEV_AUTH_ENABLED=true
       # when NODE_ENV=production.
       DEV_AUTH_ENABLED: "true"

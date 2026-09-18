@@ -20,11 +20,20 @@ const envSchema = z.object({
     .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
     .default(false),
   CORS_ORIGIN: z.string().default('http://localhost:8443'),
-  VLLM_BASE_URL: z.string().default('http://localhost:8000/v1'),
-  VLLM_MODEL: z.string().default('meta-llama/Meta-Llama-3.1-8B-Instruct'),
   VLLM_API_KEY: z.string().optional().default(''),
   AI_PROVIDER_ALLOWED_ORIGINS: z.string().default('http://localhost:8000,http://vllm:8000'),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(120000),
+  // Upper bound on streamed model output per chat turn. A compromised or
+  // misbehaving provider could otherwise stream unbounded content, exhausting
+  // server memory (the stream is accumulated for persistence) and database storage.
+  AI_MAX_RESPONSE_CHARS: z.coerce.number().int().min(1024).max(1000000).default(65536),
+  // Agentic tool loop guard: maximum tool-call rounds per chat turn. Each round
+  // may execute several tool calls in parallel; the cap bounds total provider
+  // round-trips and prevents runaway loops.
+  AI_MAX_TOOL_ITERATIONS: z.coerce.number().int().min(0).max(10).default(5),
+  // Tool outputs are untrusted external data; truncate each result before it
+  // enters model context so one huge response cannot evict the conversation.
+  AI_TOOL_OUTPUT_MAX_CHARS: z.coerce.number().int().min(256).max(100000).default(8000),
   EMBEDDING_BASE_URL: z.string().url().optional(),
   EMBEDDING_MODEL: z.string().optional(),
   EMBEDDING_MODEL_VERSION: z.string().default('1'),

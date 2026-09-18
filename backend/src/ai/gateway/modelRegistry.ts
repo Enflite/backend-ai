@@ -17,12 +17,21 @@ export interface ApprovedModel {
   capabilities: Record<string, unknown>;
   allowed_classifications: Classification[];
   deployment: Record<string, unknown>;
+  /** Per-model inference timeout override (ms); null = server default. */
+  request_timeout_ms: number | null;
+  /** Passed to OpenAI-compatible providers; null = provider default. */
+  max_tokens: number | null;
+  /** Passed to OpenAI-compatible providers; null = provider default. */
+  temperature: number | null;
+  /** Fail over to this model (once, no chains) when the primary fails. */
+  fallback_model_id: string | null;
   created_at: Date;
 }
 
 const MODEL_FIELDS = `m.id, m.name, m.version, m.provider, m.endpoint, m.model_identifier,
   m.status, m.license, m.source, m.sha256, m.context_window, m.capabilities,
-  m.allowed_classifications, m.deployment, m.created_at`;
+  m.allowed_classifications, m.deployment, m.request_timeout_ms, m.max_tokens,
+  m.temperature, m.fallback_model_id, m.created_at`;
 
 export async function listApprovedModelsForUser(tenantId: string, userId: string, roleId: string): Promise<ApprovedModel[]> {
   return (
