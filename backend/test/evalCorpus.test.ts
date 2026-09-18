@@ -41,6 +41,20 @@ describe('eval corpus structure', () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
+  it('has unique last user messages (routing wrapper lookup key guard)', () => {
+    // routingClassifyChatFn keys routing cases by message history; a shared
+    // last user message across cases would make the lookup ambiguous.
+    const seen = new Map<string, string>();
+    for (const c of EVAL_CORPUS) {
+      const lastUser = [...c.messages].reverse().find((m) => m.role === 'user');
+      const content = lastUser?.content;
+      if (!content) continue;
+      const other = seen.get(content);
+      expect(other, `last user message of ${c.id} collides with ${other}`).toBeUndefined();
+      seen.set(content, c.id);
+    }
+  });
+
   it('every case has valid category, severity, non-empty messages and judge kind', () => {
     for (const c of EVAL_CORPUS) {
       expect(VALID_CATEGORIES, c.id).toContain(c.category);

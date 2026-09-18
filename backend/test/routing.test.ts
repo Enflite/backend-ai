@@ -70,6 +70,7 @@ describe('classifyTask', () => {
       'How do I fix the bug in src/sync.py?',
       'How do I debug a null pointer in Java?',
       'Refactor this SQL query to use a CTE',
+      'Update Dockerfile to install curl',
     ];
     for (const content of cases) {
       expect(classifyTask({ content, ...tools }), content).toEqual({
@@ -228,7 +229,10 @@ describe('resolveChatModel', () => {
     const route = await resolveChatModel(base);
     expect(resolveServingModel).toHaveBeenCalledWith('t1', 'u1', 'r1', 'chat');
     expect(resolveServingModel).not.toHaveBeenCalledWith('t1', 'u1', 'r1', 'syteline');
-    expect(route.routing).toEqual({ capability: 'chat', reasons: ['routing-disabled'] });
+    // The escape hatch is a true no-op: legacy chat default, no routing
+    // metadata (so the route skips the MODEL_ROUTED audit and pinning).
+    expect(route).toEqual({ modelId: 'model-chat' });
+    expect(route.routing).toBeUndefined();
   });
 });
 
@@ -404,5 +408,125 @@ describe('chat route capability routing', () => {
     ).toBe(false);
     expect(resolveServingModel).not.toHaveBeenCalled();
     expect(metaFrame(res as never)?.model).toEqual({ id: 'pinned-model-id', name: 'Pinned' });
+  });
+
+  it('claims the pin atomically on a model-less conversation', async () => {
+    tenantQuery.mockImplementation(async (_tenantId: string, sql: string, _params?: unknown[]) => {
+      if (sql.includes('FROM conversations WHERE id')) {
+        return { rows: [{ modelId: null, classification: 'INTERNAL' }] };
+      }
+      if (sql.includes('UPDATE conversations')) {
+        return { rows: [{ model_id: routedModel.id }] }; // claim won
+      }
+      if (sql.includes('INSERT INTO messages')) return { rows: [] };
+      if (sql.includes('FROM messages')) return { rows: [] };
+      throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
+    });
+
+    const res = await postChat({
+      content: 'Why is sales order 45213 late?',
+      conversationId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    });
+    expect(res.statusCode).toBe(200);
+
+    const updateSql = tenantQuery.mock.calls
+      .map((call) => call[1] as string)
+      .find((sql) => sql.includes('UPDATE conversations'));
+    expect(updateSql).toContain('model_id IS NULL');
+    expect(updateSql).toContain('RETURNING');
+
+    const auditCall = recordAudit.mock.calls.find(
+      (call) => (call[0] as { action: string }).action === 'MODEL_ROUTED'
+    );
+    expect(auditCall).toBeDefined();
+    expect((auditCall![0] as { resourceId: string }).resourceId).toBe(routedModel.id);
+
+    const meta = metaFrame(res as never);
+    expect(meta?.model).toEqual({ id: routedModel.id, name: routedModel.name });
+    expect(meta?.routing).toEqual({
+      capability: 'syteline',
+      reasons: ['syteline-entities-detected'],
+    });
+  });
+
+  it('adopts the winner pin when it loses the atomic pin race', async () => {
+    const winner = { ...routedModel, id: 'winner-model-id', name: 'Winner' };
+    tenantQuery.mockImplementation(async (_tenantId: string, sql: string, _params?: unknown[]) => {
+      const q = sql.replace(/\s+/g, ' '); // route SQL spans lines; match on one line
+      if (q.includes('UPDATE conversations')) return { rows: [] }; // lost the claim
+      if (q.includes('FROM conversations WHERE id')) {
+        // Initial read (modelId) and post-loss re-read (model_id) share this
+        // branch; each consumer reads its own alias.
+        return { rows: [{ modelId: null, model_id: winner.id, classification: 'INTERNAL' }] };
+      }
+      if (q.includes('INSERT INTO messages')) return { rows: [] };
+      if (q.includes('FROM messages')) return { rows: [] };
+      throw new Error(`unexpected query: ${q.slice(0, 80)}`);
+    });
+    getApprovedModelForUser.mockImplementation(async (id: string) =>
+      id === winner.id ? winner : routedModel
+    );
+
+    const res = await postChat({
+      content: 'Why is sales order 45213 late?',
+      conversationId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    });
+    expect(res.statusCode).toBe(200);
+
+    // The turn streams on the winner's stored model, re-verified by grant.
+    expect(getApprovedModelForUser).toHaveBeenCalledWith(
+      winner.id,
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    );
+    expect(metaFrame(res as never)?.model).toEqual({ id: winner.id, name: winner.name });
+
+    // The audit names the model actually served, with the classification kept.
+    const auditCall = recordAudit.mock.calls.find(
+      (call) => (call[0] as { action: string }).action === 'MODEL_ROUTED'
+    );
+    expect(auditCall).toBeDefined();
+    const payload = auditCall![0] as {
+      resourceId: string;
+      metadata: { capability: string; reasons: string[] };
+    };
+    expect(payload.resourceId).toBe(winner.id);
+    expect(payload.metadata.capability).toBe('syteline');
+  });
+
+  it('with routing disabled: no audit, no routing metadata, no pin', async () => {
+    routingEnabled.value = false;
+    resolveServingModel.mockImplementation(async (_t: string, _u: string, _r: string, cap: string) =>
+      cap === 'chat' ? { id: 'chat-model-id' } : undefined
+    );
+    const chatModel = { ...routedModel, id: 'chat-model-id', name: 'Chat' };
+    getApprovedModelForUser.mockResolvedValue(chatModel);
+    tenantQuery.mockImplementation(async (_tenantId: string, sql: string, _params?: unknown[]) => {
+      if (sql.includes('FROM conversations WHERE id')) {
+        return { rows: [{ modelId: null, classification: 'INTERNAL' }] };
+      }
+      if (sql.includes('UPDATE conversations')) return { rows: [] }; // touch update
+      if (sql.includes('INSERT INTO messages')) return { rows: [] };
+      if (sql.includes('FROM messages')) return { rows: [] };
+      throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
+    });
+
+    const res = await postChat({
+      content: 'Why is sales order 45213 late?',
+      conversationId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    });
+    expect(res.statusCode).toBe(200);
+
+    expect(
+      recordAudit.mock.calls.some((call) => (call[0] as { action: string }).action === 'MODEL_ROUTED')
+    ).toBe(false);
+    expect(metaFrame(res as never)?.routing).toBeUndefined();
+    // The escape hatch pins nothing: the only UPDATE is the end-of-turn
+    // touch, never the pin claim.
+    expect(
+      tenantQuery.mock.calls.some((call) => (call[1] as string).includes('model_id IS NULL'))
+    ).toBe(false);
+    expect(metaFrame(res as never)?.model).toEqual({ id: 'chat-model-id', name: 'Chat' });
   });
 });

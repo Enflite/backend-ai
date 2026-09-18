@@ -167,18 +167,27 @@ export const ROUTING_CASES: EvalCase[] = [
  * classifier instead of returning a scripted response. Non-routing cases
  * delegate to the wrapped chatFn. `sytelineToolsOffered` is fixed true per
  * the documented eval assumption above.
+ *
+ * Lookup is keyed by the full message history, not just the last user
+ * message: a non-routing case would need a byte-identical transcript to
+ * collide. The corpus test enforces last-user uniqueness across EVAL_CORPUS
+ * as a second guard, and duplicate routing histories fail fast here.
  */
 export function routingClassifyChatFn(inner: ChatFn): ChatFn {
-  const byUserMessage = new Map<string, EvalCase>();
+  const keyOf = (messages: Array<{ role: string; content: string }>) =>
+    JSON.stringify(messages.map((m) => [m.role, m.content]));
+  const byHistory = new Map<string, EvalCase>();
   for (const c of ROUTING_CASES) {
-    const lastUser = [...c.messages].reverse().find((m) => m.role === 'user');
-    if (lastUser) byUserMessage.set(lastUser.content, c);
+    const key = keyOf(c.messages);
+    if (byHistory.has(key)) {
+      throw new Error(`duplicate routing case message history for ${c.id}`);
+    }
+    byHistory.set(key, c);
   }
   return async (messages, tools) => {
-    const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-    const c = lastUser ? byUserMessage.get(lastUser.content) : undefined;
-    if (c && lastUser) {
-      return { content: decisionJson(lastUser.content) };
+    if (byHistory.has(keyOf(messages))) {
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+      return { content: decisionJson(lastUser?.content ?? '') };
     }
     return inner(messages, tools);
   };

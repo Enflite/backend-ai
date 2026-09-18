@@ -199,7 +199,7 @@ to use.
   (`routingClassifyChatFn`); unit + route integration tests in
   `backend/test/routing.test.ts`. Docs: `docs/capability-routing.md`,
   `docs/api.md` meta field, `ROUTING_ENABLED` in `.env.example`.
-  *Acceptance:* backend typecheck clean; full suite green (622 tests);
+  *Acceptance:* backend typecheck clean; full suite green (626 tests);
   eval 138/138 deterministic pass; 12/12 routing cases pass against the
   live classifier.
 - [ ] **[P2-6b] Invisible model plumbing (frontend)**

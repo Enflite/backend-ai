@@ -70,7 +70,7 @@ const STACK_TRACE_RE =
   /(?:Traceback \(most recent call last\)|^\s*at\s+\S+\s*\(.+:\d+:\d+\)|^\s*[\w.~\-/#]+\.(?:js|ts|jsx|tsx|py|java|kt|go|rs|rb|php|cs|cpp|c|h):\d+)/m;
 /** A path-like token ending in a code file extension. */
 const CODE_FILE_RE =
-  /\b[\w.~\-/#]+\.(?:py|tsx?|jsx?|java|kt|go|rs|rb|php|cs|cpp|cc|cxx|c|h|hpp|sql|sh|bash|zsh|ps1|yaml|yml|toml|tf|dockerfile)\b/i;
+  /(?:\b[\w.~\-/#]+\.(?:py|tsx?|jsx?|java|kt|go|rs|rb|php|cs|cpp|cc|cxx|c|h|hpp|sql|sh|bash|zsh|ps1|yaml|yml|toml|tf)\b|\bDockerfile\b)/i;
 /** Programming-task vocabulary. Word-boundaried; intentionally narrow to
  *  avoid stealing general questions ("how does git work?" still matches —
  *  that IS a coding question). Bare language names are included, but only

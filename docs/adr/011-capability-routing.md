@@ -32,7 +32,8 @@ model for that capability (`backend/src/ai/routing/`):
   model is never re-routed mid-conversation (stable voice).
 - The decision is observable, not silent: `MODEL_ROUTED` audit (capability +
   reason codes only, never user content) and `routing` in the SSE `meta`
-  event.
+  event — except when `ROUTING_ENABLED=false`, which is a true no-op (no
+  audit, no pinning).
 
 ## What this is not
 

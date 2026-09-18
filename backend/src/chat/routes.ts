@@ -302,21 +302,9 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       documentIds: parsed.data.documentIds,
       sytelineToolsOffered,
     });
-    const modelId = route.modelId;
+    let modelId = route.modelId;
     const routing: { capability: TaskCapability; reasons: string[] } | undefined = route.routing;
-    if (routing) {
-      await recordAudit({
-        tenantId: auth.tenantId,
-        userId: auth.userId,
-        requestId: req.requestId,
-        action: 'MODEL_ROUTED',
-        resource: 'model',
-        resourceId: modelId,
-        success: true,
-        metadata: { capability: routing.capability, reasons: routing.reasons },
-      });
-    }
-    const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
+    let model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
 
     if (!conversationId) {
       conversationId = (
@@ -329,13 +317,50 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       ).rows[0]!.id;
     } else if (!pinnedModelId && routing) {
       // The conversation existed without a pinned model (legacy or created
-      // model-less): pin the routed model so later turns stay on it.
-      await tenantQuery(
-        auth.tenantId,
-        `UPDATE conversations SET model = $1, model_id = $2, updated_at = NOW()
-         WHERE id = $3 AND tenant_id = $4 AND user_id = $5`,
-        [model.name, modelId, conversationId, auth.tenantId, auth.userId]
-      );
+      // model-less): claim the pin atomically. Concurrent first-turns race
+      // this conditional UPDATE and exactly one wins; the loser adopts the
+      // winner's stored model so concurrent streams agree on the voice.
+      const claimed = (
+        await tenantQuery<{ model_id: string }>(
+          auth.tenantId,
+          `UPDATE conversations SET model = $1, model_id = $2, updated_at = NOW()
+           WHERE id = $3 AND tenant_id = $4 AND user_id = $5 AND model_id IS NULL
+           RETURNING model_id::text AS "model_id"`,
+          [model.name, modelId, conversationId, auth.tenantId, auth.userId]
+        )
+      ).rows[0];
+      if (!claimed) {
+        const stored = (
+          await tenantQuery<{ model_id: string | null }>(
+            auth.tenantId,
+            `SELECT model_id::text AS "model_id" FROM conversations
+             WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+            [conversationId, auth.tenantId, auth.userId]
+          )
+        ).rows[0];
+        if (stored?.model_id) {
+          // Adopt the winner's pin, re-verified against this caller's grants
+          // — the stored model may have lost approval since it was pinned.
+          modelId = stored.model_id;
+          model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
+        }
+        // If the row vanished concurrently, keep the routed model; later
+        // statements will surface the missing conversation.
+      }
+    }
+    if (routing) {
+      // Audited after pin resolution so the record names the model actually
+      // served this turn, not just the one routing classified.
+      await recordAudit({
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        requestId: req.requestId,
+        action: 'MODEL_ROUTED',
+        resource: 'model',
+        resourceId: modelId,
+        success: true,
+        metadata: { capability: routing.capability, reasons: routing.reasons },
+      });
     }
 
     const history = (

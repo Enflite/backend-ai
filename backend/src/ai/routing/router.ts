@@ -104,8 +104,13 @@ export async function resolveChatModel(input: ResolveChatModelInput): Promise<Ch
   modelId ??= (await listApprovedModelsForUser(input.tenantId, input.userId, input.roleId))[0]?.id;
   if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
 
+  // Routing metadata is emitted only when routing actually classified the
+  // turn. When ROUTING_ENABLED=false the escape hatch is a true no-op: the
+  // legacy chat default is served with no MODEL_ROUTED audit and no pinning.
   return {
     modelId,
-    routing: { capability: classification.capability, reasons: classification.reasons },
+    ...(config.ROUTING_ENABLED
+      ? { routing: { capability: classification.capability, reasons: classification.reasons } }
+      : {}),
   };
 }

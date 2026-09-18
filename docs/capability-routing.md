@@ -78,7 +78,15 @@ name the matched rule, never user content.
 ## Observability
 
 - Audit: `MODEL_ROUTED` with `{ capability, reasons, modelId }`, recorded
-  only when routing classified the turn.
+  only when routing classified the turn — never when `ROUTING_ENABLED=false`
+  (the escape hatch is a true no-op: no audit, no pinning, legacy `chat`
+  default served).
+- Pinning: a conversation that already has a model keeps it forever. A
+  model-less conversation's first routed turn claims the pin with an atomic
+  conditional `UPDATE ... WHERE model_id IS NULL RETURNING`; concurrent
+  first-turns race the claim and exactly one wins — losers adopt the
+  winner's stored model (re-verified against the caller's grants) so
+  concurrent streams agree.
 - SSE: the `meta` event carries `routing: { capability, reasons }` on routed
   turns, so clients can show (or hide) the decision without model plumbing.
 - A conversation created by a routed turn stores the routed model; a
