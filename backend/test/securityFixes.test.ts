@@ -38,10 +38,10 @@ import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
 
 const DOC_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
-function mockDocLookup(classification: string, ownerId: string) {
+function mockDocLookup(classification: string, ownerId: string, hasGrant = false) {
   tenantQuery.mockImplementation(async (_tenantId: string, text: string) => {
-    if (text.startsWith('SELECT classification, owner_id')) {
-      return { rowCount: 1, rows: [{ classification, owner_id: ownerId }] };
+    if (text.startsWith('SELECT d.classification, d.owner_id')) {
+      return { rowCount: 1, rows: [{ classification, owner_id: ownerId, has_grant: hasGrant }] };
     }
     if (text.startsWith('UPDATE documents SET classification')) {
       return { rowCount: 1, rows: [{ id: DOC_ID, classification: 'PUBLIC', status: 'PENDING' }] };
@@ -88,6 +88,32 @@ describe('PATCH /documents/:id/classification authorization', () => {
     });
     expect(response.statusCode).toBe(403);
     expect(response.json().error.code).toBe('DOCUMENT_RECLASSIFY_FORBIDDEN');
+  });
+
+  it('allows reclassification by a non-owner holding an explicit document grant', async () => {
+    mockDocLookup('INTERNAL', 'someone-else', true);
+    testAuth.current.userId = 'collaborator-1';
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/documents/${DOC_ID}/classification`,
+      payload: { classification: 'PUBLIC', confirm: true },
+    });
+    expect(response.statusCode).toBe(202);
+  });
+
+  it('sends the caller identity into the grant check like the document GET route', async () => {
+    mockDocLookup('INTERNAL', 'someone-else');
+    testAuth.current.userId = 'collaborator-1';
+    await app.inject({
+      method: 'PATCH',
+      url: `/documents/${DOC_ID}/classification`,
+      payload: { classification: 'PUBLIC', confirm: true },
+    });
+    const lookup = tenantQuery.mock.calls.find(([, text]: any[]) =>
+      (text as string).startsWith('SELECT d.classification, d.owner_id'));
+    expect(lookup).toBeDefined();
+    // user_id and role_id are bound for the document_permissions grant predicate.
+    expect(lookup![2]).toEqual(expect.arrayContaining(['collaborator-1', testAuth.current.roleId]));
   });
 
   it('allows reclassification by a tenant manager who is not the owner', async () => {

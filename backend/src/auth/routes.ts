@@ -12,6 +12,7 @@ import {
   createSession,
   findRefreshReuse,
   hashRefreshToken,
+  InvalidRefreshSessionError,
   listUserSessions,
   refreshTokenTenant,
   revokeAllUserSessions,
@@ -192,16 +193,21 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
     }
     // The rotation UPDATE is conditional on the presented hash, so two
     // concurrent refreshes with the same token cannot both succeed: the loser
-    // throws here instead of silently issuing a second session. Route the
-    // loser through the same reuse detection (its token is now superseded)
-    // rather than surfacing a 500.
+    // throws InvalidRefreshSessionError and is routed through reuse detection
+    // (its token is now superseded) rather than surfacing a 500. Only that
+    // typed error is caught here: signing failures, DB errors, and caller
+    // cancellation (AbortError) propagate so a broken signer is never
+    // misreported as token theft.
     const completeAuth = await buildAuth(row, row);
     try {
       const rotated = await rotateRefreshToken(refreshToken, completeAuth, row.session_id);
       setRefreshCookie(reply, rotated.refreshToken);
       return reply.send({ accessToken: rotated.accessToken, expiresIn: config.JWT_EXPIRES_IN, user: rotated.auth });
-    } catch {
-      return handleInvalidRefresh(tenantId, refreshToken, req, reply);
+    } catch (error) {
+      if (error instanceof InvalidRefreshSessionError) {
+        return handleInvalidRefresh(tenantId, refreshToken, req, reply);
+      }
+      throw error;
     }
   });
 

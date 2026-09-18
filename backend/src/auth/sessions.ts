@@ -56,6 +56,21 @@ export function clearRefreshCookie(reply: FastifyReply): void {
   });
 }
 
+/**
+ * Thrown when the conditional rotation UPDATE matches no session row: the
+ * presented token is unknown, expired, revoked, or was already rotated (the
+ * concurrent-rotation loser). Callers must catch only this error for reuse
+ * handling; signing failures, DB errors, and caller cancellation (AbortError)
+ * must propagate so a broken signer is never misreported as token theft
+ * (which would revoke every session of an innocent user).
+ */
+export class InvalidRefreshSessionError extends Error {
+  constructor(message = 'Refresh session is invalid') {
+    super(message);
+    this.name = 'InvalidRefreshSessionError';
+  }
+}
+
 export async function rotateRefreshToken(
   oldToken: string,
   auth: Omit<AuthContext, 'sessionId'>,
@@ -75,7 +90,7 @@ export async function rotateRefreshToken(
      RETURNING id`,
     [hashRefreshToken(refreshToken), sessionId, auth.userId, hashRefreshToken(oldToken)]
   );
-  if (result.rowCount !== 1) throw new Error('Refresh session is invalid');
+  if (result.rowCount !== 1) throw new InvalidRefreshSessionError('Refresh session is invalid');
   const completeAuth = { ...auth, sessionId };
   return { auth: completeAuth, accessToken: await signToken(completeAuth), refreshToken };
 }
@@ -95,9 +110,12 @@ export async function findRefreshReuse(
   const row = (
     await tenantQuery<{ id: string; user_id: string }>(
       tenantId,
+      // previous_refresh_token_hashes is GIN-indexed (migration 012): use the
+      // containment operator so the history lookup stays index-backed instead
+      // of a sequential scan with `= ANY`.
       `SELECT id, user_id FROM sessions
        WHERE (replaced_refresh_token_hash = $1 AND replaced_at > NOW() - INTERVAL '10 minutes')
-          OR ($1 = ANY(previous_refresh_token_hashes))`,
+          OR (previous_refresh_token_hashes @> ARRAY[$1])`,
       [hashRefreshToken(token)]
     )
   ).rows[0];

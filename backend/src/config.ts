@@ -9,6 +9,24 @@ try {
   // .env file does not exist or is unreadable; rely on the real environment.
 }
 
+/**
+ * Validate a single CORS_ORIGIN entry. '*' combined with credentials:true
+ * makes @fastify/cors emit Access-Control-Allow-Origin: *, which browsers
+ * reject for credentialed requests, so wildcards (and the opaque 'null'
+ * origin) are refused and every entry must parse as a bare http(s) origin
+ * (scheme://host[:port], no path, query, or fragment).
+ */
+export function isValidCorsOrigin(entry: string): boolean {
+  const origin = entry.trim();
+  if (!origin || origin === '*' || origin.toLowerCase() === 'null') return false;
+  try {
+    const url = new URL(origin);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && url.origin === origin;
+  } catch {
+    return false;
+  }
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(8080),
@@ -19,21 +37,20 @@ const envSchema = z.object({
   COOKIE_SECURE: z
     .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
     .default(false),
-  CORS_ORIGIN: z.string().default('http://localhost:8443').refine((value) => {
-    // '*' combined with credentials:true makes @fastify/cors emit
-    // Access-Control-Allow-Origin: * which browsers reject for credentialed
-    // requests; validate each entry is a real origin.
-    return value.split(',').every((entry) => {
-      const origin = entry.trim();
-      if (!origin || origin === '*' || origin.toLowerCase() === 'null') return false;
-      try {
-        const url = new URL(origin);
-        return (url.protocol === 'http:' || url.protocol === 'https:') && url.origin === origin;
-      } catch {
-        return false;
-      }
-    });
-  }, 'CORS_ORIGIN must be a comma-separated list of valid http(s) origins; wildcards are not allowed with credentialed CORS'),
+  CORS_ORIGIN: z.string().default('http://localhost:8443').refine(
+    (value) => value.split(',').every(isValidCorsOrigin),
+    'CORS_ORIGIN must be a comma-separated list of valid http(s) origins; wildcards are not allowed with credentialed CORS'
+  ),
+  // Audit fail-closed: when true, a database outage that prevents persisting
+  // an audit event fails the request (503) instead of silently dropping the
+  // audit trail. Defaults to true in production and false elsewhere so local
+  // development keeps velocity when the audit table is unavailable.
+  AUDIT_FAIL_CLOSED: z
+    .preprocess(
+      (val) => (val === undefined || val === null || val === '' ? undefined : val === true || val === 'true' || val === '1'),
+      z.boolean()
+    )
+    .default(process.env.NODE_ENV === 'production'),
   VLLM_API_KEY: z.string().optional().default(''),
   AI_PROVIDER_ALLOWED_ORIGINS: z.string().default('http://localhost:8000,http://vllm:8000'),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(120000),

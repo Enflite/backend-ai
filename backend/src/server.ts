@@ -1,4 +1,4 @@
-import Fastify, { FastifyInstance } from 'fastify';
+import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import helmet from '@fastify/helmet';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
@@ -21,6 +21,65 @@ import { documentRoutes } from './documents/routes.js';
 import { toolRoutes } from './tools/routes.js';
 import { recoverIngestionJobs } from './documents/queue.js';
 import { pool, query } from './db/pool.js';
+
+/**
+ * Custom error handler for the API server.
+ *
+ * - AppError: honor its status code (includes AuditPersistenceError → 503).
+ * - Fastify validation errors: 400.
+ * - Framework-level errors (rate limiting, payload too large) carry a numeric
+ *   statusCode that is not an AppError; honor known 4xx codes (429/413) so
+ *   clients see real responses instead of a misleading 500.
+ * - Everything else: generic 500 that never leaks internal details.
+ */
+export function serverErrorHandler(error: unknown, req: FastifyRequest, reply: FastifyReply): unknown {
+  const requestId = req.requestId;
+
+  if (error instanceof AppError) {
+    return reply.status(error.statusCode).send({
+      error: {
+        code: error.code,
+        message: error instanceof Error ? error.message : 'Request validation failed',
+        requestId,
+        details: error.details,
+      },
+    });
+  }
+
+  if ((error as { validation?: unknown } | null)?.validation) {
+    return reply.status(400).send({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: error instanceof Error ? error.message : 'Request validation failed',
+        requestId,
+        details: (error as { validation?: unknown }).validation,
+      },
+    });
+  }
+
+  const statusCode =
+    typeof (error as { statusCode?: unknown } | null)?.statusCode === 'number'
+      ? (error as { statusCode: number }).statusCode
+      : undefined;
+  if (statusCode === 429 || statusCode === 413) {
+    return reply.status(statusCode).send({
+      error: {
+        code: statusCode === 429 ? 'RATE_LIMITED' : 'PAYLOAD_TOO_LARGE',
+        message: statusCode === 429 ? 'Too many requests' : 'Payload too large',
+        requestId,
+      },
+    });
+  }
+
+  req.log.error(error);
+  return reply.status(500).send({
+    error: {
+      code: 'INTERNAL',
+      message: 'Internal server error',
+      requestId,
+    },
+  });
+}
 
 export async function buildServer(): Promise<FastifyInstance> {
   const fastify = Fastify({
@@ -89,55 +148,9 @@ export async function buildServer(): Promise<FastifyInstance> {
     }
   });
 
-  // Custom Error Handler
-  fastify.setErrorHandler((error, req, reply) => {
-    const requestId = req.requestId;
-
-    if (error instanceof AppError) {
-      return reply.status(error.statusCode).send({
-        error: {
-          code: error.code,
-          message: error instanceof Error ? error.message : 'Request validation failed',
-          requestId,
-          details: error.details,
-        },
-      });
-    }
-
-    if ((error as any).validation) {
-      return reply.status(400).send({
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: error instanceof Error ? error.message : 'Request validation failed',
-          requestId,
-          details: (error as any).validation,
-        },
-      });
-    }
-
-    // Framework-level errors (rate limiting, payload too large) carry a
-    // numeric statusCode that is not an AppError; honor it so clients see
-    // real 429/413 responses instead of a misleading 500.
-    const statusCode = typeof (error as any)?.statusCode === 'number' ? (error as any).statusCode : undefined;
-    if (statusCode === 429 || statusCode === 413) {
-      return reply.status(statusCode).send({
-        error: {
-          code: statusCode === 429 ? 'RATE_LIMITED' : 'PAYLOAD_TOO_LARGE',
-          message: statusCode === 429 ? 'Too many requests' : 'Payload too large',
-          requestId,
-        },
-      });
-    }
-
-    req.log.error(error);
-    return reply.status(500).send({
-      error: {
-        code: 'INTERNAL',
-        message: 'Internal server error',
-        requestId,
-      },
-    });
-  });
+  // Custom Error Handler (extracted as a named export so its status-code
+  // mapping is unit-testable without booting the whole server).
+  fastify.setErrorHandler(serverErrorHandler);
 
   // Register API routes under /api/v1
   await fastify.register(

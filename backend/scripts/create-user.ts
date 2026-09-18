@@ -11,7 +11,7 @@ function promptPassword(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const stdin = process.stdin;
     if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') {
-      reject(new Error('No TTY available for password prompt; use --password or CREATE_USER_PASSWORD'));
+      reject(new Error('No TTY available for password prompt; set BACKEND_CREATE_USER_PASSWORD'));
       return;
     }
     process.stdout.write(prompt);
@@ -51,7 +51,6 @@ async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
       email: { type: 'string' },
-      password: { type: 'string' },
       role: { type: 'string', default: 'User' },
       org: { type: 'string', default: 'Default Org' },
       tenant: { type: 'string', default: 'Default Tenant' },
@@ -60,10 +59,12 @@ async function main(): Promise<void> {
   });
 
   const { email, role, org, tenant, clearance } = values;
-  // Prefer an explicit flag or environment variable (automation), otherwise
-  // prompt on the TTY. The flag remains for non-interactive use but exposes the
-  // password in shell history and process listings; the prompt is preferred.
-  let password = values.password ?? process.env.CREATE_USER_PASSWORD;
+  // The password never travels as a CLI argument: --password was removed
+  // because it is visible in shell history and process listings. Prefer the
+  // no-echo TTY prompt; the BACKEND_CREATE_USER_PASSWORD environment variable
+  // is the non-interactive fallback for automation (export it, never inline
+  // it on a command line).
+  let password = process.env.BACKEND_CREATE_USER_PASSWORD;
   if (!password) {
     try {
       password = await promptPassword('Password: ');
@@ -74,7 +75,8 @@ async function main(): Promise<void> {
   }
 
   if (!email || !password) {
-    console.error('Usage: npm run create-user -- --email <email> [--password <password> | CREATE_USER_PASSWORD | TTY prompt] [--role <role>] [--org <org>] [--tenant <tenant>] [--clearance <clearance>]');
+    console.error('Usage: npm run create-user -- --email <email> [--role <role>] [--org <org>] [--tenant <tenant>] [--clearance <clearance>]');
+    console.error('Password comes from the BACKEND_CREATE_USER_PASSWORD environment variable or a no-echo TTY prompt.');
     process.exit(1);
   }
 

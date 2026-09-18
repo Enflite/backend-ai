@@ -194,6 +194,24 @@ describe('refresh-token reuse', () => {
     expect(res.json().code).toBe('INVALID_REFRESH_TOKEN');
     await fastify.close();
   });
+
+  it('queries the token history with the GIN-indexed containment operator', async () => {
+    const seen: string[] = [];
+    tenantQuery.mockImplementation(async (_tenant: string, sql: string) => {
+      seen.push(sql);
+      if (sql.includes('FROM sessions s JOIN users u')) return { rows: [], rowCount: 0 };
+      if (sql.includes('previous_refresh_token_hashes')) return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 1 };
+    });
+    const fastify = await app();
+    await fastify.inject({ method: 'POST', url: '/auth/refresh', headers: { cookie: cookieHeader } });
+    const historyQuery = seen.find((sql) => sql.includes('previous_refresh_token_hashes'))!;
+    // Migration 012 GIN-indexes previous_refresh_token_hashes; `= ANY` would
+    // bypass it with a sequential scan, so reuse detection must use `@>`.
+    expect(historyQuery).toContain('@> ARRAY[$1]');
+    expect(historyQuery).not.toContain('= ANY');
+    await fastify.close();
+  });
 });
 
 describe('session inventory', () => {

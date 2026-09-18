@@ -169,15 +169,34 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
     const next = parsedBody.data.classification;
     assertClassificationAllowed(auth.clearance, next);
     const current = (
-      await tenantQuery<{ classification: Classification; owner_id: string }>(auth.tenantId,
-        'SELECT classification, owner_id FROM documents WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL AND status NOT IN (\'PENDING\', \'PROCESSING\')',
-        [parsedId.data.id, auth.tenantId])
+      await tenantQuery<{ classification: Classification; owner_id: string; has_grant: boolean }>(auth.tenantId,
+        `SELECT d.classification, d.owner_id,
+           EXISTS (
+             SELECT 1 FROM document_permissions dp
+             WHERE dp.document_id = d.id AND dp.tenant_id = d.tenant_id AND dp.can_read AND (
+               dp.user_id = $3 OR dp.role_id = $4
+               OR (dp.department_id IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM department_memberships dm WHERE dm.tenant_id = $2 AND dm.department_id = dp.department_id AND dm.user_id = $3
+               ))
+               OR (dp.group_id IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM security_group_memberships gm WHERE gm.tenant_id = $2 AND gm.group_id = dp.group_id AND gm.user_id = $3
+               ))
+             )
+           ) AS has_grant
+         FROM documents d
+         WHERE d.id = $1 AND d.tenant_id = $2 AND d.deleted_at IS NULL AND d.status NOT IN ('PENDING', 'PROCESSING')`,
+        [parsedId.data.id, auth.tenantId, auth.userId, auth.roleId])
     ).rows[0];
     if (!current) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
-    // Only the owner (or a tenant manager) may relabel a document: a classification
-    // grant alone must never let a user who cannot read a document downgrade it to PUBLIC.
-    if (current.owner_id !== auth.userId && !auth.permissions.includes('tenant:manage')) {
-      throw Errors.forbidden('DOCUMENT_RECLASSIFY_FORBIDDEN', 'Only the document owner or a tenant manager can change its classification');
+    // Only the owner, a caller holding an explicit document grant (the same
+    // owner-or-grant predicate as the document GET route), or a tenant
+    // manager may relabel a document: a classification grant alone must never
+    // let a user who cannot read a document downgrade it to PUBLIC.
+    const mayRelabel = current.owner_id === auth.userId
+      || current.has_grant
+      || auth.permissions.includes('tenant:manage');
+    if (!mayRelabel) {
+      throw Errors.forbidden('DOCUMENT_RECLASSIFY_FORBIDDEN', 'Only the document owner, a granted collaborator, or a tenant manager can change its classification');
     }
     // The caller must be cleared for the document's CURRENT label as well as the new one.
     assertClassificationAllowed(auth.clearance, current.classification);
