@@ -32,7 +32,7 @@ const EVAL_CATEGORIES: EvalCategory[] = [
   'rag-retrieval', 'rag-grounding', 'citation-accuracy', 'hallucination',
   'prompt-injection', 'exfiltration', 'tenant-isolation', 'classification',
   'long-context', 'multi-turn', 'syteline', 'refusal', 'failure-handling',
-  'malformed-input', 'adversarial', 'sensitive-data',
+  'malformed-input', 'adversarial', 'sensitive-data', 'reliability',
 ];
 
 const QUALITY_DIMENSIONS: QualityDimension[] = [

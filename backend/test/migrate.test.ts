@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isNonTransactionalMigration, splitStatements } from '../src/db/migrate.js';
+import { isNonTransactionalMigration, splitStatements, computeMigrationDrift } from '../src/db/migrate.js';
 
 describe('isNonTransactionalMigration', () => {
   it('detects the header before any statement', () => {
@@ -48,5 +48,31 @@ describe('splitStatements', () => {
     const sql =
       '-- migrate: non-transactional\nCREATE INDEX CONCURRENTLY IF NOT EXISTS idx_t_a ON t (a);';
     expect(splitStatements(sql)).toHaveLength(1);
+  });
+});
+
+describe('computeMigrationDrift', () => {
+  it('reports pending files that were never applied', () => {
+    const drift = computeMigrationDrift(
+      ['001_init.sql', '002_seed.sql', '003_new.sql'],
+      ['001_init.sql', '002_seed.sql']
+    );
+    expect(drift.pending).toEqual(['003_new.sql']);
+    expect(drift.appliedButMissing).toEqual([]);
+  });
+
+  it('flags versions applied in the database that have no file on disk', () => {
+    const drift = computeMigrationDrift(
+      ['001_init.sql'],
+      ['001_init.sql', '999_hand_applied.sql']
+    );
+    expect(drift.pending).toEqual([]);
+    expect(drift.appliedButMissing).toEqual(['999_hand_applied.sql']);
+  });
+
+  it('is clean when disk and database agree', () => {
+    const drift = computeMigrationDrift(['001_init.sql'], ['001_init.sql']);
+    expect(drift.pending).toEqual([]);
+    expect(drift.appliedButMissing).toEqual([]);
   });
 });

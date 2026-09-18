@@ -13,6 +13,7 @@
     "migrate": "tsx src/db/migrate.ts",
     "migrate:prod": "node dist/src/db/migrate.js",
     "create-user": "tsx scripts/create-user.ts",
+    "verify:restore": "bash scripts/verify-restore.sh",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

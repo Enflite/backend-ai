@@ -105,6 +105,81 @@ export function splitStatements(sql: string): string[] {
   return statements;
 }
 
+/**
+ * Migration-state verification and repair helpers.
+ *
+ * migrate.ts applies transactional migrations inside a single transaction, so
+ * a failure rolls back cleanly: the failing file is NOT recorded in
+ * `schema_migrations`, and a re-run will retry it from scratch. Non-
+ * transactional migrations (single `CREATE INDEX CONCURRENTLY`-style
+ * statement) can leave partial state behind — they are the ones that need
+ * manual repair.
+ *
+ * Diagnosis and repair procedure (see docs/recovery.md §3 for the full
+ * runbook):
+ *   1. Run `verifyMigrationState()` (read-only). `pending` lists migration
+ *      files on disk that were never applied — re-run `npm run migrate`.
+ *      `appliedButMissing` lists versions recorded in the database that no
+ *      longer exist on disk — investigate before touching anything: someone
+ *      hand-applied DDL or a file was renamed.
+ *   2. If a migration failed: check the runner logs for the failing file and
+ *      the PostgreSQL error. Transactional failures need no cleanup — fix
+ *      the SQL (or the database state it tripped on) and re-run.
+ *   3. For a failed NON-transactional migration: inspect what the statement
+ *      partially did (e.g. an index left INVALID — check
+ *      `pg_index.indisvalid`), drop/repair the partial artifact, then re-run.
+ *      Prefer idempotent forms (`IF NOT EXISTS`) so re-runs are safe.
+ *   4. Take a Postgres advisory lock (`SELECT pg_advisory_lock(...)`) around
+ *      any manual repair in production so a second migrator cannot run
+ *      concurrently; release it afterwards.
+ *
+ * WARNINGS: never hand-edit `schema_migrations` to "skip" a migration unless
+ * you can prove its effects are fully present; never run two migrators
+ * against the same database at once; always back up (`docs/recovery.md` §1)
+ * before manual DDL in production.
+ */
+export interface MigrationDrift {
+  /** Migration files present on disk (sorted). */
+  onDisk: string[];
+  /** Versions recorded in schema_migrations (sorted). */
+  applied: string[];
+  /** On disk but never applied — re-running the migrator will apply these. */
+  pending: string[];
+  /** Applied in the database but no file on disk — investigate, do not re-run blindly. */
+  appliedButMissing: string[];
+}
+
+/** Pure drift computation — no database access, fully unit-testable. */
+export function computeMigrationDrift(
+  onDisk: string[],
+  applied: string[]
+): MigrationDrift {
+  const disk = [...onDisk].sort();
+  const appliedSorted = [...applied].sort();
+  const appliedSet = new Set(applied);
+  const diskSet = new Set(onDisk);
+  return {
+    onDisk: disk,
+    applied: appliedSorted,
+    pending: disk.filter((f) => !appliedSet.has(f)),
+    appliedButMissing: appliedSorted.filter((v) => !diskSet.has(v)),
+  };
+}
+
+/** Read-only check of migration state against the database. */
+export async function verifyMigrationState(): Promise<MigrationDrift> {
+  const migrationsDir = path.join(__dirname, 'migrations');
+  const files = await readdir(migrationsDir);
+  const onDisk = files.filter((f) => f.endsWith('.sql'));
+  const appliedResult = await query<{ version: string }>(
+    'SELECT version FROM schema_migrations'
+  );
+  return computeMigrationDrift(
+    onDisk,
+    appliedResult.rows.map((r) => r.version)
+  );
+}
+
 export async function runMigrations(): Promise<void> {
   const migrationsDir = path.join(__dirname, 'migrations');
 
