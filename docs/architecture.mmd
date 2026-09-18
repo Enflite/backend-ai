@@ -152,19 +152,22 @@ sequenceDiagram
     participant W as applyContextWindow<br/>gateway.ts
     participant R as retrieveAuthorizedContext()<br/>rag/retrieval.ts
     participant G as gatewayStream()<br/>ai/gateway/gateway.ts
+    participant CR as capabilityRouter<br/>resolveCapabilityModel
     participant MR as modelRegistry<br/>getApprovedModelForUser
     participant V as vllmProvider<br/>OpenAI-compatible /chat/completions
     participant T as runToolCall()<br/>tools/gateway.ts
     participant DB as PostgreSQL
     participant AU as recordAudit()
 
-    C->>H: { conversationId?, content ≤32k,<br/>modelId?, classification?, documentIds? }
+    C->>H: { conversationId?, content ≤32k,<br/>modelId?, classification?, documentIds?,<br/>capability?, codeFiles?[] }
     Note over C,H: fetch() POST, accept: text/event-stream.<br/>Client reads the streaming response body<br/>and parses SSE frames manually<br/>(frontend/src/api.ts :: streamChat).<br/>Not native EventSource (GET-only).<br/>401 → refresh → single retry.
     H->>Z: authenticate → authorize →<br/>assertClassificationAllowed
     H->>DB: load conversation, verify ownership<br/>+ tenant scope
     H->>DB: load history
     H->>W: truncate oldest turns to model.context_window<br/>(dropped count surfaced, never silent)
     H->>R: tenant-isolated hybrid retrieval<br/>(see diagram f) → citations
+    H->>CR: resolveCapabilityModel()<br/>ai/gateway/capabilityRouter.ts<br/>detect/accept capability → serving default;<br/>stale capability model falls back to chat<br/>BEFORE streaming (audited once);<br/>explicit modelId wins
+    H->>H: assemble codeFiles into labeled context<br/>(chat/codeContext.ts);<br/>enable codingMode when capability=coding
     H->>H: build system prompt;<br/>user input + RAG chunks delimited<br/>as untrusted (escapeUntrusted)
     H->>G: gatewayStream(messages, modelId)
     G->>MR: resolve approved model for user<br/>(id, endpoint, context_window,<br/>allowed_classifications)
@@ -175,16 +178,22 @@ sequenceDiagram
         G->>V: failover to configured fallback model
         G-->>C: SSE notice MODEL_FAILOVER
     end
-    G-->>C: SSE meta { conversationId, model,<br/>citations, contextDropped }
+    G-->>C: SSE meta { conversationId, model,<br/>citations, contextDropped,<br/>capability, codeFiles }
+    Note over H,V: Phase 6: the loop is a generalized engine<br/>(chat/agenticLoop.ts) — any tool family<br/>runs through the same budgets/audit/narration.<br/>H delegates rounds to runAgenticLoop().
     loop agentic loop (≤ AI_MAX_TOOL_ITERATIONS)
         V-->>C: SSE delta { content } chunks
         V-->>H: tool_calls proposed
-        H->>T: runToolCall(name, args)
+        H->>H: TOOL_PLAN notice (one-line plan)
+        H->>T: runToolCall(name, args)<br/>destructive tools NEVER auto-execute:<br/>approval gate → TOOL_REQUIRES_APPROVAL<br/>fed back to the model
         T->>T: registry lookup → zod schema<br/>validate → assert caller clearance<br/>→ Promise.race timeout
         T->>DB: INSERT tool_executions<br/>(audited)
         T-->>AU: TOOL_EXECUTED (sanitized reason;<br/>generic client-safe message)
         T-->>H: result (delimited as untrusted,<br/>size-capped)
+        H->>AU: AGENTIC_LOOP_STEP (step, model,<br/>tools, argument KEYS only)
         H->>V: continue with tool result
+    end
+    alt iteration budget exhausted
+        H-->>C: bracketed server notice in transcript<br/>(finishReason tool_budget) + AGENTIC_LOOP_BUDGET
     end
     V-->>C: SSE done { telemetry:<br/>tokens, latency, iterations }
     alt stream errored mid-way

@@ -156,6 +156,15 @@ REGISTERED → DOWNLOADING → VALIDATING → EVALUATING → PENDING_APPROVAL
   tenant grant, and classification on every resolution — a stale default
   (model deprecated, grant revoked) fails closed, falling back to the
   legacy first-approved model.
+- **Capability routing (Phase 6).** Each turn resolves a capability slot
+  (`chat | syteline | coding | embeddings`) to its serving default via
+  `backend/src/ai/gateway/capabilityRouter.ts`. Per-tenant routing policies
+  (`model_routing_policies`: `quality | latency | cost` strategy intent plus
+  a `fallback_to_chat` switch) tune the behavior; an unavailable capability
+  model falls back to the chat default **before streaming begins** (audited
+  once as `MODEL_CAPABILITY_FALLBACK`) unless the tenant disabled fallback,
+  in which case the turn fails closed. Full semantics in
+  `docs/capabilities.md` §2.
 
 ## 6. Artifact deployment and versioning (production runbook)
 
