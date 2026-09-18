@@ -19,6 +19,7 @@ import { conversationRoutes } from './conversations/routes.js';
 import { chatRoutes, closeActiveSseStreams } from './chat/routes.js';
 import { documentRoutes } from './documents/routes.js';
 import { toolRoutes } from './tools/routes.js';
+import { evalRoutes } from './eval/routes.js';
 import { recoverIngestionJobs } from './documents/queue.js';
 import { pool, query } from './db/pool.js';
 
@@ -164,6 +165,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(chatRoutes);
       await api.register(documentRoutes);
       await api.register(toolRoutes);
+      await api.register(evalRoutes);
     },
     { prefix: '/api/v1' }
   );

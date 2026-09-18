@@ -256,14 +256,16 @@ describe('prompt-injection resistance', () => {
   });
 
   it('chat input cannot smuggle a classification into tool calls', () => {
-    // The agentic loop binds runToolCall's classification to the
+    // The agentic loop binds the tool call's classification to the
     // conversation's stored classification (server-side), never to message
-    // content. Assert the wiring in source.
+    // content. Assert the wiring in source. The loop invokes tools through
+    // runToolCallWithRecovery(runToolCall, {...}) — the options object is the
+    // second argument.
     const source = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'chat', 'routes.ts'),
       'utf8'
     );
-    const callSites = [...source.matchAll(/runToolCall\(\{([\s\S]*?)\}\)/g)].map((m) => m[1]);
+    const callSites = [...source.matchAll(/runToolCallWithRecovery\(runToolCall, \{([\s\S]*?)\}\)/g)].map((m) => m[1]);
     expect(callSites.length).toBeGreaterThan(0);
     for (const site of callSites) {
       expect(site).toContain('classification,');

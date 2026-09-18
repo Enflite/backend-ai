@@ -179,6 +179,10 @@ describe('static: raw query() is never used on tenant tables', () => {
   //  - health.ts: `SELECT 1` liveness probe.
   //  - server.ts: startup pg_roles check that REFUSES superuser/BYPASSRLS
   //    roles (a BYPASSRLS role would silently defeat even FORCE RLS).
+  //  - eval/store.ts: eval_runs / eval_case_results are platform-level tables
+  //    (like `models` — no tenant_id, no RLS policies; see migration 016).
+  //    Eval is an admin activity gated by requirePermission('model:manage');
+  //    the store never names a tenant table (asserted below).
   const RAW_QUERY_ALLOWLIST = new Set([
     'audit/audit.ts',
     'ai/gateway/routes.ts',
@@ -187,6 +191,7 @@ describe('static: raw query() is never used on tenant tables', () => {
     'documents/queue.ts',
     'health.ts',
     'server.ts',
+    'eval/store.ts',
   ]);
   const TENANT_TABLES = [
     'conversations', 'messages', 'audit_events', 'sessions', 'model_access',

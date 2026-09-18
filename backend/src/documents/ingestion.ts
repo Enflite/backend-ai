@@ -87,7 +87,11 @@ export interface DocumentChunk {
   sourceLocation?: string;
 }
 
-export function chunkText(text: string, maxCharacters = 1600, overlap = 200): string[] {
+export function chunkText(
+  text: string,
+  maxCharacters = config.RAG_CHUNK_MAX_CHARS,
+  overlap = config.RAG_CHUNK_OVERLAP
+): string[] {
   if (!Number.isInteger(maxCharacters) || maxCharacters < 64) {
     throw new Error('chunkText: maxCharacters must be an integer >= 64');
   }
@@ -187,6 +191,15 @@ export async function ingestDocument(
 
     const chunks = chunkSections(await dependencies.extractor(bytes, document.mime_type));
     if (chunks.length === 0) throw Errors.badRequest('EMPTY_DOCUMENT', 'No extractable document text found');
+    // Warn well before the hard cap so operators see oversized documents
+    // coming; the cap itself stays fail-closed (TOO_MANY_CHUNKS).
+    if (chunks.length >= Math.floor(config.MAX_DOCUMENT_CHUNKS * 0.75)) {
+      console.warn(
+        `ingestDocument: document ${documentId} produced ${chunks.length} chunks ` +
+        `(cap ${config.MAX_DOCUMENT_CHUNKS}); consider raising MAX_DOCUMENT_CHUNKS ` +
+        `or RAG_CHUNK_MAX_CHARS for this tenant`
+      );
+    }
     if (chunks.length > config.MAX_DOCUMENT_CHUNKS) {
       throw Errors.badRequest('TOO_MANY_CHUNKS', 'Document exceeds the configured chunk limit');
     }
@@ -227,6 +240,10 @@ export async function ingestDocument(
       });
       await tenantQuery(
         tenantId,
+        // Provenance: chunk_index is the document-global chunk offset; page,
+        // section, and source_location come from the extractor when available;
+        // embedding_model/version/dimensions pin the vector to the provider
+        // configuration that produced it (retrieval filters on all three).
         `INSERT INTO document_chunks (
           document_id, tenant_id, chunk_index, content, embedding, classification,
           embedding_model, embedding_version, embedding_dimensions, page, section, source_location
