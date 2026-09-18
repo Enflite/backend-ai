@@ -225,8 +225,13 @@ export async function gatewayStream(input: GatewayStreamInput): Promise<GatewayS
       // Never fail over on policy/auth rejections: retrying those is pointless
       // and could mask a real authorization bug. Never fail over after the
       // primary already produced visible output either: that would stitch two
-      // models' answers into a single turn with no honest attribution.
-      const failoverEligible = !primaryProducedOutput && !(err instanceof AppError) && !!primary.fallback_model_id;
+      // models' answers into a single turn with no honest attribution. And
+      // never fail over on caller cancellation: retrying an aborted signal
+      // would only produce a misleading MODEL_FAILOVER audit record and a
+      // second immediate failure on the same dead signal.
+      const cancelled = input.signal?.aborted === true;
+      const failoverEligible =
+        !cancelled && !primaryProducedOutput && !(err instanceof AppError) && !!primary.fallback_model_id;
       if (!failoverEligible) {
         await auditModelUse(input, primary, telemetry, false, err instanceof Error ? err.message : 'Model provider error');
         throw err instanceof AppError ? err : Errors.internal('Model provider unavailable');

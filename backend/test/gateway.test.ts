@@ -149,6 +149,24 @@ describe('gateway failover', () => {
     expect(actions).not.toContain('MODEL_FAILOVER');
   });
 
+  it('does not fail over on caller cancellation', async () => {
+    const primary = model({ id: 'model-primary', fallback_model_id: 'model-fallback' });
+    getApprovedModelForUser.mockResolvedValue(primary);
+    streamChat.mockImplementationOnce(async function* () {
+      throw new Error('The operation was aborted');
+    });
+    const controller = new AbortController();
+    controller.abort();
+    const telemetry: Record<string, unknown> = {};
+    const result = await gatewayStream({ ...baseInput, signal: controller.signal, telemetry: telemetry as never });
+    await expect(drain(result)).rejects.toThrow('Model provider unavailable');
+    // No fallback attempt on an already-aborted signal: exactly one call.
+    expect(streamChat).toHaveBeenCalledTimes(1);
+    expect(telemetry.fallbackUsed).toBeUndefined();
+    const actions = recordAudit.mock.calls.map((call) => call[0].action);
+    expect(actions).not.toContain('MODEL_FAILOVER');
+  });
+
   it('never fails over on authorization rejections', async () => {
     const primary = model({ fallback_model_id: 'model-fallback' });
     getApprovedModelForUser.mockResolvedValue(primary);
