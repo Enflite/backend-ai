@@ -86,6 +86,27 @@ export async function recoverIngestionJobs(): Promise<void> {
     // A crashed PROCESSING job is safe to retry: chunks are replaced before READY.
     await tenantQuery(tenant.id,
       "UPDATE document_ingestion_jobs SET status = 'PENDING', locked_at = NULL, updated_at = NOW() WHERE status = 'PROCESSING' AND locked_at < NOW() - INTERVAL '5 minutes'");
+    // Poison-message handling runs BEFORE orphan recovery: a job that crashed
+    // 3+ times without ever succeeding is marked FAILED instead of being
+    // retried forever (the crash counter lives in `attempts`, incremented on
+    // every claim in processJob). Running this first prevents the orphan pass
+    // from re-enqueueing a document whose job is about to be declared poison.
+    await tenantQuery(tenant.id,
+      `UPDATE document_ingestion_jobs SET status = 'FAILED', error_code = 'POISON_MESSAGE',
+         updated_at = NOW()
+       WHERE status = 'PENDING' AND attempts >= 3`);
+    // The associated documents must also leave the pipeline: otherwise they
+    // stay PENDING/PROCESSING forever and the orphan recovery below would
+    // re-enqueue them into an infinite poison loop. Only documents with no
+    // remaining active job are failed here.
+    await tenantQuery(tenant.id,
+      `UPDATE documents d SET status = 'FAILED', error_code = 'POISON_MESSAGE', updated_at = NOW()
+       WHERE d.tenant_id = $1 AND d.deleted_at IS NULL
+         AND d.status IN ('PENDING', 'PROCESSING')
+         AND NOT EXISTS (
+           SELECT 1 FROM document_ingestion_jobs j
+           WHERE j.document_id = d.id AND j.status IN ('PENDING', 'PROCESSING')
+         )`, [tenant.id]);
     // Heal documents stuck in PENDING/PROCESSING without an active job row
     // (e.g. the /retry route reset the status but the enqueue INSERT failed).
     // enqueueIngestion is idempotent per document, so re-enqueueing is safe.
@@ -103,7 +124,7 @@ export async function recoverIngestionJobs(): Promise<void> {
       await enqueueIngestion({ documentId: document.id, tenantId: tenant.id, requestedBy: document.owner_id });
     }
     const pending = await tenantQuery<{ id: string; document_id: string; requested_by: string; request_id: string | null }>(tenant.id,
-      "SELECT id, document_id, requested_by, request_id FROM document_ingestion_jobs WHERE status = 'PENDING' AND attempts < 3 ORDER BY created_at LIMIT 20");
+      "SELECT id, document_id, requested_by, request_id FROM document_ingestion_jobs WHERE status = 'PENDING' ORDER BY created_at LIMIT 20");
     for (const job of pending.rows) {
       setImmediate(() => void processJob(job.id, {
         tenantId: tenant.id,

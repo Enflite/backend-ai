@@ -1,6 +1,6 @@
 import { config } from '../config.js';
 import { AuthContext, CLASSIFICATIONS, Classification, canAccessClassification } from '../authz/permissions.js';
-import { tenantQuery } from '../db/pool.js';
+import { tenantQuery, withTenant } from '../db/pool.js';
 import { internalEmbeddingProvider } from '../documents/ingestion.js';
 
 export interface Citation {
@@ -44,6 +44,33 @@ function escapeUntrusted(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }
 
+/**
+ * Reranker hook point. Retrieval always applies the in-process hybrid score
+ * (85% vector cosine + 15% lexical overlap) over already-authorized candidates;
+ * an operator may inject an external reranker (e.g. a cross-encoder service) via
+ * setReranker(). The default is a passthrough that preserves hybrid order.
+ *
+ * The hook runs AFTER authorization filtering and BEFORE the similarity
+ * threshold, so a reranker can reorder but never widen access.
+ */
+export interface Reranker {
+  name: string;
+  rerank(queryText: string, chunks: AuthorizedChunk[]): Promise<AuthorizedChunk[]> | AuthorizedChunk[];
+}
+
+let activeReranker: Reranker = {
+  name: 'hybrid-score',
+  rerank: (_queryText, chunks) => chunks,
+};
+
+export function setReranker(reranker: Reranker): void {
+  activeReranker = reranker;
+}
+
+export function getReranker(): Reranker {
+  return activeReranker;
+}
+
 export async function retrieveAuthorizedContext(
   auth: AuthContext,
   queryText: string,
@@ -58,12 +85,16 @@ export async function retrieveAuthorizedContext(
   const allowed = CLASSIFICATIONS.filter(
     (classification) => classification !== 'UNKNOWN' && canAccessClassification(auth.clearance, classification)
   ) as Classification[];
-  const rows = (
-    await tenantQuery<{
-      chunk_id: string; content: string; page: number | null; section: string | null;
-      source_location: string | null; document_id: string; filename: string; vector_score: string;
-    }>(
-      auth.tenantId,
+  const rows = await withTenant(auth.tenantId, async (client) => {
+    // The ANN traversal runs under selective tenant/ACL filters, so the
+    // default ef_search (40) under-recalls. Raise it for this retrieval
+    // transaction only (SET LOCAL dies with the transaction).
+    await client.query('SET LOCAL hnsw.ef_search = 200');
+    return (
+      await client.query<{
+        chunk_id: string; content: string; page: number | null; section: string | null;
+        source_location: string | null; document_id: string; filename: string; vector_score: string;
+      }>(
       `SELECT dc.id AS chunk_id, dc.content, dc.page, dc.section, dc.source_location,
               d.id AS document_id, d.filename, (1 - (dc.embedding <=> $6::vector)) AS vector_score
        FROM document_chunks dc
@@ -94,8 +125,9 @@ export async function retrieveAuthorizedContext(
       [auth.tenantId, allowed, documentIds?.length ? documentIds : null, auth.userId, auth.roleId,
         `[${embedding!.join(',')}]`, internalEmbeddingProvider.model, internalEmbeddingProvider.version,
         internalEmbeddingProvider.dimensions, topK * 4]
-    )
-  ).rows;
+      )
+    ).rows;
+  });
 
   const results = rows.map((row) => {
     const vectorScore = Math.max(0, Math.min(1, Number(row.vector_score)));
@@ -115,8 +147,23 @@ export async function retrieveAuthorizedContext(
   // Optional similarity floor (RAG_SIMILARITY_THRESHOLD, default 0 = disabled).
   // Applied after the hybrid rerank so low-relevance authorized chunks never
   // reach model context even when topK slots are unfilled.
+  const reranked = await activeReranker.rerank(queryText, results);
+  // Rerankers are reorder-only: a buggy or malicious reranker must not widen
+  // access by returning chunks that were never authorized candidates. Drop
+  // unknown or duplicated chunk IDs so only the SQL-authorized set can flow
+  // through, in the reranker's order.
+  const authorizedIds = new Set(results.map((result) => result.chunkId));
+  const seen = new Set<string>();
+  const sanitized: AuthorizedChunk[] = [];
+  for (const chunk of reranked) {
+    if (!chunk || typeof chunk !== 'object') continue;
+    const id = (chunk as AuthorizedChunk).chunkId;
+    if (typeof id !== 'string' || !authorizedIds.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    sanitized.push(chunk as AuthorizedChunk);
+  }
   const threshold = config.RAG_SIMILARITY_THRESHOLD;
-  const qualified = threshold > 0 ? results.filter((result) => result.score >= threshold) : results;
+  const qualified = threshold > 0 ? sanitized.filter((result) => result.score >= threshold) : sanitized;
 
   const included: AuthorizedChunk[] = [];
   let characters = 0;

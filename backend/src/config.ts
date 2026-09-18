@@ -19,7 +19,21 @@ const envSchema = z.object({
   COOKIE_SECURE: z
     .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
     .default(false),
-  CORS_ORIGIN: z.string().default('http://localhost:8443'),
+  CORS_ORIGIN: z.string().default('http://localhost:8443').refine((value) => {
+    // '*' combined with credentials:true makes @fastify/cors emit
+    // Access-Control-Allow-Origin: * which browsers reject for credentialed
+    // requests; validate each entry is a real origin.
+    return value.split(',').every((entry) => {
+      const origin = entry.trim();
+      if (!origin || origin === '*' || origin.toLowerCase() === 'null') return false;
+      try {
+        const url = new URL(origin);
+        return (url.protocol === 'http:' || url.protocol === 'https:') && url.origin === origin;
+      } catch {
+        return false;
+      }
+    });
+  }, 'CORS_ORIGIN must be a comma-separated list of valid http(s) origins; wildcards are not allowed with credentialed CORS'),
   VLLM_API_KEY: z.string().optional().default(''),
   AI_PROVIDER_ALLOWED_ORIGINS: z.string().default('http://localhost:8000,http://vllm:8000'),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(120000),
@@ -34,6 +48,10 @@ const envSchema = z.object({
   // Tool outputs are untrusted external data; truncate each result before it
   // enters model context so one huge response cannot evict the conversation.
   AI_TOOL_OUTPUT_MAX_CHARS: z.coerce.number().int().min(256).max(100000).default(8000),
+  // Per-tool execution timeout, enforced inside runToolCall on top of the
+  // caller's (client-disconnect) signal, so a hung tool cannot hold a chat
+  // turn or worker slot indefinitely.
+  AI_TOOL_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(60000),
   EMBEDDING_BASE_URL: z.string().url().optional(),
   EMBEDDING_MODEL: z.string().optional(),
   EMBEDDING_MODEL_VERSION: z.string().default('1'),
@@ -119,8 +137,14 @@ export function isPlaceholderSecret(secret: string): boolean {
 }
 
 if (isPlaceholderSecret(config.JWT_SECRET)) {
-  console.error('Configuration error: JWT_SECRET is a documented placeholder value; provide a generated secret (>=32 chars)');
-  process.exit(1);
+  // A documented placeholder must never sign tokens in production, but the
+  // default local Compose stack ships one for zero-config dev boot; refuse in
+  // production and warn loudly everywhere else.
+  if (config.NODE_ENV === 'production') {
+    console.error('Configuration error: JWT_SECRET is a documented placeholder value; provide a generated secret (>=32 chars)');
+    process.exit(1);
+  }
+  console.warn('SECURITY WARNING: JWT_SECRET is a documented placeholder value. Set a generated secret (>=32 chars) before any non-local use.');
 }
 
 if (config.NODE_ENV === 'production' && config.DEV_AUTH_ENABLED) {

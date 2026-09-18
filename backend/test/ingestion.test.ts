@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
 
-import { ingestDocument } from '../src/documents/ingestion.js';
+import { ingestDocument, internalEmbeddingProvider, chunkText } from '../src/documents/ingestion.js';
 import type { EmbeddingProvider } from '../src/documents/ingestion.js';
+import { config } from '../src/config.js';
 
 const DIMENSIONS = 2;
 
@@ -67,6 +68,90 @@ describe('ingestion embedding validation', () => {
     });
   });
 });
+
+describe('internal embedding provider retries', () => {
+  const originalFetch = globalThis.fetch;
+  const originalBaseUrl = config.EMBEDDING_BASE_URL;
+  const originalModel = config.EMBEDDING_MODEL;
+  const originalDimensions = config.EMBEDDING_DIMENSIONS;
+
+  beforeEach(() => {
+    config.EMBEDDING_BASE_URL = 'http://embeddings.test';
+    config.EMBEDDING_MODEL = 'test-model';
+    config.EMBEDDING_DIMENSIONS = 2;
+  });
+
+  const embedResponse = (status: number) =>
+    new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2], index: 0 }] }), { status });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+    config.EMBEDDING_BASE_URL = originalBaseUrl;
+    config.EMBEDDING_MODEL = originalModel;
+    config.EMBEDDING_DIMENSIONS = originalDimensions;
+  });
+
+  it('retries on 429 and 5xx, then succeeds', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(embedResponse(429))
+      .mockResolvedValueOnce(embedResponse(503))
+      .mockResolvedValueOnce(embedResponse(200));
+    globalThis.fetch = fetchMock as never;
+    const vectors = await internalEmbeddingProvider.embed(['hello']);
+    expect(vectors).toEqual([[0.1, 0.2]]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry 4xx: deterministic errors surface immediately', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(embedResponse(400));
+    globalThis.fetch = fetchMock as never;
+    await expect(internalEmbeddingProvider.embed(['hello'])).rejects.toMatchObject({
+      code: 'EMBEDDING_PROVIDER_ERROR',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails after exhausting retries on persistent 5xx', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(embedResponse(500));
+    globalThis.fetch = fetchMock as never;
+    await expect(internalEmbeddingProvider.embed(['hello'])).rejects.toMatchObject({
+      code: 'EMBEDDING_PROVIDER_ERROR',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry after cancellation: an aborted signal throws at once', async () => {
+    const abortError = new DOMException('aborted', 'AbortError');
+    const fetchMock = vi.fn().mockRejectedValueOnce(abortError);
+    globalThis.fetch = fetchMock as never;
+    const controller = new AbortController();
+    controller.abort();
+    await expect(internalEmbeddingProvider.embed(['hello'], controller.signal)).rejects.toThrow('aborted');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('chunkText argument validation', () => {
+  it('rejects non-positive or fractional maxCharacters', () => {
+    expect(() => chunkText('x'.repeat(200), 0, 0)).toThrow('maxCharacters');
+    expect(() => chunkText('x'.repeat(200), 63, 0)).toThrow('maxCharacters');
+    expect(() => chunkText('x'.repeat(200), 100.5, 10)).toThrow('maxCharacters');
+  });
+
+  it('rejects overlap outside [0, maxCharacters)', () => {
+    expect(() => chunkText('x'.repeat(200), 100, -1)).toThrow('overlap');
+    expect(() => chunkText('x'.repeat(200), 100, 100)).toThrow('overlap');
+    expect(() => chunkText('x'.repeat(200), 100, 1.5)).toThrow('overlap');
+  });
+
+  it('still chunks normally with valid arguments', () => {
+    const chunks = chunkText('word '.repeat(100), 100, 10);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((c) => c.length <= 100)).toBe(true);
+  });
+});
+  beforeEach(() => tenantQuery.mockReset());
 
 describe('ingestion chunk insert batching', () => {
   beforeEach(() => tenantQuery.mockReset());

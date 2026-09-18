@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { tenantQuery, withTenant } = vi.hoisted(() => ({ tenantQuery: vi.fn(), withTenant: vi.fn() }));
 const embedMock = vi.hoisted(() => vi.fn());
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenant }));
 vi.mock('../src/documents/ingestion.js', () => ({
   internalEmbeddingProvider: {
     model: 'embedding-test', version: '1', dimensions: 2,
@@ -25,13 +25,23 @@ const row = {
   source_location: null, document_id: 'd1', filename: 'doc.md', vector_score: '0.9',
 };
 
+const fakeClient = {
+  query: vi.fn(async (sql: string) => {
+    if (typeof sql === 'string' && sql.startsWith('SET LOCAL')) return { rows: [] };
+    return { rows: fakeClient.rows };
+  }),
+  rows: [row] as Record<string, unknown>[],
+};
+
 describe('retrieval similarity threshold', () => {
   beforeEach(() => {
     tenantQuery.mockReset();
+    withTenant.mockReset();
     embedMock.mockReset();
     embedMock.mockResolvedValue([[0.1, 0.2]]);
     config.RAG_SIMILARITY_THRESHOLD = 0;
-    tenantQuery.mockResolvedValue({ rows: [row] });
+    fakeClient.rows = [row];
+    withTenant.mockImplementation(async (_tenantId: string, callback: (client: unknown) => Promise<unknown>) => callback(fakeClient));
   });
 
   it('excludes below-threshold chunks from model context', async () => {
