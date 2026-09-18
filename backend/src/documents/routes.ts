@@ -3,7 +3,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
-import { CLASSIFICATIONS, Classification, canAccessClassification } from '../authz/permissions.js';
+import { CLASSIFICATIONS, Classification, canAccessClassification, classificationRank } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
 import { resolveUploadClassification } from './uploadClassification.js';
 import { tenantQuery } from '../db/pool.js';
@@ -71,6 +71,13 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
       await enqueueIngestion({ documentId: id, tenantId: auth.tenantId, requestedBy: auth.userId, requestId: req.requestId });
       return reply.status(201).send({ document });
     } catch (error) {
+      if (error && typeof error === 'object' && (error as { code?: string }).code === '23505'
+        && typeof (error as { constraint?: string }).constraint === 'string'
+        && (error as { constraint?: string }).constraint!.includes('checksum')) {
+        // UNIQUE (tenant_id, checksum_sha256): the same file was already uploaded.
+        await s3Storage.delete(objectKey).catch(() => undefined);
+        throw Errors.conflict('DUPLICATE_DOCUMENT', 'This file has already been uploaded');
+      }
       if (metadataCreated) {
         await tenantQuery(auth.tenantId,
           "UPDATE documents SET status = 'FAILED', error_code = 'QUEUE_UNAVAILABLE', updated_at = NOW() WHERE id = $1",
@@ -84,6 +91,11 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
 
   fastify.get('/documents', { preHandler: [requireAuth, requirePermission('document:read')] }, async (req, reply) => {
     const auth = req.auth!;
+    const pagination = z.object({
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+      offset: z.coerce.number().int().min(0).default(0),
+    }).safeParse(req.query);
+    if (!pagination.success) throw Errors.badRequest('INVALID_PAGINATION', 'Invalid pagination parameters');
     const result = await tenantQuery(
       auth.tenantId,
       `${selectDocument}
@@ -97,10 +109,10 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
              SELECT 1 FROM security_group_memberships gm WHERE gm.tenant_id = $1 AND gm.group_id = dp.group_id AND gm.user_id = $3
            ))
          )))
-       ORDER BY d.created_at DESC`,
-      [auth.tenantId, allowedClassifications(auth.clearance), auth.userId, auth.roleId]
+       ORDER BY d.created_at DESC LIMIT $5 OFFSET $6`,
+      [auth.tenantId, allowedClassifications(auth.clearance), auth.userId, auth.roleId, pagination.data.limit, pagination.data.offset]
     );
-    return reply.send({ documents: result.rows });
+    return reply.send({ documents: result.rows, pagination: pagination.data });
   });
 
   fastify.get('/documents/:id', { preHandler: [requireAuth, requirePermission('document:read')] }, async (req, reply) => {
@@ -147,22 +159,42 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
 
   fastify.patch('/documents/:id/classification', {
     preHandler: [requireAuth, requirePermission('document:classify')],
+    // Reclassification is expensive (deletes all chunks + full re-ingestion).
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
   }, async (req, reply) => {
     const auth = req.auth!;
     const parsedId = idSchema.safeParse(req.params);
-    const parsedBody = classificationSchema.safeParse(req.body);
+    const parsedBody = classificationSchema.extend({ confirm: z.boolean().optional() }).safeParse(req.body);
     if (!parsedId.success || !parsedBody.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid classification request');
-    assertClassificationAllowed(auth.clearance, parsedBody.data.classification);
+    const next = parsedBody.data.classification;
+    assertClassificationAllowed(auth.clearance, next);
+    const current = (
+      await tenantQuery<{ classification: Classification; owner_id: string }>(auth.tenantId,
+        'SELECT classification, owner_id FROM documents WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL AND status NOT IN (\'PENDING\', \'PROCESSING\')',
+        [parsedId.data.id, auth.tenantId])
+    ).rows[0];
+    if (!current) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
+    // Only the owner (or a tenant manager) may relabel a document: a classification
+    // grant alone must never let a user who cannot read a document downgrade it to PUBLIC.
+    if (current.owner_id !== auth.userId && !auth.permissions.includes('tenant:manage')) {
+      throw Errors.forbidden('DOCUMENT_RECLASSIFY_FORBIDDEN', 'Only the document owner or a tenant manager can change its classification');
+    }
+    // The caller must be cleared for the document's CURRENT label as well as the new one.
+    assertClassificationAllowed(auth.clearance, current.classification);
+    // Downgrades require explicit confirmation so a single misclick can't declassify data.
+    if (classificationRank(next) < classificationRank(current.classification) && parsedBody.data.confirm !== true) {
+      throw Errors.conflict('CONFIRMATION_REQUIRED', 'Classification downgrade requires explicit confirmation', { from: current.classification, to: next });
+    }
     const updated = await tenantQuery(auth.tenantId,
       `UPDATE documents SET classification = $3, status = 'PENDING', error_code = NULL, updated_at = NOW()
        WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL AND status NOT IN ('PENDING', 'PROCESSING')
        RETURNING id, classification, status`,
-      [parsedId.data.id, auth.tenantId, parsedBody.data.classification]);
+      [parsedId.data.id, auth.tenantId, next]);
     if (updated.rowCount !== 1) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
     await tenantQuery(auth.tenantId, 'DELETE FROM document_chunks WHERE document_id = $1', [parsedId.data.id]);
     await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId,
       action: 'DOCUMENT_CLASSIFICATION_CHANGED', resource: 'document', resourceId: parsedId.data.id,
-      classification: parsedBody.data.classification });
+      classification: next, metadata: { previousClassification: current.classification } });
     const jobId = await enqueueIngestion({ documentId: parsedId.data.id, tenantId: auth.tenantId,
       requestedBy: auth.userId, requestId: req.requestId });
     return reply.status(202).send({ document: updated.rows[0], jobId });

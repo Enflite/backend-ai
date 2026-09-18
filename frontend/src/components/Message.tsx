@@ -194,6 +194,25 @@ export default function MessageBubble({ message, onCopy, onRegenerate }: Message
                   )
                 )}
                 {message.citations && <CitationsBlock citations={message.citations} />}
+                {message.notice && (
+                  <p className="text-xs mt-2 flex items-center gap-1.5" style={{ color: 'var(--muted-foreground)' }} role="status">
+                    <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--accent)' }} />
+                    {message.notice}
+                  </p>
+                )}
+                {message.error && (
+                  <div className="mt-2 px-3 py-2 rounded-md text-xs flex items-center justify-between gap-3" style={{ background: '#7f1d1d55', color: '#fca5a5' }} role="alert">
+                    <span>{message.error}</span>
+                    {onRegenerate && (
+                      <button onClick={onRegenerate} className="underline underline-offset-2 flex-shrink-0">Retry</button>
+                    )}
+                  </div>
+                )}
+                {message.usage && (
+                  <p className="text-xs mt-2" style={{ color: 'var(--muted-foreground)' }} title={`Prompt: ${message.usage.promptTokens}, Completion: ${message.usage.completionTokens}`}>
+                    {message.usage.totalTokens.toLocaleString()} tokens
+                  </p>
+                )}
                 {message.isStreaming && <span aria-label="Streaming" className="inline-block w-1.5 h-4 ml-1 animate-pulse" style={{ background: 'var(--accent)' }} />}
               </>
             )}

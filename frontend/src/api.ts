@@ -96,7 +96,7 @@ export function mapDocument(value: any): DocumentRecord {
 }
 
 export interface StreamEvent {
-  event: 'meta' | 'delta' | 'done' | 'error';
+  event: 'meta' | 'delta' | 'done' | 'error' | 'notice';
   data: any;
 }
 

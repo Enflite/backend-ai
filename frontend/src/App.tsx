@@ -178,14 +178,28 @@ export default function App() {
         classification: conversation.classification,
         ...(documentIds.length ? { documentIds } : {}),
       }, controller.signal, ({ event, data }) => {
-        if (event === 'error') throw new Error(data.message);
+        if (event === 'error') {
+          setConversations((current) => current.map((item) => item.id === conversation.id ? {
+            ...item,
+            messages: item.messages.map((message) => message.id === assistantId ? {
+              ...message,
+              isStreaming: false,
+              notice: undefined,
+              error: data.message || 'Model request failed',
+            } : message),
+          } : item));
+          throw new Error(data.message);
+        }
         setConversations((current) => current.map((item) => item.id === conversation.id ? {
           ...item,
           messages: item.messages.map((message) => message.id === assistantId ? {
             ...message,
             content: event === 'delta' ? message.content + data.content : message.content,
             isStreaming: event !== 'done',
+            notice: event === 'notice' ? data.message : (event === 'done' ? undefined : message.notice),
             citations: event === 'done' ? data.citations?.map(mapCitation) : message.citations,
+            usage: event === 'done' ? data.usage : message.usage,
+            model: event === 'done' && data.fallback ? `${message.model} → ${data.fallback.name}` : message.model,
           } : message),
         } : item));
       });

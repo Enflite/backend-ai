@@ -37,9 +37,7 @@ export const PERMISSIONS = [
   'model:use',
   'model:manage',
   'tool:use',
-  'tool:admin',
   'audit:read',
-  'user:manage',
   'tenant:manage',
 ] as const;
 
@@ -59,7 +57,6 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
   Admin: PERMISSIONS,
   'Security Admin': [
     'audit:read',
-    'user:manage',
     'tenant:manage',
     'conversation:read',
     'document:read',
@@ -68,7 +65,6 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
   'AI Admin': [
     'model:manage',
     'model:use',
-    'tool:admin',
     'tool:use',
     'chat:create',
     'conversation:read',

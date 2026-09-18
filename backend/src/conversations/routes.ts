@@ -16,17 +16,23 @@ const createSchema = z.object({
   classification: z.enum(CLASSIFICATIONS).default('INTERNAL'),
 }).strict();
 const updateSchema = z.object({ title: z.string().trim().min(1).max(255) }).strict();
+const paginationSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
 
 export async function conversationRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get('/conversations', { preHandler: [requireAuth, requirePermission('conversation:read')] }, async (req, reply) => {
     const auth = req.auth!;
+    const pagination = paginationSchema.safeParse(req.query);
+    if (!pagination.success) throw Errors.badRequest('INVALID_PAGINATION', 'Invalid pagination parameters');
     const result = await tenantQuery(
       auth.tenantId,
       `SELECT id, tenant_id, user_id, title, model_id, classification, created_at, updated_at
-       FROM conversations WHERE tenant_id = $1 AND user_id = $2 ORDER BY updated_at DESC`,
-      [auth.tenantId, auth.userId]
+       FROM conversations WHERE tenant_id = $1 AND user_id = $2 ORDER BY updated_at DESC LIMIT $3 OFFSET $4`,
+      [auth.tenantId, auth.userId, pagination.data.limit, pagination.data.offset]
     );
-    return reply.send({ conversations: result.rows });
+    return reply.send({ conversations: result.rows, pagination: pagination.data });
   });
 
   fastify.post('/conversations', { preHandler: [requireAuth, requirePermission('chat:create')] }, async (req, reply) => {
@@ -62,19 +68,21 @@ export async function conversationRoutes(fastify: FastifyInstance): Promise<void
   fastify.get('/conversations/:id/messages', { preHandler: [requireAuth, requirePermission('conversation:read')] }, async (req, reply) => {
     const auth = req.auth!;
     const params = idSchema.safeParse(req.params);
+    const pagination = paginationSchema.safeParse(req.query);
     if (!params.success) throw Errors.badRequest('INVALID_ID', 'Invalid conversation ID');
+    if (!pagination.success) throw Errors.badRequest('INVALID_PAGINATION', 'Invalid pagination parameters');
     const result = await tenantQuery(
       auth.tenantId,
       `SELECT m.id, m.conversation_id, m.role, m.content, m.model_id, m.citations, m.created_at
        FROM messages m JOIN conversations c ON c.id = m.conversation_id AND c.tenant_id = m.tenant_id
-       WHERE m.conversation_id = $1 AND m.tenant_id = $2 AND c.user_id = $3 ORDER BY m.created_at`,
-      [params.data.id, auth.tenantId, auth.userId]
+       WHERE m.conversation_id = $1 AND m.tenant_id = $2 AND c.user_id = $3 ORDER BY m.created_at LIMIT $4 OFFSET $5`,
+      [params.data.id, auth.tenantId, auth.userId, pagination.data.limit, pagination.data.offset]
     );
     if (result.rowCount === 0) {
       const exists = await tenantQuery(auth.tenantId, 'SELECT 1 FROM conversations WHERE id = $1 AND tenant_id = $2 AND user_id = $3', [params.data.id, auth.tenantId, auth.userId]);
       if (exists.rowCount === 0) throw Errors.notFound('CONVERSATION_NOT_FOUND', 'Conversation not found');
     }
-    return reply.send({ messages: result.rows });
+    return reply.send({ messages: result.rows, pagination: pagination.data });
   });
 
   fastify.patch('/conversations/:id', { preHandler: [requireAuth, requirePermission('conversation:update')] }, async (req, reply) => {
