@@ -12,6 +12,9 @@ const ALLOWED: Record<string, readonly string[]> = {
 };
 
 export function sanitizeFilename(filename: string): string {
+  if (filename.includes('\0') || filename.includes('/') || filename.includes('\\') || path.isAbsolute(filename)) {
+    throw Errors.badRequest('INVALID_FILENAME', 'Filename is invalid');
+  }
   const value = path.basename(filename).replace(/[\x00-\x1f\x7f]/g, '').trim();
   if (!value || value.length > 255) throw Errors.badRequest('INVALID_FILENAME', 'Filename is invalid');
   return value;

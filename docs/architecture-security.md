@@ -18,9 +18,9 @@ Clients send a registry UUID, never a URL or key. The gateway resolves enabled `
 
 ## Documents and secure RAG
 
-Uploads are size limited, filename normalized, extension allowlisted, and signature checked. Objects use opaque tenant/document keys. Production refuses to start unless malware scanning is required and configured. Text formats are extracted locally; PDF, DOCX, and XLSX require a configured internal extraction service. Ingestion scans, extracts, chunks, calls a configured internal OpenAI-compatible embedding endpoint, and writes pgvector rows.
+Uploads are size limited, traversal names rejected, extensions allowlisted, and signatures checked. Objects use opaque tenant/document keys. Production requires the HTTP malware scanner mode and endpoint; unavailable or infected scans are quarantined, and CUI also fails closed in the explicit development mode. PDF, DOCX, XLSX, HTML, CSV, Markdown, and text are extracted locally with bounded archive expansion and extracted-text/chunk limits. Durable jobs scan, extract, chunk, call a configured internal OpenAI-compatible embedding endpoint, and write pgvector rows with model/version/dimension provenance.
 
-Retrieval applies tenant, classification, requested-document, owner, user-grant, and role-grant predicates in SQL before vector ordering. Returned chunks are delimited as untrusted reference data under a system rule that prohibits following retrieved instructions. Citation records come directly from selected rows; the application does not synthesize citations.
+Retrieval applies tenant, READY state, classification, requested-document, owner, user, role, department, and group predicates in SQL before vector ordering. A bounded hybrid rerank operates only on already-authorized candidates. Returned chunks are escaped and delimited as untrusted reference data under a system rule that prohibits following retrieved instructions. Citation records come directly from selected rows; the application does not synthesize citations.
 
 ## Tool gateway and SyteLine
 

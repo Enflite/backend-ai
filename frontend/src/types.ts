@@ -60,3 +60,24 @@ export interface AuthUser {
   tenantId: string;
   permissions: string[];
 }
+
+export interface DocumentRecord {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  classification: DataClassification;
+  status: 'PENDING' | 'PROCESSING' | 'READY' | 'FAILED' | 'QUARANTINED' | 'DELETED';
+  errorCode?: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface RagResult {
+  documentId: string;
+  documentName: string;
+  chunkId: string;
+  text: string;
+  score: number;
+  citation: Omit<Citation, 'id' | 'title'> & { documentName: string };
+}
