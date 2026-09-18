@@ -3,9 +3,9 @@ import { z } from 'zod';
 import { requireAuth } from '../../auth/middleware.js';
 import { requirePermission } from '../../authz/middleware.js';
 import { listApprovedModelsForUser } from './modelRegistry.js';
-import { query } from '../../db/pool.js';
+import { query, withTx } from '../../db/pool.js';
 import { Errors } from '../../errors.js';
-import { recordAudit } from '../../audit/audit.js';
+import { recordAuditInTx } from '../../audit/audit.js';
 
 const modelIdSchema = z.object({ id: z.string().uuid() });
 
@@ -120,19 +120,25 @@ export async function modelAdminRoutes(fastify: FastifyInstance): Promise<void> 
       await query<Pick<AdminModelRow, 'id' | 'enabled'>>('SELECT id, enabled FROM models WHERE id = $1', [parsedId.data.id])
     ).rows[0];
     if (!current) throw Errors.notFound('MODEL_NOT_FOUND', 'Model not found');
-    // Single-statement UPDATE: atomic; the pre-read only feeds the audit event.
-    const updated = (
-      await query<AdminModelRow>(
-        `UPDATE models SET enabled = $2 WHERE id = $1 RETURNING ${ADMIN_MODEL_FIELDS}`,
-        [parsedId.data.id, parsedBody.data.enabled]
-      )
-    ).rows[0];
-    // The pre-read guaranteed existence, but the guard keeps the type honest
-    // (and covers a delete raced between the two statements).
-    if (!updated) throw Errors.notFound('MODEL_NOT_FOUND', 'Model not found');
-    await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip,
-      action: 'MODEL_ENABLED_CHANGED', resource: 'model', resourceId: parsedId.data.id,
-      metadata: { previousEnabled: current.enabled, newEnabled: parsedBody.data.enabled } });
+    // The model update and its audit event commit in ONE transaction: under
+    // AUDIT_FAIL_CLOSED a failed audit insert rolls the enabled change back
+    // instead of leaving it committed but unaudited.
+    const updated = await withTx(async (client) => {
+      // Single-statement UPDATE: atomic; the pre-read only feeds the audit event.
+      const row = (
+        await client.query<AdminModelRow>(
+          `UPDATE models SET enabled = $2 WHERE id = $1 RETURNING ${ADMIN_MODEL_FIELDS}`,
+          [parsedId.data.id, parsedBody.data.enabled]
+        )
+      ).rows[0];
+      // The pre-read guaranteed existence, but the guard keeps the type honest
+      // (and covers a delete raced between the two statements).
+      if (!row) throw Errors.notFound('MODEL_NOT_FOUND', 'Model not found');
+      await recordAuditInTx(client, { tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip,
+        action: 'MODEL_ENABLED_CHANGED', resource: 'model', resourceId: parsedId.data.id,
+        metadata: { previousEnabled: current.enabled, newEnabled: parsedBody.data.enabled } });
+      return row;
+    });
     return reply.send({ model: toAdminModel(updated) });
   });
 }

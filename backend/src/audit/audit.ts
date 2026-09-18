@@ -1,3 +1,4 @@
+import pg from 'pg';
 import { query, tenantQuery } from '../db/pool.js';
 import { config } from '../config.js';
 import { AppError } from '../errors.js';
@@ -81,42 +82,70 @@ export function sanitizeReason(reason?: string | null): string | null {
     .slice(0, MAX_REASON_LENGTH);
 }
 
+const INSERT_AUDIT_SQL = `INSERT INTO audit_events (
+    tenant_id, user_id, request_id, ip, action, resource,
+    resource_id, classification, model, tool, success, reason, metadata
+  ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`;
+
+function auditParams(input: AuditInput): unknown[] {
+  return [
+    input.tenantId ?? null,
+    input.userId ?? null,
+    input.requestId ?? null,
+    input.ip ?? null,
+    input.action,
+    input.resource ?? null,
+    input.resourceId ?? null,
+    input.classification ?? null,
+    input.model ?? null,
+    input.tool ?? null,
+    input.success ?? true,
+    sanitizeReason(input.reason),
+    JSON.stringify(sanitizeMetadata(input.metadata)),
+  ];
+}
+
+function handleAuditWriteError(input: AuditInput, err: unknown): void {
+  if (config.AUDIT_FAIL_CLOSED) {
+    // Fail closed: a dropped audit trail must not let the audited action
+    // proceed silently. Log only non-sensitive correlation fields — never
+    // the raw database error, which can embed connection details.
+    console.error('Audit persistence failed (fail-closed):', {
+      action: input.action,
+      requestId: input.requestId ?? undefined,
+    });
+    throw new AuditPersistenceError();
+  }
+  console.error('Failed to record audit event:', err);
+}
+
 export async function recordAudit(input: AuditInput): Promise<void> {
   try {
-    const sanitizedMeta = sanitizeMetadata(input.metadata);
-    const execute = input.tenantId ? tenantQuery.bind(null, input.tenantId) : query;
-    await execute(
-      `INSERT INTO audit_events (
-        tenant_id, user_id, request_id, ip, action, resource,
-        resource_id, classification, model, tool, success, reason, metadata
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-      [
-        input.tenantId ?? null,
-        input.userId ?? null,
-        input.requestId ?? null,
-        input.ip ?? null,
-        input.action,
-        input.resource ?? null,
-        input.resourceId ?? null,
-        input.classification ?? null,
-        input.model ?? null,
-        input.tool ?? null,
-        input.success ?? true,
-        sanitizeReason(input.reason),
-        JSON.stringify(sanitizedMeta),
-      ]
-    );
-  } catch (err) {
-    if (config.AUDIT_FAIL_CLOSED) {
-      // Fail closed: a dropped audit trail must not let the audited action
-      // proceed silently. Log only non-sensitive correlation fields — never
-      // the raw database error, which can embed connection details.
-      console.error('Audit persistence failed (fail-closed):', {
-        action: input.action,
-        requestId: input.requestId ?? undefined,
-      });
-      throw new AuditPersistenceError();
+    const params = auditParams(input);
+    if (input.tenantId) {
+      await tenantQuery(input.tenantId, INSERT_AUDIT_SQL, params);
+    } else {
+      await query(INSERT_AUDIT_SQL, params);
     }
-    console.error('Failed to record audit event:', err);
+  } catch (err) {
+    handleAuditWriteError(input, err);
+  }
+}
+
+/**
+ * Insert an audit row inside an existing transaction. Use this when the audit
+ * event must commit atomically with the state change it describes (e.g. the
+ * model enabled-toggle): a fail-closed audit failure then rolls the change
+ * back instead of leaving it committed but unaudited. Preserves recordAudit's
+ * RLS semantics by setting the tenant context when a tenantId is present.
+ */
+export async function recordAuditInTx(client: pg.PoolClient, input: AuditInput): Promise<void> {
+  try {
+    if (input.tenantId) {
+      await client.query("SELECT set_config('app.tenant_id', $1, true)", [input.tenantId]);
+    }
+    await client.query(INSERT_AUDIT_SQL, auditParams(input));
+  } catch (err) {
+    handleAuditWriteError(input, err);
   }
 }

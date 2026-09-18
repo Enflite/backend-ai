@@ -196,4 +196,28 @@ describe('PATCH /documents/:id/classification concurrency', () => {
     expect(events).toEqual(['tx-start', 'tx-end', 'audit', 'enqueue']);
     await fastify.close();
   });
+
+  it('still enqueues ingestion when audit persistence fails (fail-closed 503)', async () => {
+    // Fail-closed audit failure: the document is already PENDING after the
+    // committed transaction, so the ingestion job must be enqueued anyway —
+    // otherwise the document strands with no active job until orphan recovery.
+    recordAudit.mockRejectedValueOnce(
+      new AppError(503, 'AUDIT_PERSISTENCE_FAILED', 'Audit event could not be persisted')
+    );
+    const fastify = await app();
+    const docId = '11111111-1111-4111-8111-111111111111';
+    const res = await fastify.inject({
+      method: 'PATCH',
+      url: `/documents/${docId}/classification`,
+      payload: { classification: 'CONFIDENTIAL' },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error.code).toBe('AUDIT_PERSISTENCE_FAILED');
+    // The job was enqueued despite the audit failure; the document is not stranded.
+    expect(enqueueIngestion).toHaveBeenCalledTimes(1);
+    expect(enqueueIngestion).toHaveBeenCalledWith(
+      expect.objectContaining({ documentId: docId })
+    );
+    await fastify.close();
+  });
 });

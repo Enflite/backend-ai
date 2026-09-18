@@ -1,13 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
-const { query } = vi.hoisted(() => ({ query: vi.fn() }));
-const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
+const { query, withTx } = vi.hoisted(() => {
+  const query = vi.fn();
+  // Emulate withTx: the callback runs against a client whose query delegates
+  // to the shared query mock, so per-call mockResolvedValue sequencing keeps
+  // working and the single-transaction structure stays observable.
+  const withTx = vi.fn(async (callback: (client: { query: typeof query }) => Promise<unknown>) =>
+    callback({ query }));
+  return { query, withTx };
+});
+const { recordAudit, recordAuditInTx } = vi.hoisted(() => ({ recordAudit: vi.fn(), recordAuditInTx: vi.fn() }));
 // Mutable so each test can act as an AI Admin or an unprivileged user.
 const authState = { permissions: ['model:manage', 'model:use'] as string[] };
 
-vi.mock('../src/db/pool.js', () => ({ query }));
-vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
+vi.mock('../src/db/pool.js', () => ({ query, withTx }));
+vi.mock('../src/audit/audit.js', () => ({ recordAudit, recordAuditInTx }));
 vi.mock('../src/auth/middleware.js', () => ({
   requireAuth: (req: any, _reply: any, done: () => void) => {
     req.auth = {
@@ -74,6 +82,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   authState.permissions = ['model:manage', 'model:use'];
   recordAudit.mockResolvedValue(undefined);
+  recordAuditInTx.mockResolvedValue(undefined);
 });
 
 describe('GET /admin/models', () => {
@@ -130,7 +139,11 @@ describe('PATCH /admin/models/:id', () => {
     expect(res.json().model.enabled).toBe(false);
     expect(query.mock.calls[1]![0]).toMatch(/UPDATE models SET enabled/);
     expect(query.mock.calls[1]![1]).toEqual([MODEL_ID, false]);
-    expect(recordAudit).toHaveBeenCalledWith(
+    // The update and its audit event commit in ONE transaction: withTx wraps
+    // both, and the audit goes through the transactional insert.
+    expect(withTx).toHaveBeenCalledTimes(1);
+    expect(recordAuditInTx).toHaveBeenCalledWith(
+      expect.objectContaining({ query: expect.any(Function) }),
       expect.objectContaining({
         action: 'MODEL_ENABLED_CHANGED',
         resource: 'model',
@@ -138,6 +151,28 @@ describe('PATCH /admin/models/:id', () => {
         metadata: { previousEnabled: true, newEnabled: false },
       })
     );
+    // The non-transactional audit path is never used for the toggle.
+    expect(recordAudit).not.toHaveBeenCalled();
+    await fastify.close();
+  });
+
+  it('fails the toggle when the audit insert fails (fail-closed, atomic)', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [{ id: MODEL_ID, enabled: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [modelRow({ enabled: false })], rowCount: 1 });
+    // A fail-closed audit failure inside the transaction must surface as 503
+    // instead of a 200 with a silently unaudited model change; the withTx
+    // wrapper rolls the UPDATE back in production.
+    recordAuditInTx.mockRejectedValueOnce(new AppError(503, 'AUDIT_PERSISTENCE_FAILED', 'Audit event could not be persisted'));
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'PATCH',
+      url: `/admin/models/${MODEL_ID}`,
+      payload: { enabled: false },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error.code).toBe('AUDIT_PERSISTENCE_FAILED');
+    expect(withTx).toHaveBeenCalledTimes(1);
     await fastify.close();
   });
 
@@ -153,6 +188,8 @@ describe('PATCH /admin/models/:id', () => {
     expect(res.json().error.code).toBe('MODEL_NOT_FOUND');
     // No mutation attempted after the miss.
     expect(query).toHaveBeenCalledTimes(1);
+    expect(withTx).not.toHaveBeenCalled();
+    expect(recordAuditInTx).not.toHaveBeenCalled();
     expect(recordAudit).not.toHaveBeenCalled();
     await fastify.close();
   });

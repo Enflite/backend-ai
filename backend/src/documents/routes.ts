@@ -220,13 +220,22 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
       await client.query('DELETE FROM document_chunks WHERE document_id = $1', [parsedId.data.id]);
       return { document: updated.rows[0], previousClassification: current.classification };
     });
-    await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId,
-      action: 'DOCUMENT_CLASSIFICATION_CHANGED', resource: 'document', resourceId: parsedId.data.id,
-      classification: next, metadata: { previousClassification: reclassified.previousClassification } });
+    // Fail-closed audit must not strand the document: capture an audit
+    // failure, enqueue the ingestion job anyway (the document is PENDING and
+    // needs a job), then rethrow so the client still sees the 503.
+    let auditFailure: unknown;
+    try {
+      await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId,
+        action: 'DOCUMENT_CLASSIFICATION_CHANGED', resource: 'document', resourceId: parsedId.data.id,
+        classification: next, metadata: { previousClassification: reclassified.previousClassification } });
+    } catch (error) {
+      auditFailure = error;
+    }
     // The ingestion job is enqueued only after the transaction commits, so a
     // worker can never observe PENDING status with the old chunks still present.
     const jobId = await enqueueIngestion({ documentId: parsedId.data.id, tenantId: auth.tenantId,
       requestedBy: auth.userId, requestId: req.requestId });
+    if (auditFailure !== undefined) throw auditFailure;
     return reply.status(202).send({ document: reclassified.document, jobId });
   });
 
