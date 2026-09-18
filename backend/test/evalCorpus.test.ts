@@ -85,9 +85,9 @@ describe('eval corpus structure', () => {
           expect(j.expectedTool, `${c.id} expectedTool`).toBeTruthy();
           break;
         case 'llm-judge':
-          expect(j.llmJudge?.dimension, `${c.id} llmJudge.dimension`).toBeTruthy();
-          expect(VALID_DIMENSIONS, `${c.id} llmJudge.dimension`).toContain(j.llmJudge?.dimension);
-          expect(j.llmJudge?.rubric?.length, `${c.id} llmJudge.rubric`).toBeGreaterThan(0);
+          expect(j.dimension, `${c.id} judge.dimension`).toBeTruthy();
+          expect(VALID_DIMENSIONS, `${c.id} judge.dimension`).toContain(j.dimension);
+          expect(j.rubric?.length, `${c.id} judge.rubric`).toBeGreaterThan(0);
           break;
         case 'refusal':
           break;

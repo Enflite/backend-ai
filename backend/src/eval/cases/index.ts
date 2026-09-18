@@ -1,4 +1,4 @@
-import type { EvalCase } from './types.js';
+import type { EvalCase } from '../types.js';
 import { REASONING_CASES } from './reasoning.js';
 import { CODING_CASES } from './coding.js';
 import { JSON_OUTPUT_CASES } from './jsonOutput.js';
@@ -24,7 +24,7 @@ import {
 } from './robustness.js';
 import { QUALITY_CASES } from './quality.js';
 
-export type { EvalCase, EvalCategory, QualityDimension } from './types.js';
+export type { EvalCase, EvalCategory, QualityDimension } from '../types.js';
 
 /** The full evaluation case corpus: deterministic CI cases plus llm-judge cases (skipped without a judge model). */
 export const EVAL_CORPUS: EvalCase[] = [

@@ -1,10 +1,12 @@
 #!/usr/bin/env tsx
 /**
- * cli.ts — `npm run eval [-- --model <id> --categories json-output --live]`
+ * cli.ts — `npm run eval [-- --model <id> --categories json-output --live --seed]`
  *
  * Runs the eval suite from the terminal. Default is the scripted MOCK suite
- * (deterministic, CI-safe, no model, no GPU). Pass --live to run against the
- * real AI gateway — requires EVAL_LIVE_PROVIDER (else the runner refuses).
+ * over the full 110-case corpus (deterministic, CI-safe, no model, no GPU).
+ * Pass --seed for the 16-case representative smoke run, or --live to run
+ * against the real AI gateway — requires EVAL_LIVE_PROVIDER (else the runner
+ * refuses).
  *
  * Prints a per-category table, a per-dimension (charter §5) table, and p0
  * failures. Exits non-zero if any p0 case fails, so CI can gate on it.
@@ -12,6 +14,7 @@
  * fail the run.
  */
 import { EVAL_SEED_CORPUS } from './corpus.js';
+import { EVAL_CORPUS } from './cases/index.js';
 import { mockChatFn, runEval } from './runner.js';
 import type { EvalCategory, QualityDimension } from './types.js';
 // live.js and store.js are imported lazily: --no-store mock runs must not
@@ -47,6 +50,7 @@ function printTable(title: string, rows: Array<[string, string, string]>): void 
 async function main(): Promise<void> {
   const modelId = arg('model');
   const live = hasFlag('live');
+  const seed = hasFlag('seed');
   const noStore = hasFlag('no-store');
   const categories = argList('categories') as EvalCategory[] | undefined;
   const dimensions = argList('dimensions') as QualityDimension[] | undefined;
@@ -60,7 +64,10 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const provider = live ? liveProvider! : 'mock';
+  // Full corpus by default; --seed runs the 16-case representative smoke set.
+  const corpus = seed ? EVAL_SEED_CORPUS : EVAL_CORPUS;
   console.log(`Eval mode: ${provider === 'mock' ? 'MOCK (scripted, CI-safe)' : `LIVE via ${provider}`}`);
+  console.log(`Corpus: ${seed ? 'seed (14 cases, smoke)' : `full (${EVAL_CORPUS.length} cases)`}`);
 
   const chatFn = live
     ? (await import('./live.js')).gatewayChatFn(
@@ -71,7 +78,7 @@ async function main(): Promise<void> {
           roleId: process.env.EVAL_ROLE_ID ?? '',
         }
       )
-    : mockChatFn(EVAL_SEED_CORPUS);
+    : mockChatFn(corpus);
 
   if (!noStore && !modelId) {
     console.error('Missing --model <id>. (Or pass --no-store to run without persisting results.)');
@@ -97,7 +104,7 @@ async function main(): Promise<void> {
   }
 
   try {
-    const { results, summary } = await runEval(EVAL_SEED_CORPUS, chatFn, {
+    const { results, summary } = await runEval(corpus, chatFn, {
       modelId: modelId ?? 'mock',
       modelVersion: version,
       categories,

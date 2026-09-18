@@ -592,12 +592,35 @@ describe('eval routes', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.provider).toBe('mock');
+    // Default corpus is the full 110-case suite; the 2 llm-judge cases skip
+    // without a judge model (reported in `skipped`, excluded from totals,
+    // never gated). saveCaseResult still persists one row per case.
+    expect(body.summary.total).toBe(108);
+    expect(body.summary.passed).toBe(108);
+    expect(body.summary.skipped).toBe(2);
+    // One row per case, including skipped ones.
+    expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(110);
+    expect(vi.mocked(finishRun)).toHaveBeenCalledWith('run-1', expect.objectContaining({ total: 108 }));
+    await app.close();
+  });
+
+  it('POST /admin/eval/runs with seed:true runs the 16-case smoke corpus', async () => {
+    vi.mocked(getModelVersion).mockResolvedValue('1.0');
+    vi.mocked(createRun).mockResolvedValue('run-1');
+    vi.mocked(saveCaseResult).mockResolvedValue(undefined);
+    vi.mocked(finishRun).mockResolvedValue(undefined);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/admin/eval/runs',
+      payload: { modelId: MODEL_ID, seed: true },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
     expect(body.summary.total).toBe(14);
     expect(body.summary.passed).toBe(14);
     expect(body.summary.skipped).toBe(2);
-    // One row per case, including skipped ones.
     expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(16);
-    expect(vi.mocked(finishRun)).toHaveBeenCalledWith('run-1', expect.objectContaining({ total: 14 }));
     await app.close();
   });
 

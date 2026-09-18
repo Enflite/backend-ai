@@ -1,4 +1,4 @@
-import type { EvalCase } from './types.js';
+import type { EvalCase } from '../types.js';
 
 export const REASONING_CASES: EvalCase[] = [
   {

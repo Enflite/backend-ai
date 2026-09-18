@@ -9,7 +9,11 @@ machinery that measures it. Nothing here redefines quality.
 
 ```bash
 # Scripted mock suite: deterministic, no model, no GPU. This is what CI runs.
+# Default corpus is the full 110-case suite (backend/src/eval/cases/).
 npm run eval -- --model <model-id> --no-store
+
+# Fast smoke run: the 16-case representative seed corpus instead.
+npm run eval -- --model <model-id> --no-store --seed
 
 # Persist the run to the database (default):
 npm run eval -- --model <model-id>
@@ -108,9 +112,11 @@ codes. Live gateway runs and llm-judge verdicts are labeled
 
 ## Adding a case
 
-Append to `EVAL_SEED_CORPUS` in `backend/src/eval/corpus.ts` (the corpus
-worker owns the full suite; the contract is `backend/src/eval/types.ts` —
-field names are frozen):
+Append to the appropriate category file under `backend/src/eval/cases/`
+(registered in `backend/src/eval/cases/index.ts` as part of `EVAL_CORPUS`).
+The 16-case seed corpus in `backend/src/eval/corpus.ts` (`EVAL_SEED_CORPUS`)
+is the fast smoke set; the contract is `backend/src/eval/types.ts` — field
+names are frozen:
 
 ```ts
 {

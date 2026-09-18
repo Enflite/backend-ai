@@ -1,4 +1,4 @@
-import type { EvalCase } from './types.js';
+import type { EvalCase } from '../types.js';
 
 const SYTELINE_GET_ITEM = {
   name: 'syteline.getItem',

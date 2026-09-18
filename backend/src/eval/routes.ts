@@ -11,6 +11,7 @@ import { requirePermission } from '../authz/middleware.js';
 import { Errors } from '../errors.js';
 import { recordAudit } from '../audit/audit.js';
 import { EVAL_SEED_CORPUS } from './corpus.js';
+import { EVAL_CORPUS } from './cases/index.js';
 import { mockChatFn, runEval } from './runner.js';
 import { gatewayChatFn } from './live.js';
 import {
@@ -46,6 +47,8 @@ const runBodySchema = z.object({
   severities: z.array(z.enum(['p0', 'p1', 'p2'])).optional(),
   dimensions: z.array(z.enum(QUALITY_DIMENSIONS as [QualityDimension, ...QualityDimension[]])).optional(),
   live: z.boolean().optional(),
+  // Seed-only smoke run (14 representative cases) instead of the full corpus.
+  seed: z.boolean().optional(),
 });
 
 const runIdParams = z.object({ id: z.string().uuid() });
@@ -65,7 +68,7 @@ export async function evalRoutes(fastify: FastifyInstance): Promise<void> {
     const auth = req.auth!;
     const parsed = runBodySchema.safeParse(req.body);
     if (!parsed.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid eval run request');
-    const { modelId, categories, severities, dimensions, live } = parsed.data;
+    const { modelId, categories, severities, dimensions, live, seed } = parsed.data;
 
     const version = await getModelVersion(modelId);
     if (!version) throw Errors.notFound('MODEL_NOT_FOUND', 'Model not found');
@@ -79,9 +82,12 @@ export async function evalRoutes(fastify: FastifyInstance): Promise<void> {
     }
     const provider = live ? liveProvider! : 'mock';
 
+    // Default corpus is the full 110-case suite; `seed: true` runs the
+    // 16-case representative smoke set instead.
+    const corpus = seed ? EVAL_SEED_CORPUS : EVAL_CORPUS;
     const chatFn = live
       ? gatewayChatFn(modelId, { tenantId: auth.tenantId, userId: auth.userId, roleId: auth.roleId })
-      : mockChatFn(EVAL_SEED_CORPUS);
+      : mockChatFn(corpus);
     // The judge model should differ from the candidate under eval —
     // self-judging inflates scores. Only wired in live mode.
     const judgeModel = process.env.EVAL_JUDGE_MODEL;
@@ -92,7 +98,7 @@ export async function evalRoutes(fastify: FastifyInstance): Promise<void> {
 
     const runId = await createRun({ modelId, modelVersion: version, provider, createdBy: auth.userId });
     try {
-      const { summary } = await runEval(EVAL_SEED_CORPUS, chatFn, {
+      const { summary } = await runEval(corpus, chatFn, {
         modelId,
         modelVersion: version,
         categories,
