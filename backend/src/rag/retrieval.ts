@@ -51,7 +51,11 @@ function escapeUntrusted(value: string): string {
  * setReranker(). The default is a passthrough that preserves hybrid order.
  *
  * The hook runs AFTER authorization filtering and BEFORE the similarity
- * threshold, so a reranker can reorder but never widen access.
+ * threshold, so a reranker can reorder but never widen access. The reranker's
+ * output is untrusted: every returned result is reconstructed from the
+ * canonical authorized candidate map (matched by chunkId), so a compromised
+ * or buggy reranker can only reorder candidates and propose a validated score —
+ * its text, document, and citation fields are always discarded.
  */
 export interface Reranker {
   name: string;
@@ -148,19 +152,37 @@ export async function retrieveAuthorizedContext(
   // Applied after the hybrid rerank so low-relevance authorized chunks never
   // reach model context even when topK slots are unfilled.
   const reranked = await activeReranker.rerank(queryText, results);
-  // Rerankers are reorder-only: a buggy or malicious reranker must not widen
-  // access by returning chunks that were never authorized candidates. Drop
-  // unknown or duplicated chunk IDs so only the SQL-authorized set can flow
-  // through, in the reranker's order.
-  const authorizedIds = new Set(results.map((result) => result.chunkId));
+  // Reranker output is untrusted: reconstruct every result from the canonical
+  // authorized candidate map instead of accepting the reranker's object. A
+  // compromised reranker can therefore only reorder candidates and propose a
+  // validated score — text, document, and citation fields are rebuilt from the
+  // canonical candidate, so mutated content injected alongside a known chunkId
+  // is discarded. Unknown or duplicated chunk IDs are dropped so only the
+  // SQL-authorized set can flow through, in the reranker's order.
+  const canonical = new Map(results.map((result) => [result.chunkId, result]));
   const seen = new Set<string>();
   const sanitized: AuthorizedChunk[] = [];
   for (const chunk of reranked) {
     if (!chunk || typeof chunk !== 'object') continue;
-    const id = (chunk as AuthorizedChunk).chunkId;
-    if (typeof id !== 'string' || !authorizedIds.has(id) || seen.has(id)) continue;
-    seen.add(id);
-    sanitized.push(chunk as AuthorizedChunk);
+    const id = (chunk as { chunkId?: unknown }).chunkId;
+    const base = typeof id === 'string' ? canonical.get(id) : undefined;
+    if (!base || seen.has(base.chunkId)) continue;
+    seen.add(base.chunkId);
+    // The reranker may propose a new score, but only a finite number is
+    // accepted, clamped to the [0,1] hybrid-score contract; a non-finite or
+    // missing score keeps the canonical one.
+    const proposed = Number((chunk as AuthorizedChunk).score);
+    const score = Number.isFinite(proposed)
+      ? Math.max(0, Math.min(1, proposed))
+      : base.score;
+    sanitized.push({
+      documentId: base.documentId,
+      documentName: base.documentName,
+      chunkId: base.chunkId,
+      text: base.text,
+      score,
+      citation: { ...base.citation },
+    });
   }
   const threshold = config.RAG_SIMILARITY_THRESHOLD;
   const qualified = threshold > 0 ? sanitized.filter((result) => result.score >= threshold) : sanitized;

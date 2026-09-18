@@ -4,7 +4,12 @@ import { z } from 'zod';
 const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
-vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
+// recordAudit is mocked to keep tests DB-free; the real sanitizeReason is kept
+// so tests can assert sanitized server-side diagnostics end-to-end.
+vi.mock('../src/audit/audit.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/audit/audit.js')>()),
+  recordAudit,
+}));
 
 import {
   authorizeTool,
@@ -222,5 +227,83 @@ describe('runToolCall', () => {
     const update = tenantQuery.mock.calls.find((call) => (call[1] as string).includes("status = 'FAILED'"));
     expect(update).toBeDefined();
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'TOOL_EXECUTION', success: false }));
+  });
+});
+
+describe('tool timeout hardening', () => {
+  it('rejects promptly when a non-cooperative adapter ignores the abort signal', async () => {
+    const { config } = await import('../src/config.js');
+    const originalTimeout = config.AI_TOOL_TIMEOUT_MS;
+    config.AI_TOOL_TIMEOUT_MS = 50;
+    try {
+      let aborted = false;
+      sytelineTool.execute = vi.fn((_input: unknown, signal: AbortSignal) => {
+        // The adapter registers on the signal but never settles: a timeout
+        // that only aborts the signal would hang here forever.
+        signal.addEventListener('abort', () => { aborted = true; });
+        return new Promise<unknown>(() => {});
+      }) as never;
+      const started = Date.now();
+      const result = await runToolCall({
+        auth,
+        name: 'syteline.getItem',
+        rawArguments: '{"item":"A","site":"MAIN"}',
+        classification: 'INTERNAL',
+        requestId: 'req-timeout',
+        signal: new AbortController().signal,
+      });
+      const elapsed = Date.now() - started;
+      expect(result).toMatchObject({ ok: false, errorCode: 'TOOL_TIMEOUT' });
+      // A hang would take forever; the guarded race rejects at the deadline.
+      expect(elapsed).toBeLessThan(5000);
+      expect(result.message).toBe('Tool execution failed');
+      // The abort signal still fired for cooperative adapters.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(aborted).toBe(true);
+      const update = tenantQuery.mock.calls.find((call) => (call[1] as string).includes("status = 'FAILED'"));
+      expect(update).toBeDefined();
+      expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'TOOL_EXECUTION',
+        success: false,
+      }));
+    } finally {
+      config.AI_TOOL_TIMEOUT_MS = originalTimeout;
+    }
+  });
+});
+
+describe('tool exception leakage', () => {
+  it('returns a generic client message and keeps only sanitized diagnostics server-side', async () => {
+    sytelineTool.execute = vi.fn(async () => {
+      throw new Error(
+        'SyteLine upstream 500: connect https://admin:sup3rsecretpw@syteline.internal:8443 ' +
+        'token=ZXhhbXBsZS1hcGkta2V5 payload={"item":"A"}'
+      );
+    }) as never;
+    const result = await runToolCall({
+      auth,
+      name: 'syteline.getItem',
+      rawArguments: '{"item":"A","site":"MAIN"}',
+      classification: 'INTERNAL',
+      requestId: 'req-leak',
+      signal: new AbortController().signal,
+    });
+    expect(result.ok).toBe(false);
+    // Clients (and direct-route consumers / model context) never see the raw
+    // adapter exception.
+    expect(result.message).toBe('Tool execution failed');
+    expect(result.message).not.toContain('sup3rsecretpw');
+    // Operator diagnostics stay server-side (tool_executions error_code +
+    // audit reason) with credential-shaped material stripped by the audit
+    // sanitizer patterns.
+    const auditCall = recordAudit.mock.calls.find(
+      (call) => (call[0] as { action: string }).action === 'TOOL_EXECUTION' && (call[0] as { success?: boolean }).success === false
+    );
+    expect(auditCall).toBeDefined();
+    const reason = (auditCall![0] as { reason: string }).reason;
+    expect(reason).not.toContain('sup3rsecretpw');
+    expect(reason).not.toContain('ZXhhbXBsZS1hcGkta2V5');
+    expect(reason).not.toContain('://admin:');
+    expect(reason).toContain('[REDACTED]');
   });
 });

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { AuthContext, Classification } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
 import { tenantQuery } from '../db/pool.js';
-import { recordAudit } from '../audit/audit.js';
+import { recordAudit, sanitizeReason } from '../audit/audit.js';
 import { config } from '../config.js';
 import { Errors } from '../errors.js';
 import { canModelProcess } from '../policy/engine.js';
@@ -191,9 +191,26 @@ export async function runToolCall(options: {
   const executionId = pending.rows[0]!.id;
   // Per-tool timeout on top of the caller's signal: a hung tool must not hold
   // a chat turn or worker slot indefinitely, even when the client is gone.
+  // The combined signal aborts cooperatively for adapters that listen, but a
+  // non-cooperative adapter (one that ignores the signal) would still never
+  // settle — so the guarded Promise.race rejects at the configured deadline
+  // regardless of whether the adapter ever resolves or rejects.
   const toolSignal = AbortSignal.any([signal, AbortSignal.timeout(config.AI_TOOL_TIMEOUT_MS)]);
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    deadlineTimer = setTimeout(() => {
+      reject(Errors.internal('Tool execution timed out', { tool: name }, 'TOOL_TIMEOUT'));
+    }, config.AI_TOOL_TIMEOUT_MS);
+    // Never let a hung adapter keep the process alive: the timer only exists
+    // to reject the race, and the finally block clears it once the call
+    // settles either way.
+    deadlineTimer.unref?.();
+  });
   try {
-    const output = await prepared.definition.execute(prepared.input, toolSignal);
+    const output = await Promise.race([
+      prepared.definition.execute(prepared.input, toolSignal),
+      deadline,
+    ]);
     await tenantQuery(auth.tenantId, "UPDATE tool_executions SET status = 'SUCCEEDED', completed_at = NOW() WHERE id = $1", [executionId]);
     await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId, action: 'TOOL_EXECUTION', tool: name, classification, metadata: { executionId } });
     const rendered = safeStringify(output);
@@ -217,9 +234,17 @@ export async function runToolCall(options: {
     return { ok: true, executionId, output: rendered, data };
   } catch (error) {
     const code = toolErrorCode(error);
+    // Client-safe: adapter exceptions (upstream messages, stack traces, host
+    // names, leaked headers) never reach clients — a single generic message
+    // is returned for every execution failure. Operator diagnostics are
+    // sanitized server-side with the audit sanitizer patterns before being
+    // recorded, so credential-shaped material never persists raw.
+    const diagnostics = sanitizeReason(error instanceof Error ? error.message : 'Tool execution failed');
     await tenantQuery(auth.tenantId, "UPDATE tool_executions SET status = 'FAILED', error_code = $2, completed_at = NOW() WHERE id = $1", [executionId, code]);
-    await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId, action: 'TOOL_EXECUTION', tool: name, classification, success: false, reason: error instanceof Error ? error.message : 'Tool execution failed' });
-    return { ok: false, errorCode: code, message: error instanceof Error ? error.message : 'Tool execution failed' };
+    await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId, action: 'TOOL_EXECUTION', tool: name, classification, success: false, reason: diagnostics ?? 'Tool execution failed' });
+    return { ok: false, errorCode: code, message: 'Tool execution failed' };
+  } finally {
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
   }
 }
 

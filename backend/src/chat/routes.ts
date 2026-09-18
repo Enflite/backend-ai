@@ -6,7 +6,7 @@ import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
 import { CLASSIFICATIONS, Classification, AuthContext } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
-import { gatewayStream, applyContextWindow, GatewayTelemetry, ChatMessage, ProviderToolDefinition } from '../ai/gateway/gateway.js';
+import { gatewayStream, applyContextWindow, GatewayTelemetry, ChatMessage, ProviderToolDefinition, markStreamInterrupted } from '../ai/gateway/gateway.js';
 import { getApprovedModelForUser, listApprovedModelsForUser } from '../ai/gateway/modelRegistry.js';
 import { retrieveAuthorizedContext } from '../rag/retrieval.js';
 import { recordAudit } from '../audit/audit.js';
@@ -227,6 +227,10 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
 
     let content = '';
     let finishReason = 'stop';
+    // Set when the stream errors after partial output was produced: the
+    // persisted message gets an explicit incomplete marker so a truncated
+    // reply is never mistaken for a finished one.
+    let streamInterrupted = false;
     let truncatedByCap = false;
     let toolIterations = 0;
     // The working message list grows as the agentic loop appends tool calls
@@ -336,6 +340,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
         });
       }
     } catch (error) {
+      if (content) streamInterrupted = true;
       const code = error instanceof AppError ? error.code : 'STREAM_ERROR';
       send('error', { code, message: error instanceof AppError ? error.message : 'Model request failed', requestId: req.requestId });
     } finally {
@@ -349,11 +354,12 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       const servingModelName =
         telemetry.fallbackUsed && telemetry.fallbackModelName ? telemetry.fallbackModelName : model.name;
       if (content) {
+        const persistedContent = streamInterrupted ? markStreamInterrupted(content) : content;
         await tenantQuery(
           auth.tenantId,
           `INSERT INTO messages (conversation_id, tenant_id, role, content, model, model_id, citations)
            VALUES ($1,$2,'assistant',$3,$4,$5,$6)`,
-          [conversationId, auth.tenantId, content, servingModelName, servingModelId, JSON.stringify(citations)]
+          [conversationId, auth.tenantId, persistedContent, servingModelName, servingModelId, JSON.stringify(citations)]
         ).catch((error) => req.log.error({ err: error }, 'Failed to persist assistant message'));
         await tenantQuery(auth.tenantId, 'UPDATE conversations SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2', [conversationId, auth.tenantId]);
       }
