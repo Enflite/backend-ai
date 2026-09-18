@@ -135,6 +135,20 @@ agentic loop's existing iteration budget (`AI_MAX_TOOL_ITERATIONS`).
 | `syteline.getBom` | BOM explosion for a manufactured item (components, qty-per, lead time) |
 | `syteline.getCustomer` | Customer record by customer number |
 
+## Retention & legal hold (Phase 5c)
+
+All endpoints require the `retention:manage` permission (Admin, Security Admin).
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/retention/policy` | Per-tenant overrides + effective retention policy |
+| PUT | `/retention/policy` | Upsert overrides (`conversationsDays`, `messagesDays`, `auditEventsDays`; nullable) |
+| POST | `/retention/conversations/:id/legal-hold` | `{ hold: boolean }` — exempt a conversation (+ its messages) from purging |
+| POST | `/retention/audit-events/:id/legal-hold` | `{ hold: boolean }` — exempt an audit row from purging |
+
+The purge runs in-process every `RETENTION_PURGE_INTERVAL_HOURS` (see
+`docs/enterprise.md`); every purge and hold change is audited.
+
 ## Models & admin
 
 | Method | Path | Auth / Permission | Purpose |
