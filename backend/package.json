@@ -10,6 +10,7 @@
     "build": "tsc",
     "start": "node dist/src/server.js",
     "migrate": "tsx src/db/migrate.ts",
+    "migrate:prod": "node dist/src/db/migrate.js",
     "create-user": "tsx scripts/create-user.ts",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",

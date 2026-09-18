@@ -1,5 +1,14 @@
 import { z } from 'zod';
 
+try {
+  // Built-in in Node 20.12+ / 22+. Loads backend/.env into process.env when
+  // running locally (npm run dev / migrate). Deployment-provided environment
+  // variables always take precedence because loadEnvFile never overrides them.
+  process.loadEnvFile?.();
+} catch {
+  // .env file does not exist or is unreadable; rely on the real environment.
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(8080),

@@ -22,8 +22,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  if (!CLASSIFICATIONS.includes(clearance as Classification)) {
-    console.error(`Error: Invalid clearance '${clearance}'. Allowed: ${CLASSIFICATIONS.join(', ')}`);
+  if (!CLASSIFICATIONS.includes(clearance as Classification) || clearance === 'UNKNOWN') {
+    console.error(`Error: Invalid clearance '${clearance}'. Allowed: ${CLASSIFICATIONS.filter((c) => c !== 'UNKNOWN').join(', ')}`);
     process.exit(1);
   }
 

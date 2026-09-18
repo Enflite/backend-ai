@@ -1,10 +1,20 @@
+# Development-only Compose file.
+#
+# The default values below are LOCAL DEVELOPMENT PLACEHOLDERS ONLY. Any literal
+# credential previously committed to this file must be treated as compromised:
+# rotate it in every environment where it was used and never reuse it.
+# For shared, staging, or production deployments, override every secret via the
+# environment or a secret manager (see backend/.env.example and
+# docs/deployment.md). Production must also set NODE_ENV=production,
+# COOKIE_SECURE=true, MALWARE_SCAN_REQUIRED=true, an explicit CORS_ORIGIN, and
+# a high-entropy JWT_SECRET (>= 32 chars).
 services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ai
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-ai}
     ports:
       - "5432:5432"
     healthcheck:
@@ -23,12 +33,15 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/ai
-      # WARNING: dev-only placeholder. In production, provide a securely generated secret (>=32 chars).
-      JWT_SECRET: dev-only-secret-do-not-use-in-production-min-32-chars
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-ai}
+      # Dev-only placeholder default. Override JWT_SECRET in any non-local
+      # environment; the checked-in default must never be used beyond local dev.
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-do-not-use-in-production-min-32-chars}
       JWT_EXPIRES_IN: 8h
       VLLM_BASE_URL: http://vllm:8000/v1
       VLLM_MODEL: meta-llama/Meta-Llama-3.1-8B-Instruct
+      # Dev-only convenience. config.ts refuses to boot with DEV_AUTH_ENABLED=true
+      # when NODE_ENV=production.
       DEV_AUTH_ENABLED: "true"
       NODE_ENV: development
       PORT: 8080
