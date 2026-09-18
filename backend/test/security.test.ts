@@ -51,7 +51,8 @@ describe('production security primitives', () => {
   });
 
   it('validates signatures and traversal-safe document names', () => {
-    expect(sanitizeFilename('../../policy.md')).toBe('policy.md');
+    expect(() => sanitizeFilename('../../policy.md')).toThrow('Filename is invalid');
+    expect(() => sanitizeFilename('folder\\policy.md')).toThrow('Filename is invalid');
     expect(detectMimeType('policy.pdf', new TextEncoder().encode('%PDF-1.7'))).toBe('application/pdf');
     expect(() => detectMimeType('policy.pdf', new TextEncoder().encode('not a pdf'))).toThrow('PDF signature is invalid');
     expect(() => detectMimeType('payload.exe', new Uint8Array([1, 2]))).toThrow('Document type is not supported');

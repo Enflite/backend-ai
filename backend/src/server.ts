@@ -19,6 +19,7 @@ import { conversationRoutes } from './conversations/routes.js';
 import { chatRoutes } from './chat/routes.js';
 import { documentRoutes } from './documents/routes.js';
 import { toolRoutes } from './tools/routes.js';
+import { recoverIngestionJobs } from './documents/queue.js';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const fastify = Fastify({
@@ -130,6 +131,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename
   const server = await buildServer();
   try {
     await server.listen({ port: config.PORT, host: '0.0.0.0' });
+    await recoverIngestionJobs();
     console.log(`Server listening on 0.0.0.0:${config.PORT}`);
   } catch (err) {
     server.log.error(err);

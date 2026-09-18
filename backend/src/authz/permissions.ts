@@ -32,6 +32,7 @@ export const PERMISSIONS = [
   'document:upload',
   'document:read',
   'document:delete',
+  'document:classify',
   'model:use',
   'model:manage',
   'tool:use',
@@ -60,6 +61,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'tenant:manage',
     'conversation:read',
     'document:read',
+    'document:classify',
   ],
   'AI Admin': [
     'model:manage',

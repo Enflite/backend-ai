@@ -1,4 +1,4 @@
-import type { AuthUser, Citation, DataClassification } from './types';
+import type { AuthUser, Citation, DataClassification, DocumentRecord, RagResult } from './types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/+$/, '');
 let accessToken: string | null = null;
@@ -49,14 +49,51 @@ export const api = {
     try { await request('/auth/logout', { method: 'POST' }, false); } finally { accessToken = null; }
   },
   request,
-  async upload(file: File, classification: DataClassification): Promise<string> {
+  async upload(file: File, classification?: DataClassification): Promise<DocumentRecord> {
     const form = new FormData();
-    form.append('classification', classification);
+    if (classification) form.append('classification', classification);
     form.append('file', file, file.name);
-    const body = await request<{ document: { id: string } }>('/documents', { method: 'POST', body: form });
-    return body.document.id;
+    const body = await request<{ document: any }>('/documents', { method: 'POST', body: form });
+    return mapDocument(body.document);
+  },
+  async documents(): Promise<DocumentRecord[]> {
+    const body = await request<{ documents: any[] }>('/documents');
+    return body.documents.map(mapDocument);
+  },
+  async document(id: string, signal?: AbortSignal): Promise<DocumentRecord> {
+    const body = await request<{ document: any }>(`/documents/${id}`, { signal });
+    return mapDocument(body.document);
+  },
+  async retryDocument(id: string): Promise<void> {
+    await request(`/documents/${id}/retry`, { method: 'POST' });
+  },
+  async deleteDocument(id: string): Promise<void> {
+    await request(`/documents/${id}`, { method: 'DELETE' });
+  },
+  async classifyDocument(id: string, classification: DataClassification): Promise<void> {
+    await request(`/documents/${id}/classification`, { method: 'PATCH', body: JSON.stringify({ classification }) });
+  },
+  async ragSearch(query: string, documentIds?: string[]): Promise<RagResult[]> {
+    const body = await request<{ results: RagResult[] }>('/rag/search', {
+      method: 'POST', body: JSON.stringify({ query, documentIds, topK: 8 }),
+    });
+    return body.results;
   },
 };
+
+export function mapDocument(value: any): DocumentRecord {
+  return {
+    id: value.id,
+    filename: value.filename,
+    mimeType: value.mime_type,
+    sizeBytes: Number(value.size_bytes),
+    classification: value.classification,
+    status: value.status,
+    errorCode: value.error_code ?? undefined,
+    createdAt: new Date(value.created_at),
+    updatedAt: new Date(value.updated_at),
+  };
+}
 
 export interface StreamEvent {
   event: 'meta' | 'delta' | 'done' | 'error';
