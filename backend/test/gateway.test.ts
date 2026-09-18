@@ -7,7 +7,12 @@ const { resolveChatProvider } = vi.hoisted(() => ({ resolveChatProvider: vi.fn((
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ getApprovedModelForUser }));
-vi.mock('../src/ai/providers/factory.js', () => ({ resolveChatProvider }));
+vi.mock('../src/ai/providers/factory.js', async (importOriginal) => {
+  // Mock only provider construction; keep the real isKnownChatProvider so
+  // the gateway's fail-fast provider check is genuinely exercised.
+  const original = await importOriginal<typeof import('../src/ai/providers/factory.js')>();
+  return { ...original, resolveChatProvider };
+});
 vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
 
 import { gatewayStream, applyContextWindow, estimateTokens, SYSTEM_PROMPT } from '../src/ai/gateway/gateway.js';
