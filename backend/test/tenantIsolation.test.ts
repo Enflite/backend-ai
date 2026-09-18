@@ -51,7 +51,7 @@ import {
   TENANT_A, TENANT_B, USER_A1, USER_A2, USER_B1,
   CONV_A1, CONV_A2, CONV_B1, DOC_A1, DOC_B1, authFor,
 } from './helpers/securityFixtures.js';
-import type { Permission } from '../src/authz/permissions.js';
+import type { AuthContext, Permission } from '../src/authz/permissions.js';
 
 // ---------------------------------------------------------------------------
 // Fake tenant-aware database
@@ -229,7 +229,7 @@ async function buildApp(register: (app: ReturnType<typeof Fastify>) => Promise<v
   return app;
 }
 
-function as(auth: Record<string, unknown>) {
+function as(auth: AuthContext) {
   currentAuth.userId = auth.userId;
   currentAuth.tenantId = auth.tenantId;
   currentAuth.sessionId = auth.sessionId;

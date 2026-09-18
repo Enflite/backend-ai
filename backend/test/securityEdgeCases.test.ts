@@ -47,12 +47,12 @@ import { chatRoutes } from '../src/chat/routes.js';
 import { serverErrorHandler } from '../src/server.js';
 import { sanitizeReason } from '../src/audit/audit.js';
 import { TENANT_A, USER_A1, authFor } from './helpers/securityFixtures.js';
-import type { Permission } from '../src/authz/permissions.js';
+import type { AuthContext, Permission } from '../src/authz/permissions.js';
 
 const sytelineTool = toolRegistry.find((tool) => tool.name === 'syteline.getItem')!;
 const originalExecute = sytelineTool.execute;
 
-function as(auth: Record<string, unknown>) {
+function as(auth: AuthContext) {
   for (const key of Object.keys(currentAuth)) delete currentAuth[key];
   Object.assign(currentAuth, auth);
 }
