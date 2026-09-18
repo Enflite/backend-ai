@@ -36,13 +36,24 @@ export interface EvalToolDef {
 }
 
 export interface EvalJudgeSpec {
-  kind: 'contains' | 'not-contains' | 'json-schema' | 'refusal' | 'citation-grounding' | 'tool-call' | 'no-exfiltration' | 'llm-judge';
+  kind: 'contains' | 'not-contains' | 'json-schema' | 'refusal' | 'citation-grounding' | 'tool-call' | 'tool-chain' | 'no-exfiltration' | 'llm-judge';
   expectedSubstrings?: string[];
   forbiddenSubstrings?: string[];
   jsonSchema?: unknown;
   requiredCitations?: string[];
   expectedTool?: string;
   expectedToolArgs?: Record<string, unknown>;
+  /**
+   * tool-chain only: expected tool names in call order. The verdict passes
+   * when the assistant's tool calls contain this sequence as an ordered
+   * subsequence (extra calls between steps are allowed), the synthesized
+   * content contains every expectedSubstrings entry (the cited evidence),
+   * and none of forbiddenSubstrings appears. This is how agentic,
+   * multi-step SyteLine investigations ("why is this order late?") are
+   * scored deterministically: correct chain + correct root cause + no
+   * invented records.
+   */
+  expectedToolChain?: string[];
   /** llm-judge only: which charter dimension this case scores. */
   dimension?: QualityDimension;
   /** llm-judge only: case-specific rubric; when omitted the versioned default for `dimension` is used. */

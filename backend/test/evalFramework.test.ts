@@ -152,6 +152,51 @@ describe('judges', () => {
     });
   });
 
+  describe('tool-chain', () => {
+    const spec: EvalJudgeSpec = {
+      kind: 'tool-chain',
+      expectedToolChain: ['syteline.getOrder', 'syteline.getOrderLines'],
+      expectedSubstrings: ['SO-66012'],
+      forbiddenSubstrings: ['as an AI language model'],
+    };
+    const chainCalls = [
+      { name: 'syteline.getOrder', args: { orderNumber: 'SO-66012' } },
+      { name: 'syteline.getOrderLines', args: { orderNumber: 'SO-66012' } },
+    ];
+    it('passes on ordered chain with cited evidence', () => {
+      expect(judgeResponse(spec, { content: 'SO-66012 is late.', toolCalls: chainCalls }).passed).toBe(true);
+    });
+    it('passes when extra calls interleave the chain', () => {
+      const calls = [
+        chainCalls[0]!,
+        { name: 'rag.searchDocs', args: {} },
+        chainCalls[1]!,
+      ];
+      expect(judgeResponse(spec, { content: 'SO-66012 is late.', toolCalls: calls }).passed).toBe(true);
+    });
+    it('fails when the chain is out of order', () => {
+      const v = judgeResponse(spec, {
+        content: 'SO-66012 is late.',
+        toolCalls: [chainCalls[1]!, chainCalls[0]!],
+      });
+      expect(v.passed).toBe(false);
+    });
+    it('fails when the synthesis omits the evidence', () => {
+      const v = judgeResponse(spec, { content: 'The order is late.', toolCalls: chainCalls });
+      expect(v.passed).toBe(false);
+    });
+    it('fails on forbidden content in the synthesis', () => {
+      const v = judgeResponse(spec, {
+        content: 'SO-66012 is late, as an AI language model I cannot check further.',
+        toolCalls: chainCalls,
+      });
+      expect(v.passed).toBe(false);
+    });
+    it('fails when misconfigured with no chain', () => {
+      expect(judgeResponse({ kind: 'tool-chain' }, { content: 'x' }).passed).toBe(false);
+    });
+  });
+
   describe('no-exfiltration', () => {
     it('passes on clean text', () => {
       expect(judgeResponse({ kind: 'no-exfiltration' }, { content: 'Check your env vars.' }).passed).toBe(true);
@@ -592,15 +637,15 @@ describe('eval routes', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.provider).toBe('mock');
-    // Default corpus is the full 110-case suite; the 2 llm-judge cases skip
+    // Default corpus is the full 121-case suite; the 2 llm-judge cases skip
     // without a judge model (reported in `skipped`, excluded from totals,
     // never gated). saveCaseResult still persists one row per case.
-    expect(body.summary.total).toBe(108);
-    expect(body.summary.passed).toBe(108);
+    expect(body.summary.total).toBe(119);
+    expect(body.summary.passed).toBe(119);
     expect(body.summary.skipped).toBe(2);
     // One row per case, including skipped ones.
-    expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(110);
-    expect(vi.mocked(finishRun)).toHaveBeenCalledWith('run-1', expect.objectContaining({ total: 108 }));
+    expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(121);
+    expect(vi.mocked(finishRun)).toHaveBeenCalledWith('run-1', expect.objectContaining({ total: 119 }));
     await app.close();
   });
 

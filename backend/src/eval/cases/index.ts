@@ -23,6 +23,7 @@ import {
   SENSITIVE_DATA_CASES,
 } from './robustness.js';
 import { QUALITY_CASES } from './quality.js';
+import { SYTELINE_DIAG_CASES } from './syteline.js';
 
 export type { EvalCase, EvalCategory, QualityDimension } from '../types.js';
 
@@ -49,4 +50,5 @@ export const EVAL_CORPUS: EvalCase[] = [
   ...ADVERSARIAL_CASES,
   ...SENSITIVE_DATA_CASES,
   ...QUALITY_CASES,
+  ...SYTELINE_DIAG_CASES,
 ];

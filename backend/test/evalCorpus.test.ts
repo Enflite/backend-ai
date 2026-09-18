@@ -18,7 +18,7 @@ const VALID_DIMENSIONS: QualityDimension[] = [
 
 const VALID_JUDGE_KINDS = [
   'contains', 'not-contains', 'json-schema', 'refusal',
-  'citation-grounding', 'tool-call', 'no-exfiltration', 'llm-judge',
+  'citation-grounding', 'tool-call', 'tool-chain', 'no-exfiltration', 'llm-judge',
 ] as const;
 
 const VALID_SEVERITIES = ['p0', 'p1', 'p2'] as const;
@@ -248,6 +248,21 @@ function runMinimalJudge(c: EvalCase): string | null {
         return `tool args mismatch: expected subset ${JSON.stringify(j.expectedToolArgs)}`;
       }
       return null;
+    }
+    case 'tool-chain': {
+      if (typeof c.mockResponse === 'string') return 'tool-chain case needs object mockResponse';
+      const chain = j.expectedToolChain ?? [];
+      const actual = c.mockResponse.toolCalls.map((t) => t.name);
+      let matched = 0;
+      for (const name of actual) {
+        if (name === chain[matched]) matched++;
+        if (matched === chain.length) break;
+      }
+      if (matched < chain.length) return `tool chain not in order: expected ${chain.join(' -> ')}`;
+      const missing = (j.expectedSubstrings ?? []).filter((s) => !text.includes(s));
+      if (missing.length) return `missing evidence: ${missing.join(' | ')}`;
+      const leaked = (j.forbiddenSubstrings ?? []).filter((s) => text.includes(s));
+      return leaked.length ? `forbidden substrings present: ${leaked.join(' | ')}` : null;
     }
     case 'llm-judge':
       return null; // skipped: requires a judge model, never gates CI
