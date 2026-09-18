@@ -11,6 +11,7 @@ import {
 import type { GatewayEvent, ProviderToolDefinition } from '../src/ai/gateway/gateway.js';
 import type { ToolCallResult } from '../src/tools/gateway.js';
 import type { AuthContext } from '../src/authz/permissions.js';
+import type { ApprovedModel } from '../src/ai/gateway/modelRegistry.js';
 
 /**
  * A non-SyteLine tool family the loop has never seen: a tiny calculator.
@@ -43,7 +44,7 @@ const calcTools: ProviderToolDefinition[] = [
   },
 ];
 
-const testModel = { id: 'm1', name: 'Test Model', contextWindow: 8192 };
+const testModel = { id: 'm1', name: 'Test Model', contextWindow: 8192 } as unknown as ApprovedModel;
 
 function scriptedGateway(steps: GatewayEvent[][], onInput?: (input: any, round: number) => void) {
   let round = 0;
@@ -109,7 +110,7 @@ function baseOptions(overrides: Partial<AgenticLoopOptions> = {}): AgenticLoopOp
 function fakeCalcRunner(impl?: (opts: any) => Promise<ToolCallResult>) {
   return vi.fn(async (opts: any): Promise<ToolCallResult> => {
     if (impl) return impl(opts);
-    const args = JSON.parse(opts.rawArguments) as Record<string, number>;
+    const args = JSON.parse(opts.rawArguments) as { a: number; b: number; x: number };
     if (opts.name === 'calc.add') return { ok: true, output: String(args.a + args.b) };
     if (opts.name === 'calc.double') return { ok: true, output: String(args.x * 2) };
     return { ok: false, errorCode: 'TOOL_NOT_FOUND', message: 'unknown tool' };
