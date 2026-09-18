@@ -73,7 +73,7 @@ async function buildApp(register: (app: ReturnType<typeof Fastify>) => Promise<v
 }
 
 const toolAuth = () =>
-  authFor(USER_A1, TENANT_A, { permissions: ['tool:use'] as Permission[] });
+  authFor(USER_A1, TENANT_A, { permissions: ['tool:use', 'syteline:read'] as Permission[] });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -156,7 +156,7 @@ describe('tool classification enforcement', () => {
     const app = await buildApp((a) => toolRoutes(a));
     as(authFor(USER_A1, TENANT_A, {
       clearance: 'PUBLIC',
-      permissions: ['tool:use'] as Permission[],
+      permissions: ['tool:use', 'syteline:read'] as Permission[],
     }));
     const res = await app.inject({
       method: 'POST', url: '/tools/syteline.getItem/execute',

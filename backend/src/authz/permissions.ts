@@ -40,6 +40,7 @@ export const PERMISSIONS = [
   'syteline:read',
   'audit:read',
   'tenant:manage',
+  'retention:manage',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -63,6 +64,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'conversation:read',
     'document:read',
     'document:classify',
+    'retention:manage',
   ],
   'AI Admin': [
     'model:manage',

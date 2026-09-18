@@ -186,6 +186,10 @@ const envSchema = z.object({
   OIDC_SCOPES: z.string().min(1).default('openid email profile'),
   // Claim in the ID token / userinfo carrying the user's IdP groups.
   OIDC_GROUP_CLAIM: z.string().min(1).default('groups'),
+  // Claims carrying the user's email and display name. The defaults follow
+  // the OIDC standard claims; override when the IdP uses custom ones.
+  OIDC_EMAIL_CLAIM: z.string().min(1).default('email'),
+  OIDC_NAME_CLAIM: z.string().min(1).default('name'),
   // JSON object mapping IdP group names to internal role names, e.g.
   // '{"sso-admins":"Admin","sso-auditors":"Security Admin"}'. Groups with
   // no mapping — or a mapping to a role that does not exist — fall back to
@@ -200,6 +204,26 @@ const envSchema = z.object({
   // Frontend page the IdP callback redirects to (tokens travel in the URL
   // fragment, never the query string, so they stay out of server logs).
   OIDC_FRONTEND_CALLBACK: z.string().url().optional(),
+  // ---------------------------------------------------------------------------
+  // DLP: assistant outbound boundary (Phase 5c). Built-in SSN / credit-card
+  // (Luhn) detectors redact with a visible marker; the optional external
+  // hook adds best-effort defense in depth. The platform runs without it.
+  // ---------------------------------------------------------------------------
+  DLP_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(true),
+  DLP_EXTERNAL_ENDPOINT: z.string().url().optional(),
+  DLP_EXTERNAL_API_KEY: z.string().optional().default(''),
+  DLP_EXTERNAL_TIMEOUT_MS: z.coerce.number().int().min(100).max(30000).default(2000),
+  // ---------------------------------------------------------------------------
+  // Retention (Phase 5c): per-tenant data retention for conversations,
+  // messages, and audit events. Null/0 disables purging for that table
+  // (keep forever). Per-tenant overrides live in retention_policies.
+  // ---------------------------------------------------------------------------
+  RETENTION_CONVERSATIONS_DAYS: z.coerce.number().int().min(0).nullable().default(365),
+  RETENTION_MESSAGES_DAYS: z.coerce.number().int().min(0).nullable().default(365),
+  RETENTION_AUDIT_EVENTS_DAYS: z.coerce.number().int().min(0).nullable().default(730),
+  RETENTION_PURGE_INTERVAL_HOURS: z.coerce.number().min(1).max(168).default(24),
   // ---------------------------------------------------------------------------
   // Observability (backend/src/observability/). /metrics is public in dev and
   // test for easy scraping; in production it defaults to hidden (404) and

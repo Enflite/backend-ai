@@ -4,7 +4,7 @@ import type { AuthContext } from '../src/authz/permissions.js';
 
 const auth: AuthContext = {
   userId: 'u', tenantId: 't', sessionId: 's', roleId: 'r', email: 'u@example.test',
-  displayName: 'User', roleName: 'User', clearance: 'INTERNAL', permissions: ['tool:use'],
+  displayName: 'User', roleName: 'User', clearance: 'INTERNAL', permissions: ['tool:use', 'syteline:read'],
 };
 
 describe('tool gateway', () => {
