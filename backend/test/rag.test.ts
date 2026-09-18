@@ -3,10 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const { tenantQuery, withTenant } = vi.hoisted(() => ({ tenantQuery: vi.fn(), withTenant: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenant }));
 vi.mock('../src/documents/ingestion.js', () => ({
-  internalEmbeddingProvider: {
+  internalEmbeddingProvider: () => ({
     model: 'embedding-test', version: '1', dimensions: 2,
     embed: vi.fn().mockResolvedValue([[0.1, 0.2]]),
-  },
+  }),
 }));
 
 import { retrieveAuthorizedContext } from '../src/rag/retrieval.js';

@@ -3,10 +3,16 @@ import { Errors } from '../src/errors.js';
 
 const { getApprovedModelForUser } = vi.hoisted(() => ({ getApprovedModelForUser: vi.fn() }));
 const { streamChat } = vi.hoisted(() => ({ streamChat: vi.fn() }));
+const { resolveChatProvider } = vi.hoisted(() => ({ resolveChatProvider: vi.fn(() => ({ kind: 'test', streamChat })) }));
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ getApprovedModelForUser }));
-vi.mock('../src/ai/gateway/vllmProvider.js', () => ({ streamChat }));
+vi.mock('../src/ai/providers/factory.js', async (importOriginal) => {
+  // Mock only provider construction; keep the real isKnownChatProvider so
+  // the gateway's fail-fast provider check is genuinely exercised.
+  const original = await importOriginal<typeof import('../src/ai/providers/factory.js')>();
+  return { ...original, resolveChatProvider };
+});
 vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
 
 import { gatewayStream, applyContextWindow, estimateTokens, SYSTEM_PROMPT } from '../src/ai/gateway/gateway.js';
@@ -19,7 +25,7 @@ function model(overrides: Record<string, unknown> = {}) {
     provider: 'vllm',
     endpoint: 'http://localhost:8000/v1',
     model_identifier: 'primary-model',
-    status: 'APPROVED',
+    status: 'ACTIVE',
     license: null,
     source: null,
     sha256: null,

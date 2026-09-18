@@ -2,18 +2,56 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../../auth/middleware.js';
 import { requirePermission } from '../../authz/middleware.js';
+import { CLASSIFICATIONS } from '../../authz/permissions.js';
 import { listApprovedModelsForUser } from './modelRegistry.js';
 import { query, withTx } from '../../db/pool.js';
 import { Errors } from '../../errors.js';
 import { recordAuditInTx } from '../../audit/audit.js';
+import { assertEndpointAllowed } from './gateway.js';
+import { isKnownChatProvider } from '../providers/factory.js';
+import { assertAllowedModelSource } from '../artifacts.js';
+import {
+  MODEL_STATUSES,
+  transitionModel,
+  setServingDefault,
+  listServingDefaults,
+} from './modelLifecycle.js';
 
 const modelIdSchema = z.object({ id: z.string().uuid() });
 
-// Enabled-toggle is the only admin-mutable field today: the schema has no
-// approval/lifecycle columns beyond status/enabled, and every other field
-// (endpoint, provider, model_identifier, tuning knobs) changes inference
-// behavior, so it stays immutable until Phase 3 model lifecycle lands.
+// Enabled-toggle is the only mutable field on the PATCH route: endpoint,
+// provider, model_identifier, and tuning knobs change inference behavior,
+// so they are immutable after registration — register a new model version
+// instead. Lifecycle moves through POST /admin/models/:id/transition.
 const modelPatchSchema = z.object({ enabled: z.boolean() }).strict();
+
+const modelRegisterSchema = z.object({
+  name: z.string().min(1).max(200),
+  version: z.string().min(1).max(64),
+  provider: z.string().min(1).max(64),
+  endpoint: z.string().url().max(500),
+  modelIdentifier: z.string().min(1).max(500),
+  license: z.string().max(200).nullish(),
+  source: z.string().url().max(500).nullish(),
+  sha256: z.string().regex(/^[0-9a-fA-F]{64}$/).nullish(),
+  contextWindow: z.number().int().min(1024).max(2000000).default(8192),
+  capabilities: z.record(z.unknown()).default({}),
+  // 'UNKNOWN' is fail-closed and can never be an allowed classification
+  // (the DB check constraint enforces the same rule).
+  allowedClassifications: z
+    .array(z.enum(CLASSIFICATIONS))
+    .min(1)
+    .refine((values) => !values.includes('UNKNOWN'), { message: 'UNKNOWN cannot be an allowed classification' }),
+  deployment: z.record(z.unknown()).default({}),
+}).strict();
+
+const modelTransitionSchema = z.object({
+  status: z.enum(MODEL_STATUSES),
+}).strict();
+
+const servingDefaultSchema = z.object({
+  modelId: z.string().uuid(),
+}).strict();
 
 export async function modelRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get(
@@ -42,7 +80,8 @@ export async function modelRoutes(fastify: FastifyInstance): Promise<void> {
 const ADMIN_MODEL_FIELDS = `id, name, version, provider, endpoint, model_identifier,
   status, license, source, sha256, context_window, capabilities,
   allowed_classifications, deployment, request_timeout_ms, max_tokens,
-  temperature, fallback_model_id, enabled, created_at`;
+  temperature, fallback_model_id, enabled, created_at,
+  lifecycle_updated_at, approved_by, approved_at, last_eval_run_id`;
 
 interface AdminModelRow {
   id: string;
@@ -65,6 +104,10 @@ interface AdminModelRow {
   fallback_model_id: string | null;
   enabled: boolean;
   created_at: Date;
+  lifecycle_updated_at: Date;
+  approved_by: string | null;
+  approved_at: Date | null;
+  last_eval_run_id: string | null;
 }
 
 function toAdminModel(m: AdminModelRow) {
@@ -89,6 +132,10 @@ function toAdminModel(m: AdminModelRow) {
     fallbackModelId: m.fallback_model_id,
     enabled: m.enabled,
     createdAt: m.created_at,
+    lifecycleUpdatedAt: m.lifecycle_updated_at,
+    approvedBy: m.approved_by,
+    approvedAt: m.approved_at,
+    lastEvalRunId: m.last_eval_run_id,
   };
 }
 
@@ -140,5 +187,144 @@ export async function modelAdminRoutes(fastify: FastifyInstance): Promise<void> 
       return row;
     });
     return reply.send({ model: toAdminModel(updated) });
+  });
+
+  // Register a new model. It enters the lifecycle at REGISTERED: it serves
+  // no traffic until it walks DOWNLOADING -> VALIDATING -> EVALUATING ->
+  // PENDING_APPROVAL -> APPROVED (eval gate) -> CANARY/ACTIVE.
+  fastify.post('/admin/models', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const parsed = modelRegisterSchema.safeParse(req.body);
+    if (!parsed.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid model registration request');
+    const body = parsed.data;
+    if (!isKnownChatProvider(body.provider)) {
+      throw Errors.badRequest('MODEL_PROVIDER_UNSUPPORTED', `Unknown model provider: ${body.provider}`);
+    }
+    // No arbitrary endpoints or model sources: both must be allowlisted.
+    assertEndpointAllowed(body.endpoint);
+    assertAllowedModelSource(body.source ?? null);
+    try {
+      const created = await withTx(async (client) => {
+        const row = (
+          await client.query<AdminModelRow>(
+            `INSERT INTO models (name, version, provider, endpoint, model_identifier, status,
+                                 license, source, sha256, context_window, capabilities,
+                                 allowed_classifications, deployment)
+             VALUES ($1,$2,$3,$4,$5,'REGISTERED',$6,$7,$8,$9,$10,$11,$12)
+             RETURNING ${ADMIN_MODEL_FIELDS}`,
+            [
+              body.name, body.version, body.provider, body.endpoint, body.modelIdentifier,
+              body.license ?? null, body.source ?? null, body.sha256 ?? null,
+              body.contextWindow, JSON.stringify(body.capabilities),
+              body.allowedClassifications, JSON.stringify(body.deployment),
+            ]
+          )
+        ).rows[0]!;
+        await recordAuditInTx(client, { tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip,
+          action: 'MODEL_REGISTERED', resource: 'model', resourceId: row.id,
+          metadata: { name: body.name, version: body.version, provider: body.provider } });
+        return row;
+      });
+      return reply.code(201).send({ model: toAdminModel(created) });
+    } catch (err) {
+      // Unique violation on models.name -> 409, not 500.
+      if (err instanceof Error && 'code' in err && (err as { code: string }).code === '23505') {
+        throw Errors.badRequest('MODEL_NAME_EXISTS', 'A model with this name is already registered');
+      }
+      throw err;
+    }
+  });
+
+  // Move a model through the approval/promotion lifecycle. The state machine
+  // and the eval promotion gate are enforced in modelLifecycle.transitionModel;
+  // approval (PENDING_APPROVAL -> APPROVED) fails when required evals fail.
+  fastify.post('/admin/models/:id/transition', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const parsedId = modelIdSchema.safeParse(req.params);
+    const parsedBody = modelTransitionSchema.safeParse(req.body);
+    if (!parsedId.success || !parsedBody.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid lifecycle transition request');
+    const result = await transitionModel({
+      modelId: parsedId.data.id,
+      toStatus: parsedBody.data.status,
+      actorUserId: auth.userId,
+      tenantId: auth.tenantId,
+      requestId: req.requestId,
+      ip: req.ip,
+    });
+    return reply.send({ transition: result });
+  });
+
+  // Admin-controlled serving defaults: which model serves a
+  // tenant+capability slot. Audited; must point at a servable model.
+  fastify.get('/admin/serving-defaults', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    return reply.send({ defaults: await listServingDefaults(auth.tenantId) });
+  });
+
+  fastify.put('/admin/serving-defaults/:capability', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const parsedCapability = z.object({ capability: z.string().min(1).max(64) }).safeParse(req.params);
+    const parsedBody = servingDefaultSchema.safeParse(req.body);
+    if (!parsedCapability.success || !parsedBody.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid serving default request');
+    const def = await setServingDefault(
+      auth.tenantId,
+      parsedCapability.data.capability,
+      parsedBody.data.modelId,
+      auth.userId,
+      req.requestId,
+      req.ip
+    );
+    return reply.send({ default: def });
+  });
+}
+
+/**
+ * Local-dev model artifact management (Ollama). DEV ONLY: every function in
+ * artifacts.ts refuses unless ALLOW_DEV_PROVIDERS is enabled, and these
+ * routes additionally require model:manage. Production model deployment is
+ * configuration-driven (see docs/inference.md) — the application never
+ * downloads weights in production.
+ */
+export async function modelArtifactRoutes(fastify: FastifyInstance): Promise<void> {
+  const { listLocalModels, pullLocalModel, assertLocalPullAllowed } = await import('../artifacts.js');
+
+  fastify.get('/admin/models/artifacts/local', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (_req, reply) => {
+    return reply.send({ models: await listLocalModels() });
+  });
+
+  fastify.post('/admin/models/artifacts/pull', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const parsed = z.object({ name: z.string().min(1).max(200) }).strict().safeParse(req.body);
+    if (!parsed.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid model pull request');
+    const auth = req.auth!;
+    // Audit the pull request (non-transactional: the pull itself streams).
+    const { recordAudit } = await import('../../audit/audit.js');
+    await recordAudit({
+      tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip,
+      action: 'MODEL_PULL_REQUESTED', resource: 'model_artifact', resourceId: parsed.data.name, success: true,
+    });
+    // Eager allowlist/dev-gate check BEFORE switching to raw SSE: once
+    // reply.raw headers are set, Fastify can no longer render an AppError
+    // as JSON, so a denied pull would surface as a bare 500 instead of the
+    // real 403 code.
+    assertLocalPullAllowed(parsed.data.name);
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-cache');
+    for await (const progress of pullLocalModel(parsed.data.name)) {
+      if (reply.raw.destroyed) break;
+      reply.raw.write(`data: ${JSON.stringify(progress)}\n\n`);
+    }
+    reply.raw.end();
   });
 }

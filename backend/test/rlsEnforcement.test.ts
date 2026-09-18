@@ -183,9 +183,15 @@ describe('static: raw query() is never used on tenant tables', () => {
   //    (like `models` — no tenant_id, no RLS policies; see migration 016).
   //    Eval is an admin activity gated by requirePermission('model:manage');
   //    the store never names a tenant table (asserted below).
+  //  - ai/gateway/modelLifecycle.ts: the model registry (`models`) and the
+  //    `model_serving_defaults` table are platform-level tables with no RLS;
+  //    every lifecycle transition is gated by requirePermission('model:manage')
+  //    and writes its own MODEL_* audit row. model_serving_defaults rows are
+  //    scoped by tenant_id in SQL predicates, never cross-tenant.
   const RAW_QUERY_ALLOWLIST = new Set([
     'audit/audit.ts',
     'ai/gateway/routes.ts',
+    'ai/gateway/modelLifecycle.ts',
     'auth/identityProvider.ts',
     'auth/routes.ts',
     'documents/queue.ts',

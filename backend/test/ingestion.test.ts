@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
 
-import { ingestDocument, internalEmbeddingProvider, chunkText } from '../src/documents/ingestion.js';
+import { ingestDocument, chunkText } from '../src/documents/ingestion.js';
+import { OpenAICompatibleEmbeddingProvider } from '../src/ai/providers/openaiEmbeddings.js';
 import type { EmbeddingProvider } from '../src/documents/ingestion.js';
 import { config } from '../src/config.js';
 
@@ -15,6 +16,7 @@ function fakeDependencies(overrides: Partial<{
 }> = {}) {
   const text = overrides.text ?? 'hello world';
   const embeddings: EmbeddingProvider = {
+    kind: 'test',
     model: 'test-model',
     version: '1',
     dimensions: DIMENSIONS,
@@ -69,27 +71,25 @@ describe('ingestion embedding validation', () => {
   });
 });
 
-describe('internal embedding provider retries', () => {
+describe('OpenAI-compatible embedding provider retries', () => {
   const originalFetch = globalThis.fetch;
-  const originalBaseUrl = config.EMBEDDING_BASE_URL;
-  const originalModel = config.EMBEDDING_MODEL;
-  const originalDimensions = config.EMBEDDING_DIMENSIONS;
-
-  beforeEach(() => {
-    config.EMBEDDING_BASE_URL = 'http://embeddings.test';
-    config.EMBEDDING_MODEL = 'test-model';
-    config.EMBEDDING_DIMENSIONS = 2;
-  });
 
   const embedResponse = (status: number) =>
     new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2], index: 0 }] }), { status });
 
+  function makeProvider() {
+    return new OpenAICompatibleEmbeddingProvider({
+      endpoint: 'http://embeddings.test',
+      model: 'test-model',
+      version: '1',
+      dimensions: 2,
+      defaultTimeoutMs: 5000,
+    });
+  }
+
   afterEach(() => {
     globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
-    config.EMBEDDING_BASE_URL = originalBaseUrl;
-    config.EMBEDDING_MODEL = originalModel;
-    config.EMBEDDING_DIMENSIONS = originalDimensions;
   });
 
   it('retries on 429 and 5xx, then succeeds', async () => {
@@ -98,7 +98,7 @@ describe('internal embedding provider retries', () => {
       .mockResolvedValueOnce(embedResponse(503))
       .mockResolvedValueOnce(embedResponse(200));
     globalThis.fetch = fetchMock as never;
-    const vectors = await internalEmbeddingProvider.embed(['hello']);
+    const vectors = await makeProvider().embed(['hello']);
     expect(vectors).toEqual([[0.1, 0.2]]);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
@@ -106,7 +106,7 @@ describe('internal embedding provider retries', () => {
   it('does not retry 4xx: deterministic errors surface immediately', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(embedResponse(400));
     globalThis.fetch = fetchMock as never;
-    await expect(internalEmbeddingProvider.embed(['hello'])).rejects.toMatchObject({
+    await expect(makeProvider().embed(['hello'])).rejects.toMatchObject({
       code: 'EMBEDDING_PROVIDER_ERROR',
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -115,7 +115,7 @@ describe('internal embedding provider retries', () => {
   it('fails after exhausting retries on persistent 5xx', async () => {
     const fetchMock = vi.fn().mockResolvedValue(embedResponse(500));
     globalThis.fetch = fetchMock as never;
-    await expect(internalEmbeddingProvider.embed(['hello'])).rejects.toMatchObject({
+    await expect(makeProvider().embed(['hello'])).rejects.toMatchObject({
       code: 'EMBEDDING_PROVIDER_ERROR',
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -127,8 +127,16 @@ describe('internal embedding provider retries', () => {
     globalThis.fetch = fetchMock as never;
     const controller = new AbortController();
     controller.abort();
-    await expect(internalEmbeddingProvider.embed(['hello'], controller.signal)).rejects.toThrow('aborted');
+    await expect(makeProvider().embed(['hello'], controller.signal)).rejects.toThrow('aborted');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid dimensions', async () => {
+    const bad = new Response(JSON.stringify({ data: [{ embedding: [0.1], index: 0 }] }), { status: 200 });
+    globalThis.fetch = vi.fn().mockResolvedValue(bad) as never;
+    await expect(makeProvider().embed(['hello'])).rejects.toMatchObject({
+      code: 'INVALID_EMBEDDING_RESPONSE',
+    });
   });
 });
 
@@ -166,6 +174,7 @@ describe('ingestion chunk insert batching', () => {
       scanner: { scan: vi.fn().mockResolvedValue({ verdict: 'CLEAN', scanner: 'test' }) } as any,
       extractor: vi.fn().mockResolvedValue(sections),
       embeddings: {
+        kind: 'test',
         model: 'test-model',
         version: '1',
         dimensions: DIMENSIONS,

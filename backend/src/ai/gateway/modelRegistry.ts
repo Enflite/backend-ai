@@ -9,7 +9,8 @@ export interface ApprovedModel {
   provider: string;
   endpoint: string;
   model_identifier: string;
-  status: 'APPROVED';
+  /** Lifecycle status; the gateway only serves ACTIVE and CANARY models. */
+  status: 'ACTIVE' | 'CANARY';
   license: string | null;
   source: string | null;
   sha256: string | null;
@@ -39,7 +40,7 @@ export async function listApprovedModelsForUser(tenantId: string, userId: string
       tenantId,
       `SELECT DISTINCT ${MODEL_FIELDS}
        FROM models m JOIN model_access ma ON ma.model_id = m.id AND ma.tenant_id = $1
-       WHERE m.status = 'APPROVED' AND m.enabled AND (ma.user_id = $2 OR ma.role_id = $3)
+       WHERE m.status IN ('ACTIVE', 'CANARY') AND m.enabled AND (ma.user_id = $2 OR ma.role_id = $3)
        ORDER BY m.name ASC`,
       [tenantId, userId, roleId]
     )
@@ -52,7 +53,7 @@ export async function getApprovedModelForUser(modelId: string, tenantId: string,
       tenantId,
       `SELECT DISTINCT ${MODEL_FIELDS}
        FROM models m JOIN model_access ma ON ma.model_id = m.id AND ma.tenant_id = $2
-       WHERE m.id = $1 AND m.status = 'APPROVED' AND m.enabled
+       WHERE m.id = $1 AND m.status IN ('ACTIVE', 'CANARY') AND m.enabled
          AND (ma.user_id = $3 OR ma.role_id = $4)`,
       [modelId, tenantId, userId, roleId]
     )

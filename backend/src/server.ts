@@ -14,7 +14,7 @@ import { requestIdHook } from './requestId.js';
 import { healthRoutes } from './health.js';
 import { authRoutes } from './auth/routes.js';
 import { auditRoutes } from './audit/routes.js';
-import { modelRoutes, modelAdminRoutes } from './ai/gateway/routes.js';
+import { modelRoutes, modelAdminRoutes, modelArtifactRoutes } from './ai/gateway/routes.js';
 import { conversationRoutes } from './conversations/routes.js';
 import { chatRoutes, closeActiveSseStreams } from './chat/routes.js';
 import { documentRoutes } from './documents/routes.js';
@@ -161,6 +161,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(auditRoutes);
       await api.register(modelRoutes);
       await api.register(modelAdminRoutes);
+      await api.register(modelArtifactRoutes);
       await api.register(conversationRoutes);
       await api.register(chatRoutes);
       await api.register(documentRoutes);

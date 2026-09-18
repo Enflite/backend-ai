@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
 const { query, withTx } = vi.hoisted(() => {
@@ -11,11 +11,13 @@ const { query, withTx } = vi.hoisted(() => {
   return { query, withTx };
 });
 const { recordAudit, recordAuditInTx } = vi.hoisted(() => ({ recordAudit: vi.fn(), recordAuditInTx: vi.fn() }));
+const { getPromotionGate } = vi.hoisted(() => ({ getPromotionGate: vi.fn() }));
 // Mutable so each test can act as an AI Admin or an unprivileged user.
 const authState = { permissions: ['model:manage', 'model:use'] as string[] };
 
 vi.mock('../src/db/pool.js', () => ({ query, withTx }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit, recordAuditInTx }));
+vi.mock('../src/eval/compare.js', () => ({ getPromotionGate }));
 vi.mock('../src/auth/middleware.js', () => ({
   requireAuth: (req: any, _reply: any, done: () => void) => {
     req.auth = {
@@ -35,8 +37,9 @@ vi.mock('../src/auth/middleware.js', () => ({
 // The REAL requirePermission middleware is used so the model:manage gate is
 // genuinely exercised (on denial it audits AUTHORIZATION_FAILURE itself).
 
-import { modelAdminRoutes } from '../src/ai/gateway/routes.js';
+import { modelAdminRoutes, modelArtifactRoutes } from '../src/ai/gateway/routes.js';
 import { AppError } from '../src/errors.js';
+import { config } from '../src/config.js';
 
 const MODEL_ID = '55555555-5555-4555-8555-555555555555';
 
@@ -48,7 +51,7 @@ function modelRow(overrides: Record<string, unknown> = {}) {
     provider: 'vllm',
     endpoint: 'http://vllm:8000/v1',
     model_identifier: 'meta-llama/Meta-Llama-3.1-8B-Instruct',
-    status: 'APPROVED',
+    status: 'ACTIVE',
     license: 'llama3.1',
     source: 'meta',
     sha256: null,
@@ -75,6 +78,7 @@ async function app() {
     return reply.status(500).send({ error: { code: 'INTERNAL', message: 'Internal server error' } });
   });
   await fastify.register(modelAdminRoutes);
+  await fastify.register(modelArtifactRoutes);
   return fastify;
 }
 
@@ -99,7 +103,7 @@ describe('GET /admin/models', () => {
       provider: 'vllm',
       endpoint: 'http://vllm:8000/v1',
       modelIdentifier: 'meta-llama/Meta-Llama-3.1-8B-Instruct',
-      status: 'APPROVED',
+      status: 'ACTIVE',
       contextWindow: 131072,
       allowedClassifications: ['PUBLIC', 'INTERNAL'],
       enabled: true,
@@ -222,6 +226,289 @@ describe('PATCH /admin/models/:id', () => {
     });
     expect(res.statusCode).toBe(403);
     expect(query).not.toHaveBeenCalled();
+    await fastify.close();
+  });
+});
+
+describe('POST /admin/models (registration)', () => {
+  function registrationBody(overrides: Record<string, unknown> = {}) {
+    return {
+      name: 'test/new-model',
+      version: '1.0',
+      provider: 'vllm',
+      endpoint: 'http://vllm:8000/v1',
+      modelIdentifier: 'test/new-model',
+      license: 'apache-2.0',
+      source: 'https://huggingface.co/test/new-model',
+      sha256: 'a'.repeat(64),
+      contextWindow: 8192,
+      capabilities: { chat: true },
+      allowedClassifications: ['PUBLIC', 'INTERNAL'],
+      deployment: {},
+      ...overrides,
+    };
+  }
+
+  it('registers a model at REGISTERED: it serves no traffic until promoted', async () => {
+    query.mockResolvedValue({ rows: [modelRow({ status: 'REGISTERED', name: 'test/new-model' })], rowCount: 1 });
+    const fastify = await app();
+    const res = await fastify.inject({ method: 'POST', url: '/admin/models', payload: registrationBody() });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().model).toMatchObject({ name: 'test/new-model', status: 'REGISTERED' });
+    const insertSql = query.mock.calls[0]![0] as string;
+    expect(insertSql).toMatch(/INSERT INTO models/);
+    expect(insertSql).toMatch(/'REGISTERED'/);
+    expect(recordAuditInTx).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'MODEL_REGISTERED', resource: 'model' })
+    );
+    await fastify.close();
+  });
+
+  it('rejects duplicate model names with 409', async () => {
+    query.mockRejectedValue(Object.assign(new Error('duplicate'), { code: '23505' }));
+    const fastify = await app();
+    const res = await fastify.inject({ method: 'POST', url: '/admin/models', payload: registrationBody() });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('MODEL_NAME_EXISTS');
+    await fastify.close();
+  });
+
+  it('rejects unknown providers', async () => {
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST', url: '/admin/models', payload: registrationBody({ provider: 'mystery' }),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('MODEL_PROVIDER_UNSUPPORTED');
+    expect(query).not.toHaveBeenCalled();
+    await fastify.close();
+  });
+
+  it('rejects endpoints outside the server allowlist — no arbitrary egress', async () => {
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST', url: '/admin/models', payload: registrationBody({ endpoint: 'http://evil.test/v1' }),
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('MODEL_ENDPOINT_DENIED');
+    expect(query).not.toHaveBeenCalled();
+    await fastify.close();
+  });
+
+  it('rejects model sources outside the source allowlist', async () => {
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST', url: '/admin/models', payload: registrationBody({ source: 'https://evil.example/x' }),
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('MODEL_SOURCE_DENIED');
+    expect(query).not.toHaveBeenCalled();
+    await fastify.close();
+  });
+
+  it('rejects UNKNOWN as an allowed classification', async () => {
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST', url: '/admin/models',
+      payload: registrationBody({ allowedClassifications: ['UNKNOWN'] }),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(query).not.toHaveBeenCalled();
+    await fastify.close();
+  });
+
+  it('rejects callers without model:manage', async () => {
+    authState.permissions = ['model:use'];
+    const fastify = await app();
+    const res = await fastify.inject({ method: 'POST', url: '/admin/models', payload: registrationBody() });
+    expect(res.statusCode).toBe(403);
+    expect(query).not.toHaveBeenCalled();
+    await fastify.close();
+  });
+});
+
+describe('POST /admin/models/:id/transition', () => {
+  it('walks a legal transition and returns from/to status', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [modelRow({ status: 'REGISTERED' })], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [modelRow({ status: 'DOWNLOADING' })], rowCount: 1 });
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'DOWNLOADING' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().transition).toMatchObject({ fromStatus: 'REGISTERED', toStatus: 'DOWNLOADING' });
+    await fastify.close();
+  });
+
+  it('rejects an illegal jump without touching the model row again', async () => {
+    query.mockResolvedValueOnce({ rows: [modelRow({ status: 'REGISTERED' })], rowCount: 1 });
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'ACTIVE' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('MODEL_TRANSITION_INVALID');
+    expect(query).toHaveBeenCalledTimes(1);
+    await fastify.close();
+  });
+
+  it('approves only when the eval promotion gate passes', async () => {
+    getPromotionGate.mockResolvedValueOnce({ eligible: true, latestRunId: 'run-1' });
+    query
+      .mockResolvedValueOnce({ rows: [modelRow({ status: 'PENDING_APPROVAL' })], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [modelRow({ status: 'APPROVED' })], rowCount: 1 });
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'APPROVED' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().transition.toStatus).toBe('APPROVED');
+    await fastify.close();
+  });
+
+  it('blocks approval when required evals fail — there is no override', async () => {
+    getPromotionGate.mockResolvedValueOnce({ eligible: false, reason: 'P0 failures: 1', latestRunId: null });
+    query.mockResolvedValueOnce({ rows: [modelRow({ status: 'PENDING_APPROVAL' })], rowCount: 1 });
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'APPROVED' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('MODEL_PROMOTION_GATE_FAILED');
+    await fastify.close();
+  });
+
+  it('returns 404 for an unknown model', async () => {
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'DOWNLOADING' },
+    });
+    expect(res.statusCode).toBe(404);
+    await fastify.close();
+  });
+
+  it('rejects malformed ids and unknown statuses', async () => {
+    const fastify = await app();
+    const badId = await fastify.inject({
+      method: 'POST', url: '/admin/models/not-a-uuid/transition', payload: { status: 'DOWNLOADING' },
+    });
+    expect(badId.statusCode).toBe(400);
+    const badStatus = await fastify.inject({
+      method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'BOGUS' },
+    });
+    expect(badStatus.statusCode).toBe(400);
+    expect(query).not.toHaveBeenCalled();
+    await fastify.close();
+  });
+});
+
+describe('/admin/serving-defaults', () => {
+  it('lists the tenant serving defaults', async () => {
+    query.mockResolvedValue({
+      rows: [{ tenantId: '22222222-2222-4222-8222-222222222222', capability: 'chat', modelId: MODEL_ID, updatedBy: 'admin-1', updatedAt: new Date() }],
+      rowCount: 1,
+    });
+    const fastify = await app();
+    const res = await fastify.inject({ method: 'GET', url: '/admin/serving-defaults' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().defaults).toHaveLength(1);
+    await fastify.close();
+  });
+
+  it('sets a default for a servable model and audits it', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [modelRow({ status: 'ACTIVE' })], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ tenantId: '22222222-2222-4222-8222-222222222222', capability: 'chat', modelId: MODEL_ID, updatedBy: 'admin-1', updatedAt: new Date() }],
+        rowCount: 1,
+      });
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'PUT', url: '/admin/serving-defaults/chat', payload: { modelId: MODEL_ID },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().default).toMatchObject({ capability: 'chat', modelId: MODEL_ID });
+    expect(recordAuditInTx).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'MODEL_SERVING_DEFAULT_SET' })
+    );
+    await fastify.close();
+  });
+
+  it('refuses defaults pointing at non-servable models', async () => {
+    query.mockResolvedValueOnce({ rows: [modelRow({ status: 'APPROVED' })], rowCount: 1 });
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'PUT', url: '/admin/serving-defaults/chat', payload: { modelId: MODEL_ID },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('MODEL_NOT_SERVABLE');
+    await fastify.close();
+  });
+});
+
+describe('/admin/models/artifacts (local dev only)', () => {
+  const originalFetch = globalThis.fetch;
+  const originalAllowDev = config.ALLOW_DEV_PROVIDERS;
+  const originalNames = config.OLLAMA_ALLOWED_MODELS;
+
+  beforeEach(() => {
+    config.ALLOW_DEV_PROVIDERS = true;
+    config.OLLAMA_ALLOWED_MODELS = 'llama3.1:8b,nomic-embed-text';
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    config.ALLOW_DEV_PROVIDERS = originalAllowDev;
+    config.OLLAMA_ALLOWED_MODELS = originalNames;
+  });
+
+  it('refuses artifact access when dev providers are disabled', async () => {
+    config.ALLOW_DEV_PROVIDERS = false;
+    const fastify = await app();
+    const res = await fastify.inject({ method: 'GET', url: '/admin/models/artifacts/local' });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('MODEL_ARTIFACT_DEV_ONLY');
+    await fastify.close();
+  });
+
+  it('lists local Ollama models', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ models: [{ name: 'llama3.1:8b' }] }), { status: 200 })
+    ) as never;
+    const fastify = await app();
+    const res = await fastify.inject({ method: 'GET', url: '/admin/models/artifacts/local' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().models).toEqual([
+      { name: 'llama3.1:8b', present: true, sizeBytes: null, details: null },
+    ]);
+    await fastify.close();
+  });
+
+  it('streams pull progress as SSE and audits the request', async () => {
+    const ndjson = [JSON.stringify({ status: 'pulling' }), JSON.stringify({ status: 'success' })].join('\n');
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(ndjson, { status: 200 })) as never;
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST', url: '/admin/models/artifacts/pull', payload: { name: 'llama3.1:8b' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).toContain('data: {"status":"pulling"}');
+    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'MODEL_PULL_REQUESTED' }));
+    await fastify.close();
+  });
+
+  it('refuses to pull a model outside the allowlist', async () => {
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST', url: '/admin/models/artifacts/pull', payload: { name: 'evil:1b' },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('MODEL_SOURCE_DENIED');
+    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'MODEL_PULL_REQUESTED' }));
     await fastify.close();
   });
 });

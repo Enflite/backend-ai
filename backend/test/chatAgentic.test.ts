@@ -23,7 +23,9 @@ const { currentAuth } = vi.hoisted(() => ({
   },
 }));
 
+const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({ resolveServingModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
 vi.mock('../src/ai/gateway/gateway.js', async (importOriginal) => {
@@ -54,7 +56,7 @@ const testModel = {
   provider: 'vllm',
   endpoint: 'http://localhost:8000/v1',
   model_identifier: 'test-model',
-  status: 'APPROVED',
+  status: 'ACTIVE',
   context_window: 8192,
   capabilities: {},
   allowed_classifications: ['PUBLIC', 'INTERNAL'],

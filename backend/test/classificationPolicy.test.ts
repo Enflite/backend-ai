@@ -13,7 +13,9 @@ const { listApprovedModelsForUser, getApprovedModelForUser } = vi.hoisted(() => 
   getApprovedModelForUser: vi.fn(),
 }));
 
+const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({ resolveServingModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({
   listApprovedModelsForUser,
   getApprovedModelForUser,

@@ -5,7 +5,7 @@ vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenant }));
 
 const { embed } = vi.hoisted(() => ({ embed: vi.fn() }));
 vi.mock('../src/documents/ingestion.js', () => ({
-  internalEmbeddingProvider: { model: 'emb', version: '1', dimensions: 3, embed },
+  internalEmbeddingProvider: () => ({ model: 'emb', version: '1', dimensions: 3, embed }),
 }));
 
 import { retrieveAuthorizedContext, setReranker, getReranker } from '../src/rag/retrieval.js';

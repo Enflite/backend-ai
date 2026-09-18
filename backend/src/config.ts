@@ -74,6 +74,32 @@ const envSchema = z.object({
   EMBEDDING_MODEL_VERSION: z.string().default('1'),
   EMBEDDING_API_KEY: z.string().optional().default(''),
   EMBEDDING_DIMENSIONS: z.coerce.number().int().min(1).max(4096).default(1536),
+  // Which embedding backend the factory resolves. 'openai-compatible' is the
+  // production path (vLLM /v1/embeddings or another approved endpoint);
+  // 'ollama' is local-dev only and additionally requires ALLOW_DEV_PROVIDERS.
+  EMBEDDING_PROVIDER: z.enum(['openai-compatible', 'ollama']).default('openai-compatible'),
+  EMBEDDING_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(30000),
+  // ---------------------------------------------------------------------------
+  // Local-dev inference (Ollama). DEV ONLY: ALLOW_DEV_PROVIDERS must be
+  // explicitly enabled, and the gateway still refuses ollama-backed models
+  // unless the server is a dev server. Ollama is a workstation convenience,
+  // never a security boundary and never a production path.
+  // ---------------------------------------------------------------------------
+  ALLOW_DEV_PROVIDERS: z
+    .preprocess(
+      (val) => (val === undefined || val === null || val === '' ? undefined : val === true || val === 'true' || val === '1'),
+      z.boolean()
+    )
+    .default(false),
+  OLLAMA_BASE_URL: z.string().url().default('http://localhost:11434'),
+  OLLAMA_EMBEDDING_MODEL: z.string().min(1).default('nomic-embed-text'),
+  OLLAMA_EMBEDDING_DIMENSIONS: z.coerce.number().int().min(1).max(4096).default(768),
+  // Allowlist for `ollama pull` via the artifact API. No arbitrary model
+  // URLs: only these exact model names may be fetched locally.
+  OLLAMA_ALLOWED_MODELS: z.string().default('llama3.1:8b,nomic-embed-text'),
+  // Allowlist of origins a registry model's `source` URL may point at.
+  // Model registration with any other source origin is rejected.
+  MODEL_SOURCE_ALLOWLIST: z.string().default('https://huggingface.co'),
   OBJECT_STORAGE_ENDPOINT: z.string().url().optional(),
   OBJECT_STORAGE_REGION: z.string().default('us-east-1'),
   OBJECT_STORAGE_BUCKET: z.string().min(1).default('enflite-ai-documents'),

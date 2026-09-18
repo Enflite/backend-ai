@@ -8,6 +8,7 @@ import { CLASSIFICATIONS } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
 import { recordAudit } from '../audit/audit.js';
 import { getApprovedModelForUser, listApprovedModelsForUser } from '../ai/gateway/modelRegistry.js';
+import { resolveServingModel } from '../ai/gateway/modelLifecycle.js';
 
 const idSchema = z.object({ id: z.string().uuid() });
 const createSchema = z.object({
@@ -46,7 +47,12 @@ export async function conversationRoutes(fastify: FastifyInstance): Promise<void
     // PUBLIC, not INTERNAL (which they are not cleared for).
     const classification = body.data.classification ?? (auth.clearance === 'PUBLIC' ? 'PUBLIC' : 'INTERNAL');
     assertClassificationAllowed(auth.clearance, classification);
-    const modelId = body.data.modelId ?? (await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId))[0]?.id;
+    // Admin-configured serving default first (re-verified servable and
+    // authorized on every resolution); legacy first-approved fallback.
+    const modelId =
+      body.data.modelId ??
+      (await resolveServingModel(auth.tenantId, auth.userId, auth.roleId, 'chat'))?.id ??
+      (await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId))[0]?.id;
     if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
     const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
     const result = await tenantQuery(

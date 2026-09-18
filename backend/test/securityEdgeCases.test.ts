@@ -22,7 +22,14 @@ const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 const { currentAuth } = vi.hoisted(() => ({ currentAuth: {} as Record<string, unknown> }));
 
+const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/ai/gateway/modelLifecycle.js', async (importOriginal) => {
+  // Only the resolution helper is stubbed; admin routes need the real
+  // MODEL_STATUSES / transitionModel exports from this module.
+  const actual = await importOriginal<typeof import('../src/ai/gateway/modelLifecycle.js')>();
+  return { ...actual, resolveServingModel };
+});
 // Keep the real sanitizeReason: secret-redaction assertions below run against
 // production code, with only the DB write itself mocked out.
 vi.mock('../src/audit/audit.js', async (importOriginal) => ({
