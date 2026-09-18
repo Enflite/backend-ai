@@ -2,8 +2,11 @@ import Fastify, { FastifyInstance } from 'fastify';
 import helmet from '@fastify/helmet';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
+import cookie from '@fastify/cookie';
+import multipart from '@fastify/multipart';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 import { config } from './config.js';
 import { AppError } from './errors.js';
@@ -14,6 +17,8 @@ import { auditRoutes } from './audit/routes.js';
 import { modelRoutes } from './ai/gateway/routes.js';
 import { conversationRoutes } from './conversations/routes.js';
 import { chatRoutes } from './chat/routes.js';
+import { documentRoutes } from './documents/routes.js';
+import { toolRoutes } from './tools/routes.js';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const fastify = Fastify({
@@ -21,29 +26,46 @@ export async function buildServer(): Promise<FastifyInstance> {
       level: config.NODE_ENV === 'test' ? 'silent' : 'info',
       redact: ['req.headers.authorization', 'req.headers.cookie'],
     },
-    trustProxy: true,
+    trustProxy: config.NODE_ENV === 'production' ? ['127.0.0.1', '::1'] : true,
     bodyLimit: 1048576, // 1MB
   });
 
   // Request ID
   fastify.addHook('onRequest', requestIdHook);
-
-  // Security Headers (CSP off since frontend is separate)
-  await fastify.register(helmet, {
-    contentSecurityPolicy: false,
+  fastify.addHook('onResponse', async (req, reply) => {
+    req.log.info({
+      requestId: req.requestId,
+      traceId: req.traceId,
+      tenantId: req.auth?.tenantId,
+      userId: req.auth?.userId,
+      route: req.routeOptions.url,
+      statusCode: reply.statusCode,
+      latencyMs: reply.elapsedTime,
+    }, 'request completed');
   });
 
-  // CORS
+  await fastify.register(helmet);
+
+  await fastify.register(cookie);
+
+  // CORS is explicit; credentials are never accepted from arbitrary origins.
   await fastify.register(cors, {
+    origin: config.CORS_ORIGIN.split(',').map((origin) => origin.trim()),
     credentials: true,
-    exposedHeaders: ['x-request-id'],
+    exposedHeaders: ['x-request-id', 'x-trace-id'],
   });
 
-  // Rate Limiting (300/min keyed by userId or IP)
+  await fastify.register(multipart, {
+    limits: { files: 1, fileSize: config.MAX_UPLOAD_BYTES, fields: 10 },
+  });
+
+  // Rate limiting is keyed by the opaque session token when present, otherwise IP.
   await fastify.register(rateLimit, {
     max: 300,
     timeWindow: '1 minute',
-    keyGenerator: (req) => req.auth?.userId ?? req.ip,
+    keyGenerator: (req) => req.headers.authorization
+      ? createHash('sha256').update(req.headers.authorization).digest('hex')
+      : req.ip,
   });
 
   // Custom Error Handler
@@ -54,7 +76,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       return reply.status(error.statusCode).send({
         error: {
           code: error.code,
-          message: error.message,
+          message: error instanceof Error ? error.message : 'Request validation failed',
           requestId,
           details: error.details,
         },
@@ -65,7 +87,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       return reply.status(400).send({
         error: {
           code: 'VALIDATION_ERROR',
-          message: error.message,
+          message: error instanceof Error ? error.message : 'Request validation failed',
           requestId,
           details: (error as any).validation,
         },
@@ -91,6 +113,8 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(modelRoutes);
       await api.register(conversationRoutes);
       await api.register(chatRoutes);
+      await api.register(documentRoutes);
+      await api.register(toolRoutes);
     },
     { prefix: '/api/v1' }
   );

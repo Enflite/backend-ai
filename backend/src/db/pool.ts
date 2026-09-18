@@ -30,3 +30,21 @@ export async function withTx<T>(
     client.release();
   }
 }
+
+export async function withTenant<T>(
+  tenantId: string,
+  callback: (client: pg.PoolClient) => Promise<T>
+): Promise<T> {
+  return withTx(async (client) => {
+    await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+    return callback(client);
+  });
+}
+
+export async function tenantQuery<T extends pg.QueryResultRow = any>(
+  tenantId: string,
+  text: string,
+  params?: unknown[]
+): Promise<pg.QueryResult<T>> {
+  return withTenant(tenantId, (client) => client.query<T>(text, params));
+}

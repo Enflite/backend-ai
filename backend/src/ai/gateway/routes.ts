@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { requireAuth } from '../../auth/middleware.js';
 import { requirePermission } from '../../authz/middleware.js';
-import { listApprovedModels } from './modelRegistry.js';
+import { listApprovedModelsForUser } from './modelRegistry.js';
 
 export async function modelRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get(
@@ -9,14 +9,17 @@ export async function modelRoutes(fastify: FastifyInstance): Promise<void> {
     {
       preHandler: [requireAuth, requirePermission('model:use')],
     },
-    async (_req, reply) => {
-      const approved = await listApprovedModels();
+    async (req, reply) => {
+      const auth = req.auth!;
+      const approved = await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId);
       const models = approved.map((m) => ({
         id: m.id,
         name: m.name,
         version: m.version,
         contextWindow: m.context_window,
         capabilities: m.capabilities,
+        allowedClassifications: m.allowed_classifications,
+        provider: m.provider,
       }));
 
       return reply.send({ models });

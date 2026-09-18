@@ -4,11 +4,13 @@ export const CLASSIFICATIONS = [
   'CONFIDENTIAL',
   'PROPRIETARY',
   'CUI',
+  'UNKNOWN',
 ] as const;
 
 export type Classification = (typeof CLASSIFICATIONS)[number];
 
 export function classificationRank(classification: Classification): number {
+  if (classification === 'UNKNOWN') return -1;
   return CLASSIFICATIONS.indexOf(classification);
 }
 
@@ -16,6 +18,7 @@ export function canAccessClassification(
   userClearance: Classification,
   resourceClassification: Classification
 ): boolean {
+  if (userClearance === 'UNKNOWN' || resourceClassification === 'UNKNOWN') return false;
   const userRank = classificationRank(userClearance);
   const resourceRank = classificationRank(resourceClassification);
   if (userRank === -1 || resourceRank === -1) return false;
@@ -87,4 +90,5 @@ export interface AuthContext {
   roleId: string;
   roleName: string;
   permissions: Permission[];
+  sessionId: string;
 }

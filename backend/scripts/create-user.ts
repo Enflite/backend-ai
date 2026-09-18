@@ -101,6 +101,15 @@ async function main(): Promise<void> {
         [user.id, tenantId, roleId]
       );
 
+      // Provision this role's approved models for newly-created tenants.
+      await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+      await client.query(
+        `INSERT INTO model_access (tenant_id, model_id, role_id)
+         SELECT $1, id, $2 FROM models WHERE status = 'APPROVED' AND enabled
+         ON CONFLICT DO NOTHING`,
+        [tenantId, roleId]
+      );
+
       console.log('--- User created/updated successfully ---');
       console.log(`Email:      ${user.email}`);
       console.log(`Role:       ${roleName}`);
