@@ -14,6 +14,9 @@ import { createHash } from 'node:crypto';
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 
+// NOTE: config is imported dynamically (after vi.stubEnv in beforeAll) — a
+// static import would read the environment before the stubs are installed.
+
 const queryMock = vi.fn();
 vi.mock('../src/db/pool.js', () => ({ query: queryMock, tenantQuery: queryMock }));
 
@@ -91,10 +94,30 @@ describe('oidc discovery', () => {
     });
     await expect(oidc.discoverIssuer()).rejects.toMatchObject({ code: 'OIDC_ISSUER_MISMATCH' });
   });
+
+  it('appends the well-known path to an issuer with a path (realm-style issuers)', async () => {
+    const { config } = await import('../src/config.js');
+    const originalIssuer = config.OIDC_ISSUER;
+    (config as Record<string, unknown>).OIDC_ISSUER = 'https://idp.example.com/realms/enflite';
+    const realmDiscovery = { ...DISCOVERY, issuer: 'https://idp.example.com/realms/enflite' };
+    try {
+      oidc.clearOidcDiscoveryCache();
+      fetchMock.mockImplementation(async (url: unknown) => {
+        const target = String(url);
+        expect(target).toBe('https://idp.example.com/realms/enflite/.well-known/openid-configuration');
+        return { ok: true, status: 200, json: async () => realmDiscovery };
+      });
+      const doc = await oidc.discoverIssuer();
+      expect(doc.issuer).toBe('https://idp.example.com/realms/enflite');
+    } finally {
+      (config as Record<string, unknown>).OIDC_ISSUER = originalIssuer;
+      oidc.clearOidcDiscoveryCache();
+    }
+  });
 });
 
 describe('oidc authorize URL', () => {
-  it('stores the verifier and builds a PKCE authorization URL', async () => {
+  it('stores the verifier and nonce and builds a PKCE authorization URL', async () => {
     queryMock.mockResolvedValue({ rows: [] });
     const { url, state } = await oidc.buildAuthorizeUrl();
     const parsed = new URL(url);
@@ -104,20 +127,29 @@ describe('oidc authorize URL', () => {
     expect(parsed.searchParams.get('code_challenge_method')).toBe('S256');
     expect(parsed.searchParams.get('state')).toBe(state);
     expect(parsed.searchParams.get('code_challenge')).toHaveLength(43);
-    // Verifier persisted keyed by state (INSERT), plus the expiry cleanup (DELETE).
+    const nonce = parsed.searchParams.get('nonce');
+    expect(nonce).toHaveLength(43);
+    // Verifier + nonce persisted keyed by state (INSERT), plus the expiry
+    // cleanup (DELETE).
     expect(queryMock).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO oidc_auth_requests'), expect.any(Array));
     const insertArgs = queryMock.mock.calls.find((call) => String(call[0]).includes('INSERT'))![1] as string[];
     expect(insertArgs[0]).toBe(state);
     expect(insertArgs[1]).toHaveLength(43);
+    expect(insertArgs[2]).toBe(nonce);
   });
 });
 
 describe('oidc state consumption', () => {
-  it('is single-use: a consumed state is deleted', async () => {
-    queryMock.mockResolvedValueOnce({ rows: [{ code_verifier: 'v' }] });
-    expect(await oidc.consumeOidcState('state-1')).toBe('v');
+  it('is single-use: a consumed state returns the verifier and nonce, then nothing', async () => {
+    queryMock.mockResolvedValueOnce({ rows: [{ code_verifier: 'v', nonce: 'n' }] });
+    expect(await oidc.consumeOidcState('state-1')).toEqual({ verifier: 'v', nonce: 'n' });
     queryMock.mockResolvedValueOnce({ rows: [] });
     expect(await oidc.consumeOidcState('state-1')).toBeNull();
+  });
+
+  it('rejects a state row with no nonce (pre-nonce issuance)', async () => {
+    queryMock.mockResolvedValueOnce({ rows: [{ code_verifier: 'v', nonce: null }] });
+    expect(await oidc.consumeOidcState('state-old')).toBeNull();
   });
 });
 
@@ -171,12 +203,25 @@ describe('oidc ID token verification', () => {
         .sign(privateKey);
   });
 
-  it('accepts a valid token and extracts email + groups', async () => {
-    const idToken = await sign({ sub: 'user-123', email: 'jake@example.com', groups: ['sso-admins'] });
-    const claims = await oidc.verifyIdToken(idToken);
+  it('accepts a valid token, checks the nonce, and extracts email + groups', async () => {
+    const idToken = await sign({ sub: 'user-123', email: 'jake@example.com', groups: ['sso-admins'], nonce: 'nonce-1' });
+    const claims = await oidc.verifyIdToken(idToken, 'nonce-1');
+    expect(claims.issuer).toBe('https://idp.example.com');
     expect(claims.sub).toBe('user-123');
     expect(claims.email).toBe('jake@example.com');
     expect(claims.groups).toEqual(['sso-admins']);
+  });
+
+  it('rejects a token whose nonce does not match the authorization request', async () => {
+    const idToken = await sign({ sub: 'user-123', nonce: 'attacker-nonce' });
+    await expect(oidc.verifyIdToken(idToken, 'nonce-1')).rejects.toMatchObject({ code: 'OIDC_INVALID_ID_TOKEN' });
+  });
+
+  it('rejects a token with a missing or empty subject', async () => {
+    const noSub = await sign({ email: 'jake@example.com' });
+    await expect(oidc.verifyIdToken(noSub)).rejects.toMatchObject({ code: 'OIDC_INVALID_ID_TOKEN' });
+    const emptySub = await sign({ sub: '' });
+    await expect(oidc.verifyIdToken(emptySub)).rejects.toMatchObject({ code: 'OIDC_INVALID_ID_TOKEN' });
   });
 
   it('rejects a token with the wrong audience', async () => {
@@ -218,6 +263,32 @@ describe('oidc userinfo fallback', () => {
     const info = await oidc.fetchUserinfo('access-token');
     expect(info.email).toBe('jake@example.com');
     expect(info.groups).toEqual(['sso-admins']);
+  });
+
+  it('reads email/name from configurable claims', async () => {
+    const { config } = await import('../src/config.js');
+    const originalEmail = config.OIDC_EMAIL_CLAIM;
+    const originalName = config.OIDC_NAME_CLAIM;
+    (config as Record<string, unknown>).OIDC_EMAIL_CLAIM = 'mail';
+    (config as Record<string, unknown>).OIDC_NAME_CLAIM = 'display_name';
+    try {
+      fetchMock.mockImplementation(async (url: unknown) => {
+        const target = String(url);
+        if (target.includes('/.well-known/openid-configuration')) {
+          return { ok: true, status: 200, json: async () => DISCOVERY };
+        }
+        if (target === DISCOVERY.userinfo_endpoint) {
+          return { ok: true, status: 200, json: async () => ({ mail: 'jake@example.com', display_name: 'Jake' }) };
+        }
+        throw new Error(`unexpected fetch: ${target}`);
+      });
+      const info = await oidc.fetchUserinfo('access-token');
+      expect(info.email).toBe('jake@example.com');
+      expect(info.name).toBe('Jake');
+    } finally {
+      (config as Record<string, unknown>).OIDC_EMAIL_CLAIM = originalEmail;
+      (config as Record<string, unknown>).OIDC_NAME_CLAIM = originalName;
+    }
   });
 });
 

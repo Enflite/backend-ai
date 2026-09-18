@@ -4,23 +4,28 @@
  * The primary enterprise login path, alongside the existing password login.
  * The flow:
  *
- *   1. GET /auth/oidc/login → server creates a state + PKCE pair, stores the
- *      verifier server-side (single-use, 10-minute expiry), and redirects
- *      the browser to the IdP's authorization endpoint.
+ *   1. GET /auth/oidc/login → server creates a state + PKCE pair + nonce,
+ *      stores the verifier and nonce server-side (single-use, 10-minute
+ *      expiry), and redirects the browser to the IdP's authorization
+ *      endpoint.
  *   2. The IdP authenticates the user and redirects back to
  *      GET /auth/oidc/callback?code=…&state=….
  *   3. The server validates the state (single-use lookup), exchanges the
  *      code for tokens, verifies the ID token signature against the IdP's
- *      JWKS (issuer + audience + expiry checked by jose), extracts
- *      email/groups, auto-provisions the user into the existing tenant/role
- *      model, and issues a session through the normal session machinery
+ *      JWKS (issuer + audience + expiry + subject + nonce checked),
+ *      extracts email/groups, auto-provisions the user into the existing
+ *      tenant/role model keyed by the verified (issuer, subject) identity,
+ *      and issues a session through the normal session machinery
  *      (createSession + refresh cookie) — session/refresh semantics are
  *      unchanged from password login.
  *
  * Security notes:
  *  - PKCE (S256) is always used, even for confidential clients.
- *  - The ID token is verified cryptographically; userinfo is a fallback
+ *  - The ID token is verified cryptographically, including the nonce
+ *    binding it to the authorization request; userinfo is a fallback
  *    for email/groups only, never for identity.
+ *  - Identity is the verified (issuer, subject) pair — email is
+ *    provisioning data only and never the identity key.
  *  - Group→role mapping is config-driven; unknown groups and mappings to
  *    nonexistent roles fail closed to the least-privilege 'User' role.
  *  - Tokens leave the server only in the callback redirect's URL fragment
@@ -46,6 +51,11 @@ export interface OidcClaims {
   email?: string;
   name?: string;
   groups: string[];
+}
+
+export interface VerifiedOidcIdentity extends OidcClaims {
+  /** The issuer the discovery document was verified against. */
+  issuer: string;
 }
 
 const DISCOVERY_CACHE_TTL_MS = 60 * 60 * 1000;
@@ -94,7 +104,14 @@ export async function discoverIssuer(): Promise<OidcDiscovery> {
     return discoveryCache.doc;
   }
   const issuer = config.OIDC_ISSUER!;
-  const wellKnown = new URL('/.well-known/openid-configuration', issuer.endsWith('/') ? issuer : `${issuer}/`);
+  // OIDC Discovery §3: the well-known URI is the issuer identifier with
+  // `/.well-known/openid-configuration` appended to its path — an issuer
+  // with a path (e.g. https://idp/realms/enflite) discovers at
+  // https://idp/realms/enflite/.well-known/openid-configuration. Building
+  // it as an absolute path against the issuer origin would silently drop
+  // the realm path and discover the wrong tenant's document.
+  const base = issuer.endsWith('/') ? issuer.slice(0, -1) : issuer;
+  const wellKnown = `${base}/.well-known/openid-configuration`;
   let response: Response;
   try {
     response = await fetch(wellKnown, { signal: AbortSignal.timeout(OIDC_HTTP_TIMEOUT_MS) });
@@ -140,44 +157,51 @@ export function createOidcState(): string {
 }
 
 /**
- * Starts an OIDC login: persists the PKCE verifier keyed by state
- * (single-use, 10 minutes) and returns the IdP authorization URL.
+ * Starts an OIDC login: persists the PKCE verifier and the nonce keyed by
+ * state (single-use, 10 minutes) and returns the IdP authorization URL.
  */
 export async function buildAuthorizeUrl(): Promise<{ url: string; state: string }> {
   oidcEnabledOrThrow();
   const discovery = await discoverIssuer();
   const state = createOidcState();
   const { verifier, challenge } = createPkcePair();
+  const nonce = createOidcState();
   // Opportunistic cleanup of expired login attempts on each new one.
   await query('DELETE FROM oidc_auth_requests WHERE expires_at < NOW()');
-  await query('INSERT INTO oidc_auth_requests (state, code_verifier, expires_at) VALUES ($1, $2, NOW() + ($3 || \' milliseconds\')::interval)', [
-    state,
-    verifier,
-    AUTH_REQUEST_TTL_MS,
-  ]);
+  await query(
+    'INSERT INTO oidc_auth_requests (state, code_verifier, nonce, expires_at) VALUES ($1, $2, $3, NOW() + ($4 || \' milliseconds\')::interval)',
+    [state, verifier, nonce, AUTH_REQUEST_TTL_MS]
+  );
   const url = new URL(discovery.authorization_endpoint);
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('client_id', config.OIDC_CLIENT_ID!);
   url.searchParams.set('redirect_uri', config.OIDC_REDIRECT_URI!);
   url.searchParams.set('scope', config.OIDC_SCOPES);
   url.searchParams.set('state', state);
+  url.searchParams.set('nonce', nonce);
   url.searchParams.set('code_challenge', challenge);
   url.searchParams.set('code_challenge_method', 'S256');
   return { url: url.toString(), state };
 }
 
+export interface ConsumedOidcState {
+  verifier: string;
+  nonce: string;
+}
+
 /**
  * Consumes the state (single-use: the row is deleted) and returns the stored
- * PKCE verifier, or null when the state is unknown or expired.
+ * PKCE verifier and nonce, or null when the state is unknown or expired.
  */
-export async function consumeOidcState(state: string): Promise<string | null> {
+export async function consumeOidcState(state: string): Promise<ConsumedOidcState | null> {
   const row = (
-    await query<{ code_verifier: string }>(
-      'DELETE FROM oidc_auth_requests WHERE state = $1 AND expires_at > NOW() RETURNING code_verifier',
+    await query<{ code_verifier: string; nonce: string | null }>(
+      'DELETE FROM oidc_auth_requests WHERE state = $1 AND expires_at > NOW() RETURNING code_verifier, nonce',
       [state]
     )
   ).rows[0];
-  return row?.code_verifier ?? null;
+  if (!row || !row.nonce) return null;
+  return { verifier: row.code_verifier, nonce: row.nonce };
 }
 
 export interface OidcTokenSet {
@@ -228,14 +252,19 @@ function asStringArray(value: unknown): string[] {
 
 /**
  * Verifies the ID token signature against the IdP JWKS and validates
- * issuer, audience, and expiry. Returns the identity claims the platform
- * trusts: sub, email, name, groups.
+ * issuer, audience, expiry, subject, and — when an expected nonce is
+ * supplied — the nonce (replay protection binding this token to the
+ * authorization request that produced it). Returns the identity claims the
+ * platform trusts: sub, email, name, groups.
+ *
+ * Identity is the verified (issuer, sub) pair. The email claim is
+ * provisioning data only and never the identity key.
  *
  * The JWKS JSON is fetched through the same stub-able global fetch as the
  * rest of this module (jose's remote-JWKS helper bypasses global fetch in
  * Node, which would make timeouts and tests depend on raw https).
  */
-export async function verifyIdToken(idToken: string): Promise<OidcClaims> {
+export async function verifyIdToken(idToken: string, expectedNonce?: string): Promise<VerifiedOidcIdentity> {
   oidcEnabledOrThrow();
   const discovery = await discoverIssuer();
   const keySet = await getJwksKeySet(discovery.jwks_uri);
@@ -248,12 +277,21 @@ export async function verifyIdToken(idToken: string): Promise<OidcClaims> {
   } catch {
     throw Errors.unauthorized('OIDC_INVALID_ID_TOKEN', 'Identity token verification failed');
   }
-  const email = typeof payload.email === 'string' ? payload.email : undefined;
-  const name = typeof payload.name === 'string' ? payload.name : undefined;
+  if (typeof payload.sub !== 'string' || payload.sub.length === 0) {
+    throw Errors.unauthorized('OIDC_INVALID_ID_TOKEN', 'Identity token has no subject');
+  }
+  if (expectedNonce !== undefined && payload.nonce !== expectedNonce) {
+    throw Errors.unauthorized('OIDC_INVALID_ID_TOKEN', 'Identity token nonce mismatch');
+  }
+  const claimString = (name: string): string | undefined => {
+    const value = payload[name];
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+  };
   return {
-    sub: String(payload.sub ?? ''),
-    email,
-    name,
+    issuer: discovery.issuer,
+    sub: payload.sub,
+    email: claimString(config.OIDC_EMAIL_CLAIM),
+    name: claimString(config.OIDC_NAME_CLAIM),
     groups: asStringArray(payload[config.OIDC_GROUP_CLAIM]),
   };
 }
@@ -276,9 +314,13 @@ export async function fetchUserinfo(accessToken: string): Promise<Partial<OidcCl
   }
   if (!response.ok) return {};
   const info = (await response.json()) as Record<string, unknown>;
+  const claimString = (name: string): string | undefined => {
+    const value = info[name];
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+  };
   return {
-    email: typeof info.email === 'string' ? info.email : undefined,
-    name: typeof info.name === 'string' ? info.name : undefined,
+    email: claimString(config.OIDC_EMAIL_CLAIM),
+    name: claimString(config.OIDC_NAME_CLAIM),
     groups: asStringArray(info[config.OIDC_GROUP_CLAIM]),
   };
 }

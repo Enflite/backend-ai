@@ -14,7 +14,7 @@
 import { randomBytes } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { config, parseExpiresInToMs } from '../config.js';
-import { query } from '../db/pool.js';
+import { query, withTx } from '../db/pool.js';
 import { Errors, AppError } from '../errors.js';
 import { recordAudit } from '../audit/audit.js';
 import { createSession, setRefreshCookie } from './sessions.js';
@@ -40,36 +40,113 @@ function failedLoginRedirect(reply: FastifyReply, code: string): void {
   frontendRedirect(reply, `error=${encodeURIComponent(code)}`);
 }
 
-async function findOrProvisionUser(claims: OidcClaims, roleName: string) {
-  const email = claims.email!.toLowerCase();
+function isUniqueViolation(error: unknown): boolean {
+  return !!error && typeof error === 'object' && (error as { code?: unknown }).code === '23505';
+}
+
+async function findUserById(id: string): Promise<{ id: string; is_active: boolean } | undefined> {
+  return (await query<{ id: string; is_active: boolean }>('SELECT id, is_active FROM users WHERE id = $1', [id])).rows[0];
+}
+
+function requireActive(user: { id: string; is_active: boolean } | undefined): string {
+  if (!user) throw Errors.internal('OIDC identity points at a missing user', undefined, 'OIDC_ORPHAN_IDENTITY');
+  if (!user.is_active) throw Errors.forbidden('ACCOUNT_DISABLED', 'Account is disabled');
+  return user.id;
+}
+
+/**
+ * Resolves the verified (issuer, subject) pair to a user id, provisioning
+ * on first login. Identity is the IdP's stable subject — email is
+ * provisioning data only (it changes and gets reassigned, so it must never
+ * merge or split identities).
+ */
+async function findOrProvisionUserId(issuer: string, claims: OidcClaims): Promise<string> {
   const existing = (
-    await query<{ id: string; is_active: boolean }>('SELECT id, is_active FROM users WHERE lower(email) = $1', [email])
+    await query<{ user_id: string }>('SELECT user_id FROM oidc_identities WHERE issuer = $1 AND subject = $2', [
+      issuer,
+      claims.sub,
+    ])
   ).rows[0];
   if (existing) {
-    if (!existing.is_active) throw Errors.forbidden('ACCOUNT_DISABLED', 'Account is disabled');
-    return existing.id;
+    const user = await findUserById(existing.user_id);
+    if (user) return requireActive(user);
+    // Stale mapping (the user row is gone): drop it and provision fresh.
+    await query('DELETE FROM oidc_identities WHERE issuer = $1 AND subject = $2', [issuer, claims.sub]);
   }
-  // First login: auto-provision. The password hash is a deliberately unusable
-  // marker — password login can never succeed for it (verifyPassword only
-  // accepts $argon2… hashes) — and the clearance is least-privilege.
-  const id = (
-    await query<{ id: string }>(
-      `INSERT INTO users (email, password_hash, display_name, clearance, is_active)
-       VALUES ($1, $2, $3, $4, true) RETURNING id`,
-      [email, `oidc-managed-${randomBytes(16).toString('hex')}`, claims.name ?? email, config.OIDC_DEFAULT_CLEARANCE]
-    )
-  ).rows[0]!.id;
-  const roleId = (
-    await query<{ id: string }>('SELECT id FROM roles WHERE name = $1', [roleName])
-  ).rows[0]?.id;
+  // First login: auto-provision the user and the identity mapping in one
+  // transaction. The password hash is a deliberately unusable marker —
+  // password login can never succeed for it (verifyPassword only accepts
+  // $argon2… hashes) — and the clearance is least-privilege.
+  const email = claims.email!.toLowerCase();
+  try {
+    return await withTx(async (client) => {
+      // Serialize concurrent first-logins for the same IdP identity: the
+      // loser waits here, then sees the winner's committed row below —
+      // no duplicate users, no failed logins.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))', [issuer, claims.sub]);
+      const raced = (
+        await client.query<{ user_id: string }>(
+          'SELECT user_id FROM oidc_identities WHERE issuer = $1 AND subject = $2',
+          [issuer, claims.sub]
+        )
+      ).rows[0];
+      if (raced) return requireActive(await findUserById(raced.user_id));
+      const userId = (
+        await client.query<{ id: string }>(
+          `INSERT INTO users (email, password_hash, display_name, clearance, is_active)
+           VALUES ($1, $2, $3, $4, true) RETURNING id`,
+          [email, `oidc-managed-${randomBytes(16).toString('hex')}`, claims.name ?? email, config.OIDC_DEFAULT_CLEARANCE]
+        )
+      ).rows[0]!.id;
+      await client.query('INSERT INTO oidc_identities (issuer, subject, user_id) VALUES ($1, $2, $3)', [
+        issuer,
+        claims.sub,
+        userId,
+      ]);
+      return userId;
+    });
+  } catch (error) {
+    // Backstop: if the advisory lock didn't cover the race (e.g. two
+    // app instances against databases without lock visibility — not the
+    // case for a single Postgres, but cheap to handle), the unique
+    // constraint on (issuer, subject) still prevents a duplicate
+    // identity: roll back and re-read the winner.
+    if (isUniqueViolation(error)) {
+      const winner = (
+        await query<{ user_id: string }>('SELECT user_id FROM oidc_identities WHERE issuer = $1 AND subject = $2', [
+          issuer,
+          claims.sub,
+        ])
+      ).rows[0];
+      if (winner) return requireActive(await findUserById(winner.user_id));
+    }
+    throw error;
+  }
+}
+
+const MEMBERSHIP_SQL = `SELECT m.tenant_id, t.name AS tenant_name, r.id AS role_id, r.name AS role_name
+   FROM memberships m JOIN tenants t ON t.id = m.tenant_id JOIN roles r ON r.id = m.role_id
+   WHERE m.user_id = $1 AND m.tenant_id = $2`;
+
+/**
+ * Ensures the user is a member of the default SSO tenant. New SSO users get
+ * the mapped role; existing members keep their admin-managed role (role
+ * changes are never silently rewritten by a login).
+ */
+async function ensureDefaultTenantMembership(userId: string, roleName: string): Promise<MembershipRow> {
+  const existing = (await query<MembershipRow>(MEMBERSHIP_SQL, [userId, config.OIDC_DEFAULT_TENANT_ID])).rows[0];
+  if (existing) return existing;
+  const roleId = (await query<{ id: string }>('SELECT id FROM roles WHERE name = $1', [roleName])).rows[0]?.id;
   if (roleId) {
     await query('INSERT INTO memberships (user_id, tenant_id, role_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [
-      id,
+      userId,
       config.OIDC_DEFAULT_TENANT_ID,
       roleId,
     ]);
   }
-  return id;
+  const membership = (await query<MembershipRow>(MEMBERSHIP_SQL, [userId, config.OIDC_DEFAULT_TENANT_ID])).rows[0];
+  if (!membership) throw Errors.internal('OIDC membership provisioning failed', undefined, 'OIDC_MEMBERSHIP_FAILED');
+  return membership;
 }
 
 export async function oidcRoutes(fastify: FastifyInstance): Promise<void> {
@@ -122,12 +199,12 @@ export async function oidcRoutes(fastify: FastifyInstance): Promise<void> {
     }
     // Single-use, expiry-checked state lookup. A replayed or forged state
     // simply finds no row.
-    const verifier = await consumeOidcState(state);
-    if (!verifier) return fail('invalid_state');
+    const consumed = await consumeOidcState(state);
+    if (!consumed) return fail('invalid_state');
 
     try {
-      const tokens = await exchangeCode(code, verifier);
-      const idClaims = await verifyIdToken(tokens.idToken);
+      const tokens = await exchangeCode(code, consumed.verifier);
+      const idClaims = await verifyIdToken(tokens.idToken, consumed.nonce);
       let email = idClaims.email;
       let groups = idClaims.groups;
       if (!email || groups.length === 0) {
@@ -139,19 +216,11 @@ export async function oidcRoutes(fastify: FastifyInstance): Promise<void> {
       const claims: OidcClaims = { ...idClaims, email };
 
       // Group→role mapping; unknown groups / nonexistent mapped roles fall
-      // back to 'User'. Only new users get the mapped role: an existing
-      // membership keeps its admin-managed role.
+      // back to 'User'. The mapped role applies to newly provisioned
+      // memberships only: existing memberships keep their admin-managed role.
       const mappedRole = await resolveInternalRole(groups);
-      const userId = await findOrProvisionUser(claims, mappedRole ?? 'User');
-      const membership = (
-        await query<MembershipRow>(
-          `SELECT m.tenant_id, t.name AS tenant_name, r.id AS role_id, r.name AS role_name
-           FROM memberships m JOIN tenants t ON t.id = m.tenant_id JOIN roles r ON r.id = m.role_id
-           WHERE m.user_id = $1 AND m.tenant_id = $2`,
-          [userId, config.OIDC_DEFAULT_TENANT_ID]
-        )
-      ).rows[0];
-      if (!membership) throw Errors.forbidden('NO_TENANT_MEMBERSHIP', 'No tenant membership');
+      const userId = await findOrProvisionUserId(idClaims.issuer, claims);
+      const membership = await ensureDefaultTenantMembership(userId, mappedRole ?? 'User');
 
       const user = (
         await query('SELECT id, email, display_name, is_active, clearance FROM users WHERE id = $1', [userId])
@@ -174,7 +243,13 @@ export async function oidcRoutes(fastify: FastifyInstance): Promise<void> {
         `access_token=${encodeURIComponent(session.accessToken)}&token_type=Bearer&expires_in=${Math.floor(parseExpiresInToMs(config.JWT_EXPIRES_IN) / 1000)}`
       );
     } catch (error) {
-      if (error instanceof AppError) throw error;
+      // Browser-facing failures always redirect to the frontend with a
+      // generic, audited error code: the callback is a navigation endpoint,
+      // so a JSON error page would strand the user. Internal error codes
+      // never reach the URL fragment.
+      if (error instanceof AppError) {
+        return fail(error.code === 'ACCOUNT_DISABLED' ? 'account_disabled' : 'login_failed');
+      }
       return fail('login_failed');
     }
   });
