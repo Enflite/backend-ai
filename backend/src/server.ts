@@ -15,6 +15,7 @@ import { requestIdHook } from './requestId.js';
 import { healthRoutes } from './health.js';
 import { metricsRoutes, recordHttpRequest } from './observability/metrics.js';
 import { authRoutes } from './auth/routes.js';
+import { oidcRoutes } from './auth/oidcRoutes.js';
 import { auditRoutes } from './audit/routes.js';
 import { modelRoutes, modelAdminRoutes, modelArtifactRoutes } from './ai/gateway/routes.js';
 import { conversationRoutes } from './conversations/routes.js';
@@ -213,6 +214,7 @@ export async function buildServer(): Promise<FastifyInstance> {
     async (api) => {
       await api.register(healthRoutes);
       await api.register(authRoutes);
+      await api.register(oidcRoutes);
       await api.register(auditRoutes);
       await api.register(modelRoutes);
       await api.register(modelAdminRoutes);
