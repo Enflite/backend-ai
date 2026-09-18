@@ -4,6 +4,7 @@ import { config } from '../config.js';
 import { query, tenantQuery } from '../db/pool.js';
 import { Errors } from '../errors.js';
 import { IngestionCanceledError, ingestDocument } from './ingestion.js';
+import { recordIngestionJob } from '../observability/metrics.js';
 
 /**
  * queue.ts — dedicated ingestion worker pool.
@@ -416,7 +417,7 @@ async function markJobCanceled(job: ClaimedJob, code: string): Promise<void> {
   });
 }
 
-async function handleJobFailure(job: ClaimedJob, error: unknown): Promise<void> {
+async function handleJobFailure(job: ClaimedJob, error: unknown): Promise<'quarantined' | 'failed'> {
   const code = safeCode(error);
   const maxAttempts = config.INGEST_MAX_ATTEMPTS;
   if (job.attempts >= maxAttempts) {
@@ -445,7 +446,7 @@ async function handleJobFailure(job: ClaimedJob, error: unknown): Promise<void> 
       reason: code,
       metadata: { attempts: job.attempts, maxAttempts },
     });
-    return;
+    return 'quarantined';
   }
   // Retryable failure: back to PENDING with exponential backoff + jitter.
   const delayMs = computeRetryDelayMs(job.attempts);
@@ -476,10 +477,12 @@ async function handleJobFailure(job: ClaimedJob, error: unknown): Promise<void> 
   }, delayMs);
   // A scheduled retry must never hold the process open on its own.
   timer.unref?.();
+  return 'failed';
 }
 
 async function executeJob(job: ClaimedJob): Promise<void> {
   trackJobStart();
+  const jobStart = Date.now();
   try {
     // Honor a cancel that landed between claim and execution.
     if (await isCancelRequested(job)) {
@@ -501,6 +504,7 @@ async function executeJob(job: ClaimedJob): Promise<void> {
         "UPDATE document_ingestion_jobs SET status = 'SUCCEEDED', updated_at = NOW() WHERE id = $1",
         [job.id]
       );
+      recordIngestionJob('processed', (Date.now() - jobStart) / 1000);
       await recordAudit({
         ...auditBase(job),
         action: status === 'QUARANTINED' ? 'DOCUMENT_QUARANTINED' : 'DOCUMENT_INGESTION_COMPLETED',
@@ -513,7 +517,8 @@ async function executeJob(job: ClaimedJob): Promise<void> {
         await markJobCanceled(job, 'INGESTION_CANCELED');
         return;
       }
-      await handleJobFailure(job, error);
+      const outcome = await handleJobFailure(job, error);
+      recordIngestionJob(outcome, (Date.now() - jobStart) / 1000);
     }
   } finally {
     trackJobEnd();
@@ -577,6 +582,7 @@ export async function enqueueIngestion(request: QueueRequest): Promise<string> {
     );
     const jobId = inserted.rows[0]?.id;
     if (jobId) {
+      recordIngestionJob('enqueued');
       dispatchJob(request);
       return jobId;
     }

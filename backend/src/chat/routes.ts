@@ -17,6 +17,7 @@ import { runToolCallWithRecovery } from './toolRecovery.js';
 import { canModelProcess } from '../policy/engine.js';
 import { config } from '../config.js';
 import { createChatConcurrencyLimiter, replyBusy } from '../ai/gateway/limits.js';
+import { recordChatTurn, recordRetrieval } from '../observability/metrics.js';
 
 const chatBodySchema = z.object({
   conversationId: z.string().uuid().optional(),
@@ -245,6 +246,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     config: { rateLimit: { max: config.CHAT_RATE_LIMIT_PER_MIN, timeWindow: '1 minute' } },
   }, async (req, reply) => {
     const auth = req.auth!;
+    const turnStart = Date.now();
     const parsed = chatBodySchema.safeParse(req.body);
     if (!parsed.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid chat request body', parsed.error.format());
 
@@ -308,7 +310,15 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
 
     let citations: Awaited<ReturnType<typeof retrieveAuthorizedContext>>['citations'] = [];
     if (parsed.data.documentIds?.length) {
-      const retrieval = await retrieveAuthorizedContext(auth, parsed.data.content, parsed.data.documentIds);
+      const retrievalStart = Date.now();
+      let retrieval: Awaited<ReturnType<typeof retrieveAuthorizedContext>>;
+      try {
+        retrieval = await retrieveAuthorizedContext(auth, parsed.data.content, parsed.data.documentIds);
+      } catch (error) {
+        recordRetrieval('error', (Date.now() - retrievalStart) / 1000);
+        throw error;
+      }
+      recordRetrieval(retrieval.context ? 'hit' : 'empty', (Date.now() - retrievalStart) / 1000);
       citations = retrieval.citations;
       if (retrieval.context) {
         history.pop();
@@ -354,6 +364,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     // cannot leak.
     const concurrencySlot = chatConcurrency.tryAcquire(auth.tenantId, auth.userId);
     if (!concurrencySlot.ok) {
+      recordChatTurn(model.name, 'rate_limited', (Date.now() - turnStart) / 1000);
       return replyBusy(reply, concurrencySlot.retryAfterSeconds);
     }
 
@@ -446,6 +457,10 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     // persisted message gets stream_interrupted metadata so a truncated
     // reply is never mistaken for a finished one.
     let streamInterrupted = false;
+    // Set when the stream's try block throws: the turn outcome for metrics is
+    // 'error' even when no partial content was produced (streamInterrupted
+    // only covers the partial-output case).
+    let turnFailed = false;
     let truncatedByCap = false;
     let toolIterations = 0;
     // The working message list grows as the agentic loop appends tool calls
@@ -585,6 +600,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
         });
       }
     } catch (error) {
+      turnFailed = true;
       if (content) streamInterrupted = true;
       const code = error instanceof AppError ? error.code : 'STREAM_ERROR';
       await send('error', { code, message: error instanceof AppError ? error.message : 'Model request failed', requestId: req.requestId });
@@ -605,6 +621,14 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
         telemetry.fallbackUsed && telemetry.fallbackModelId ? telemetry.fallbackModelId : modelId;
       const servingModelName =
         telemetry.fallbackUsed && telemetry.fallbackModelName ? telemetry.fallbackModelName : model.name;
+      // Domain RED metric for the turn: outcome reflects what the user
+      // experienced (completed / error / aborted by disconnect).
+      recordChatTurn(
+        servingModelName,
+        clientDisconnected ? 'aborted' : turnFailed || streamInterrupted ? 'error' : 'completed',
+        (Date.now() - turnStart) / 1000,
+        telemetry.timeToFirstTokenMs !== undefined ? telemetry.timeToFirstTokenMs / 1000 : undefined
+      );
       if (content) {
         // Stream status travels in metadata, never in the message text: a
         // reconnecting client reading history can distinguish a completed

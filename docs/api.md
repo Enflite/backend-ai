@@ -13,7 +13,8 @@ tokens in the `session` cookie. See `docs/adr/010-server-side-sessions.md`.
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/health` (also at `/api/v1/health`) | none | Liveness probe |
-| GET | `/ready` (also at `/api/v1/ready`) | none | Readiness probe (DB reachable) |
+| GET | `/ready` (also at `/api/v1/ready`) | none | Readiness: database (critical) + object storage (critical when configured) + embeddings (non-critical); `503` with per-dependency detail when a critical check fails |
+| GET | `/metrics` | none in dev; 404 in production unless `METRICS_PUBLIC=true` | Prometheus-compatible RED metrics (chat, retrieval, ingestion, eval, HTTP) |
 
 ## Auth
 
@@ -33,6 +34,11 @@ tokens in the `session` cookie. See `docs/adr/010-server-side-sessions.md`.
 | Method | Path | Auth / Permission | Purpose |
 |---|---|---|---|
 | POST | `/chat` | auth + `chat:create` (30/min) | Start a chat turn; returns a **streaming SSE** response |
+
+At capacity, `POST /chat` (and tool execution) returns `429` with a flat
+`{ error: 'busy', message, retryAfterSeconds }` body and a `Retry-After`
+header — an honest "retry shortly", never a silent drop. Per-tenant (20) and
+per-user (5) concurrency caps apply; see `docs/scale.md` for tuning.
 
 Request body: `{ conversationId?, content (1–32000 chars), modelId?,
 classification?, documentIds?[] }`. If `classification` is omitted, new
@@ -71,11 +77,16 @@ On 401 the client performs one token-refresh retry before failing.
 | GET | `/documents` | auth + `document:read` | List documents visible to the caller (permission-filtered) |
 | GET | `/documents/:id` | auth + `document:read` | Document metadata (permission + clearance checked; audited as `DOCUMENT_ACCESS`) |
 | POST | `/documents/:id/retry` | auth + `document:upload` (10/min) | Re-enqueue a `FAILED`/`QUARANTINED` document owned by the caller; `202 { status: 'PENDING', jobId }` |
+| POST | `/documents/jobs/:id/cancel` | auth + `document:upload` (30/min) | Cancel a job: requester or `tenant:manage`; `PENDING` → `CANCELED` immediately, `PROCESSING` → `202` cancel-requested (worker aborts at next stage boundary) |
+| POST | `/documents/jobs/:id/requeue` | auth + `tenant:manage` (30/min) | Admin requeue of a `QUARANTINED`/`FAILED` job (audited; the only way back for quarantined jobs) |
 | PATCH | `/documents/:id/classification` | auth + `document:classify` (10/min) | Reclassify (destroys chunks, triggers full re-ingestion; audited) |
 | DELETE | `/documents/:id` | auth + `document:delete` | Soft-delete document and its object |
 
 Ingestion is asynchronous: jobs move `PENDING → PROCESSING → SUCCEEDED /
-FAILED / QUARANTINED` in `document_ingestion_jobs` (see ADR-009). There is no
+FAILED / QUARANTINED / CANCELED` in `document_ingestion_jobs`. Failed jobs
+retry with exponential backoff + jitter up to `INGEST_MAX_ATTEMPTS`, then are
+quarantined (never auto-retried). Claims are round-robin across tenants so no
+tenant starves another (see `docs/scale.md`). There is no
 download endpoint in this phase — document content reaches users through RAG
 answers with citations.
 
