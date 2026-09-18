@@ -2,6 +2,13 @@
 %% architecture.mmd — End-to-end architecture of the private AI platform
 %% Repo: Enflite/backend-ai. Baseline: main after PR #4.
 %% Multiple diagrams in one file, separated by %% section headers.
+%%
+%% LIFECYCLE CONVENTION (applies to every diagram):
+%%   [CURRENT] — implemented and in use on main.
+%%   [PARTIAL] — implemented but incomplete, behind config, or scale-limited.
+%%   [FUTURE]  — planned; does NOT exist yet. No code path depends on it.
+%%   Nodes without an explicit tag are [CURRENT].
+%%
 %% Conventions: node labels cite the real source file implementing them.
 %% =====================================================================
 
@@ -15,7 +22,7 @@ flowchart TB
     Admin(["Tenant admin<br/>(browser)"])
 
     subgraph Client["Client"]
-        SPA["React SPA<br/>frontend/src<br/>chat, documents, model selector"]
+        SPA["[CURRENT] React SPA<br/>frontend/src<br/>chat, documents, model selector"]
     end
 
     subgraph API["Backend — Fastify (backend/src/server.ts)"]
@@ -31,20 +38,30 @@ flowchart TB
     end
 
     subgraph Data["Data plane"]
-        PG[("PostgreSQL 16 + pgvector<br/>14 migrations<br/>backend/src/db/migrations/")]
-        S3[("S3-compatible storage<br/>MinIO (dev)<br/>backend/src/storage/storage.ts")]
+        PG[("[CURRENT] PostgreSQL 16 + pgvector<br/>14 migrations<br/>backend/src/db/migrations/")]
+        S3[("[CURRENT] S3-compatible storage<br/>MinIO (dev)<br/>backend/src/storage/storage.ts")]
     end
 
     subgraph AIInfra["AI infrastructure (external boundaries)"]
-        vLLM["vLLM OpenAI-compatible<br/>/chat/completions<br/>backend/src/ai/gateway/vllmProvider.ts"]
-        Embed["Embedding provider<br/>backend/src/documents/ingestion.ts<br/>internalEmbeddingProvider"]
-        Rerank["Reranker service (optional)<br/>injected via setReranker()<br/>default: passthrough"]
+        vLLM["[CURRENT] vLLM OpenAI-compatible<br/>/chat/completions<br/>backend/src/ai/gateway/vllmProvider.ts"]
+        Embed["[CURRENT] Embedding provider<br/>backend/src/documents/ingestion.ts<br/>internalEmbeddingProvider"]
+        Rerank["[CURRENT] Reranker hook<br/>injected via setReranker()<br/>default: passthrough (no external service)"]
     end
 
     subgraph Ext["External integrations (boundaries)"]
-        Scan["Malware scanner<br/>MALWARE_SCAN_MODE=http<br/>backend/src/documents/malware.ts"]
-        Syte["SyteLine ERP<br/>HttpSyteLineAdapter<br/>backend/src/tools/gateway.ts"]
-        IdP["External IdP (future, P2-e)<br/>backend/src/auth/identityProvider.ts"]
+        Scan["[PARTIAL] Malware scanner boundary<br/>MALWARE_SCAN_MODE=http | disabled-development<br/>backend/src/documents/malware.ts"]
+        Syte["[CURRENT] SyteLine ERP (read-only)<br/>HttpSyteLineAdapter :: getItem<br/>backend/src/tools/gateway.ts"]
+        IdP["[FUTURE] External IdP<br/>backend/src/auth/identityProvider.ts<br/>(P2-e)"]
+    end
+
+    subgraph Planned["[FUTURE] Planned capabilities (see TODO.md)"]
+        direction TB
+        FW["Dedicated ingestion worker (P2-a)"]
+        FOTel["OpenTelemetry exporter (P2-b)"]
+        FDLP["DLP (P2-f)"]
+        FTools["Destructive-tool approval (P3-b)"]
+        FFT["Fine-tuning (P3-a)"]
+        FMR["Multi-region (P3-c)"]
     end
 
     User --> SPA
@@ -85,7 +102,7 @@ flowchart LR
     Cookie --> CORS["4. @fastify/cors<br/>explicit origin list<br/>CORS_ORIGIN, credentials"]
     CORS --> MP["5. @fastify/multipart<br/>1 file, ≤ MAX_UPLOAD_BYTES"]
     MP --> RL["6. @fastify/rate-limit<br/>300/min, keyed by<br/>sha256(session token) or IP"]
-    RL --> GC["7. Global ceiling hook<br/>3000 req/min per instance<br/>in-memory; shared limiter<br/>needed for multi-instance"]
+    RL --> GC["7. Global ceiling hook<br/>3000 req/min per instance<br/>[CURRENT] in-memory;<br/>[FUTURE] shared limiter<br/>for multi-instance"]
     GC --> Router["8. Router — /api/v1<br/>health, auth, audit, models,<br/>conversations, chat,<br/>documents, tools"]
     Router --> Handler["Route handler<br/>preHandler: requireAuth<br/>+ requirePermission(...)"]
     Handler --> ErrH["9. serverErrorHandler<br/>AppError → its status<br/>validation → 400<br/>429 / 413 honored<br/>else generic 500<br/>never leaks internals"]
@@ -129,7 +146,7 @@ sequenceDiagram
 %% ---------------------------------------------------------------------
 sequenceDiagram
     autonumber
-    participant C as React SPA (EventSource)
+    participant C as React SPA (fetch streaming)
     participant H as POST /api/v1/chat<br/>chat/routes.ts
     participant Z as authz (requireAuth<br/>+ chat:create + clearance)
     participant W as applyContextWindow<br/>gateway.ts
@@ -142,6 +159,7 @@ sequenceDiagram
     participant AU as recordAudit()
 
     C->>H: { conversationId?, content ≤32k,<br/>modelId?, classification?, documentIds? }
+    Note over C,H: fetch() POST, accept: text/event-stream.<br/>Client reads the streaming response body<br/>and parses SSE frames manually<br/>(frontend/src/api.ts :: streamChat).<br/>Not native EventSource (GET-only).<br/>401 → refresh → single retry.
     H->>Z: authenticate → authorize →<br/>assertClassificationAllowed
     H->>DB: load conversation, verify ownership<br/>+ tenant scope
     H->>DB: load history
@@ -182,26 +200,41 @@ sequenceDiagram
 %% Upload is synchronous through validation + enqueue; everything after the
 %% queue is asynchronous. Job states: PENDING → PROCESSING →
 %% SUCCEEDED | FAILED. Document status adds QUARANTINED.
+%% Architectural boundary: the API owns request/authorization/enqueue;
+%% long-running processing belongs in workers. The document_ingestion_jobs
+%% table is the contract between them.
 %% ---------------------------------------------------------------------
 flowchart TB
-    UP(["POST /api/v1/documents<br/>multipart, 1 file"]) --> FV["fileValidation.ts<br/>allowlisted MIME ↔ extension,<br/>magic bytes, size ≤ MAX_UPLOAD_BYTES<br/>(client pre-checks 25 MB)"]
-    FV -->|"invalid"| R400(["400, nothing stored"])
-    FV -->|"valid"| CS["checksum sha256"]
-    CS -->|"duplicate checksum"| R409(["409 CONFLICT"])
-    CS --> CL["resolveUploadClassification()<br/>uploadClassification.ts<br/>requested label ∩ caller clearance"]
-    CL --> INS["INSERT documents<br/>status='PENDING'<br/>documents/routes.ts"]
-    INS --> PUT["S3 putObject<br/>storage.ts (MinIO dev)"]
-    PUT --> SCAN["malware.ts<br/>MALWARE_SCAN_MODE=<br/>disabled-development | http"]
-    SCAN -->|"threat"| QUAR["status='QUARANTINED'<br/>audit DOCUMENT_QUARANTINED"]
-    SCAN -->|"clean"| ENQ["enqueueIngestion()<br/>INSERT document_ingestion_jobs<br/>status='PENDING'"]
-    ENQ --> Q["queue.ts — in-process worker<br/>MAX_CONCURRENT_JOBS=2<br/>claim: UPDATE … WHERE<br/>status='PENDING' → PROCESSING<br/>(P2-a: extract to dedicated worker)"]
-    Q --> EXT["extraction.ts<br/>pdf / xlsx / docx / txt<br/>real local extractors<br/>page + sheet/row metadata"]
-    EXT --> CH["chunking<br/>overlapping windows"]
-    CH --> EMB["embeddings<br/>internalEmbeddingProvider<br/>provenance recorded"]
-    EMB --> VEC[("INSERT document_chunks<br/>embedding vector(pgvector)<br/>tenant_id, document_id,<br/>classification")]
-    VEC --> OK["jobs → SUCCEEDED<br/>documents → READY<br/>audit DOCUMENT_INGESTION_COMPLETED"]
-    Q -->|"exception"| FAIL["jobs → FAILED<br/>(error_code, attempts)<br/>audit DOCUMENT_INGESTION_FAILED"]
-    FAIL --> RETRY["POST /documents/:id/retry<br/>owner-only, FAILED/QUARANTINED"]
+    subgraph API["[CURRENT] Fastify API — owns upload, authz, enqueue"]
+        direction TB
+        UP(["POST /api/v1/documents<br/>multipart, 1 file"]) --> FV["fileValidation.ts<br/>allowlisted MIME ↔ extension,<br/>magic bytes, size ≤ MAX_UPLOAD_BYTES<br/>(client pre-checks 25 MB)"]
+        FV -->|"invalid"| R400(["400, nothing stored"])
+        FV -->|"valid"| CS["checksum sha256"]
+        CS -->|"duplicate checksum"| R409(["409 CONFLICT"])
+        CS --> CL["resolveUploadClassification()<br/>uploadClassification.ts<br/>requested label ∩ caller clearance"]
+        CL --> INS["INSERT documents<br/>status='PENDING'<br/>documents/routes.ts"]
+        INS --> PUT["S3 putObject<br/>storage.ts (MinIO dev)"]
+        PUT --> SCAN["malware.ts<br/>MALWARE_SCAN_MODE=<br/>disabled-development | http"]
+        SCAN -->|"threat"| QUAR["status='QUARANTINED'<br/>audit DOCUMENT_QUARANTINED"]
+        SCAN -->|"clean"| ENQ["enqueueIngestion()<br/>INSERT document_ingestion_jobs<br/>status='PENDING'"]
+    end
+
+    JOBS[("document_ingestion_jobs<br/>[CURRENT] the contract:<br/>API enqueues → worker claims")]
+
+    subgraph WORKER["[PARTIAL] in-process worker today (queue.ts)<br/>[FUTURE] dedicated worker replicas (P2-a)"]
+        direction TB
+        Q["claim: UPDATE … WHERE<br/>status='PENDING' → PROCESSING<br/>MAX_CONCURRENT_JOBS=2"] --> EXT["extraction.ts<br/>pdf / xlsx / docx / txt<br/>real local extractors<br/>page + sheet/row metadata"]
+        EXT --> CH["chunking<br/>overlapping windows"]
+        CH --> EMB["embeddings<br/>internalEmbeddingProvider<br/>provenance recorded"]
+        EMB --> VEC[("INSERT document_chunks<br/>embedding vector(pgvector)<br/>tenant_id, document_id,<br/>classification")]
+        VEC --> OK["jobs → SUCCEEDED<br/>documents → READY<br/>audit DOCUMENT_INGESTION_COMPLETED"]
+        Q -->|"exception"| FAIL["jobs → FAILED<br/>(error_code, attempts)<br/>audit DOCUMENT_INGESTION_FAILED"]
+    end
+
+    RETRY["POST /documents/:id/retry<br/>owner-only, FAILED/QUARANTINED"]
+
+    ENQ --> JOBS --> Q
+    FAIL --> RETRY
     RETRY --> ENQ
     QUAR --> RETRY
 
@@ -227,6 +260,7 @@ flowchart LR
 
 %% ---------------------------------------------------------------------
 %% (g) DATA MODEL — key tables (backend/src/db/migrations/001–014)
+%% Key tables only — not a complete database ERD.
 %% Tenant isolation: every tenant-owned row carries tenant_id; RLS policies
 %% enforced (013_force_rls). Classification labels gate reads.
 %% ---------------------------------------------------------------------
@@ -347,13 +381,13 @@ erDiagram
 %% ---------------------------------------------------------------------
 flowchart TB
     subgraph Host["Docker Compose (dev)"]
-        PG[("postgres<br/>pgvector/pgvector:0.8.4-pg16<br/>127.0.0.1:5432<br/>volume pgdata<br/>healthcheck pg_isready")]
-        BE["backend (build ./backend, target dev)<br/>:8080<br/>depends_on postgres (healthy)<br/>+ minio-init (completed)<br/>npm ci → migrate → dev"]
-        MINIO[("minio<br/>quay.io/minio/minio:RELEASE.2025-09-07<br/>127.0.0.1:9000 / :9001<br/>volume objectdata")]
-        INIT["minio-init (mc)<br/>creates bucket<br/>${OBJECT_STORAGE_BUCKET:-enflite-ai-documents}"]
-        VLLM["vllm (profile: gpu)<br/>vllm/vllm-openai:v0.15.1<br/>:8000<br/>--model ${VLLM_MODEL:-<br/>meta-llama/Meta-Llama-3.1-8B-Instruct}"]
+        PG[("[CURRENT] postgres<br/>pgvector/pgvector:0.8.4-pg16<br/>127.0.0.1:5432<br/>volume pgdata<br/>healthcheck pg_isready")]
+        BE["[CURRENT] backend (build ./backend, target dev)<br/>:8080<br/>depends_on postgres (healthy)<br/>+ minio-init (completed)<br/>npm ci → migrate → dev"]
+        MINIO[("[CURRENT] minio<br/>quay.io/minio/minio:RELEASE.2025-09-07<br/>127.0.0.1:9000 / :9001<br/>volume objectdata")]
+        INIT["[CURRENT] minio-init (mc)<br/>creates bucket<br/>${OBJECT_STORAGE_BUCKET:-enflite-ai-documents}"]
+        VLLM["[CURRENT] vllm (profile: gpu)<br/>vllm/vllm-openai:v0.15.1<br/>:8000<br/>--model ${VLLM_MODEL:-<br/>meta-llama/Meta-Llama-3.1-8B-Instruct}"]
     end
-    FE(["React frontend<br/>VITE_API_URL → :8080<br/>built by Vite separately"])
+    FE(["[CURRENT] React frontend<br/>VITE_API_URL → :8080<br/>built by Vite separately"])
 
     BE -->|"DATABASE_URL"| PG
     BE -->|"S3 API"| MINIO
@@ -361,5 +395,36 @@ flowchart TB
     BE -->|"AI provider endpoint<br/>(model registry)"| VLLM
     FE -->|"HTTPS :8080/api/v1"| BE
 
-    PROD["Production deltas (docs/deployment.md):<br/>• NODE_ENV=production, COOKIE_SECURE=true<br/>• JWT_SECRET ≥32 chars from secret manager (never committed)<br/>• MALWARE_SCAN_MODE=http + MALWARE_SCANNER_ENDPOINT<br/>• explicit CORS_ORIGIN<br/>• migrations via npm run migrate (014 .sql files copied to dist)<br/>• shared rate limiter in front of multi-instance backend<br/>• P2-a: dedicated ingestion worker replicas<br/>• P1-a: verify pgvector ≥0.7.0 + ALTER EXTENSION vector UPDATE"]
+    PROD["[FUTURE] Production deltas (docs/deployment.md):<br/>• NODE_ENV=production, COOKIE_SECURE=true<br/>• JWT_SECRET ≥32 chars from secret manager (never committed)<br/>• MALWARE_SCAN_MODE=http + MALWARE_SCANNER_ENDPOINT<br/>• explicit CORS_ORIGIN<br/>• migrations via npm run migrate (014 .sql files copied to dist)<br/>• [FUTURE] shared rate limiter in front of multi-instance backend<br/>• [FUTURE] P2-a: dedicated ingestion worker replicas<br/>• P1-a: verify pgvector ≥0.7.0 + ALTER EXTENSION vector UPDATE"]
     PROD -.-> Host
+
+%% ---------------------------------------------------------------------
+%% (i) EGRESS CONTROL PLANE
+%% Core security property: the platform has NO arbitrary internet access.
+%% Every outbound call from AI/tool code paths targets an allowlisted
+%% origin; anything else is denied and must never be reachable.
+%% See TODO.md [P2-i].
+%% ---------------------------------------------------------------------
+flowchart TB
+    GW2["[CURRENT] AI gateway<br/>backend/src/ai/gateway/"]
+
+    subgraph Allowed["[CURRENT] Allowed egress — allowlist only"]
+        direction TB
+        M["Approved model endpoints<br/>endpoint origin ∈ AI_PROVIDER_ALLOWED_ORIGINS<br/>gateway.ts origin check before every call"]
+        E["Approved embedding endpoints<br/>backend/src/documents/ingestion.ts"]
+        T["Approved tool adapters<br/>tool registry + zod schema validation<br/>per-tool timeouts + output caps<br/>backend/src/tools/gateway.ts"]
+        S["Approved malware scanner<br/>MALWARE_SCANNER_ENDPOINT<br/>backend/src/documents/malware.ts"]
+    end
+
+    NET(["Arbitrary internet<br/>✕ DENIED"])
+
+    GW2 --> M
+    GW2 --> E
+    GW2 --> T
+    GW2 --> S
+    M -.->|"✕"| NET
+    E -.->|"✕"| NET
+    T -.->|"✕"| NET
+    S -.->|"✕"| NET
+
+    FP2i["[FUTURE] P2-i: explicit egress policy tests<br/>deny-by-default — prove no AI/tool code path<br/>can reach an unlisted origin; violations<br/>audited and blocked"]

@@ -38,23 +38,29 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done.
   (`SELECT … FOR UPDATE` on the document row); concurrent relabel attempts serialize
   safely; existing `documentsUpload`/`documents` tests still pass.
 
-- [ ] **[P0-d] Resolve the orphaned `model:manage` permission**
+- [ ] **[P0-d] Decide the fate of the `model:manage` permission**
   Verified via `git grep`: `model:manage` is declared in
-  `backend/src/authz/permissions.ts` and seeded in `002_seed.sql`, but **no route
-  checks it**. (For contrast: migration `011` already removed the dead `tool:admin`
-  and `user:manage`; `tenant:manage` is legitimately used at
+  `backend/src/authz/permissions.ts` and seeded in `002_seed.sql` (granted to the
+  AI Admin role), but no `requirePermission('model:manage')` reference exists —
+  no route checks it today. (For contrast: migration `011` already removed the
+  dead `tool:admin` and `user:manage`; `tenant:manage` is legitimately used at
   `backend/src/documents/routes.ts:197` for non-owner reclassification.)
-  *Acceptance:* either admin model-management routes are implemented and gated on
-  `model:manage`, or the permission is removed via a new migration following the
-  pattern of `011_remove_dead_permissions.sql`. No seeded permission may gate zero
-  routes afterwards.
+  Determine whether model-registry management routes are intended to exist.
+  If yes, implement those routes and gate them with `model:manage`.
+  If no, remove the permission and its seeded grants via a new migration
+  following the pattern of `011_remove_dead_permissions.sql`.
+  *Acceptance:* no seeded permission gates zero routes; the intended model-admin
+  API surface is documented in `docs/architecture-security.md`.
 
 ---
 
-## P1 — Infrastructure validation (blocked in sandbox; needs a real environment)
+## P1 — Production readiness gates (need a real environment)
 
-These were explicitly unverifiable during the hardening passes — the code is real,
-but it has never run against live dependencies.
+These are not optional validation work. For an internally-controlled /
+CMMC-oriented deployment they are **prerequisites to making meaningful
+production claims** — the gate between "hardened code" and "production-ready
+platform". They were explicitly unverifiable during the hardening passes: the
+code is real, but it has never run against live dependencies.
 
 - [ ] **[P1-a] Live migration run + query-plan validation**
   Run migrations `001`–`014` in order against a real PostgreSQL 16 + pgvector
@@ -84,6 +90,18 @@ but it has never run against live dependencies.
   (ties to P0-b), and queue head-of-line blocking on poison jobs.
   *Acceptance:* recorded p50/p95 latencies and breaking points; pool sizing guidance
   added to `docs/deployment.md`.
+
+- [ ] **[P1-e] Backup/restore and disaster recovery validation**
+  "We have backups" is not enough — the platform needs a documented and tested
+  restore path. At minimum: PostgreSQL backups; restore into a clean
+  environment; S3/object-storage backup strategy; database + object-store
+  consistency (a restored DB must agree with the object store about which
+  documents exist); documented recovery procedure; RPO/RTO targets; restore
+  test; credential/secret recovery procedure (how secrets are re-issued if the
+  secret manager is lost).
+  *Acceptance:* a full restore drill into a clean environment succeeds and is
+  documented; RPO/RTO targets recorded in `docs/deployment.md`; the date and
+  result of the last successful drill are tracked going forward.
 
 ---
 
@@ -135,6 +153,27 @@ Quoted from the roadmap's own status section; these are the next feature phases.
   and audit events (append-only audit must be reconciled with retention law).
   *Acceptance:* retention rules configurable per tenant; legal hold suspends
   deletion; covered in `docs/cmmc-nist.md`.
+
+- [ ] **[P2-h] Model lifecycle and registry security controls**
+  The model registry (`backend/src/ai/gateway/modelRegistry.ts`, the `models`
+  and `model_access` tables) is already a security boundary in practice —
+  approval status, `allowed_classifications`, fallback configuration. Make the
+  lifecycle explicit: model approval workflow, versioning, checksum/provenance,
+  source tracking, classification-based authorization, model retirement,
+  model change audit trail, fallback-model approval, model configuration
+  history.
+  *Acceptance:* every registry mutation is audited and permission-gated
+  (ties to P0-d); an unapproved or retired model can never be selected by the
+  gateway; provenance is queryable per model.
+
+- [ ] **[P2-i] Explicit egress control plane**
+  Codify the security property that the platform has **no arbitrary internet
+  access** (see diagram (i) in `docs/architecture.mmd`): AI Gateway →
+  approved model endpoints only (`AI_PROVIDER_ALLOWED_ORIGINS`); approved
+  embedding endpoints; approved tool adapters; approved malware scanner;
+  everything else denied.
+  *Acceptance:* deny-by-default egress tests prove no AI/tool code path can
+  reach an unlisted origin; violations are blocked and audited.
 
 ---
 
