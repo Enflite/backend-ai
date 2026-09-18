@@ -17,7 +17,8 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "eval": "tsx src/eval/cli.ts"
+    "eval": "tsx src/eval/cli.ts",
+    "loadtest:smoke": "node scripts/load-test.mjs --scenario smoke"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1135.0",
