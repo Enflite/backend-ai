@@ -16,6 +16,12 @@ import {
   setServingDefault,
   listServingDefaults,
 } from './modelLifecycle.js';
+import {
+  ROUTING_STRATEGIES,
+  getRoutingPolicy,
+  listRoutingPolicies,
+  setRoutingPolicy,
+} from './capabilityRouter.js';
 
 const modelIdSchema = z.object({ id: z.string().uuid() });
 
@@ -283,6 +289,49 @@ export async function modelAdminRoutes(fastify: FastifyInstance): Promise<void> 
       req.ip
     );
     return reply.send({ default: def });
+  });
+
+  // Admin-controlled routing policies: per tenant+capability, the declared
+  // routing intent (quality | latency | cost) and whether an unavailable
+  // capability model falls back to the chat default. Audited; never bypasses
+  // model authorization (see capabilityRouter.ts).
+  const routingPolicySchema = z.object({
+    strategy: z.enum(ROUTING_STRATEGIES as unknown as [string, ...string[]]),
+    fallbackToChat: z.boolean(),
+  }).strict();
+  fastify.get('/admin/routing-policies', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    return reply.send({ policies: await listRoutingPolicies(auth.tenantId) });
+  });
+  fastify.get('/admin/routing-policies/:capability', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const parsed = z.object({ capability: z.string().min(1).max(64) }).safeParse(req.params);
+    if (!parsed.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid capability');
+    return reply.send({ policy: await getRoutingPolicy(auth.tenantId, parsed.data.capability) });
+  });
+  fastify.put('/admin/routing-policies/:capability', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const parsedCapability = z.object({ capability: z.string().min(1).max(64) }).safeParse(req.params);
+    const parsedBody = routingPolicySchema.safeParse(req.body);
+    if (!parsedCapability.success || !parsedBody.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid routing policy request');
+    const policy = await setRoutingPolicy(
+      auth.tenantId,
+      parsedCapability.data.capability,
+      {
+        strategy: parsedBody.data.strategy as (typeof ROUTING_STRATEGIES)[number],
+        fallbackToChat: parsedBody.data.fallbackToChat,
+      },
+      auth.userId,
+      req.requestId,
+      req.ip
+    );
+    return reply.send({ policy });
   });
 }
 
