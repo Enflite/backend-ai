@@ -196,9 +196,9 @@ const { currentAuth } = vi.hoisted(() => ({
   },
 }));
 
-const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
+const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
-vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({ resolveServingModel }));
+vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
 vi.mock('../src/ai/gateway/gateway.js', async (importOriginal) => {
@@ -252,6 +252,13 @@ describe('chat route system-prompt wiring', () => {
       throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
     });
     listApprovedModelsForUser.mockResolvedValue([testModel]);
+  resolveCapabilityModel.mockResolvedValue({
+    requested: 'chat',
+    resolved: 'chat',
+    model: testModel,
+    fallbackUsed: false,
+    strategy: 'quality',
+  });
     getApprovedModelForUser.mockResolvedValue(testModel);
     retrieveAuthorizedContext.mockResolvedValue({ context: '', citations: [], results: [] });
     recordAudit.mockResolvedValue(undefined);
@@ -318,7 +325,7 @@ describe('chat route system-prompt wiring', () => {
   });
 });
 
-describe('chat route serving-default resolution', () => {
+describe('chat route capability resolution', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     tenantQuery.mockImplementation(async (_tenantId: string, sql: string) => {
@@ -329,6 +336,13 @@ describe('chat route serving-default resolution', () => {
       throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
     });
     listApprovedModelsForUser.mockResolvedValue([testModel]);
+  resolveCapabilityModel.mockResolvedValue({
+    requested: 'chat',
+    resolved: 'chat',
+    model: testModel,
+    fallbackUsed: false,
+    strategy: 'quality',
+  });
     getApprovedModelForUser.mockResolvedValue(testModel);
     retrieveAuthorizedContext.mockResolvedValue({ context: '', citations: [], results: [] });
     recordAudit.mockResolvedValue(undefined);
@@ -345,29 +359,38 @@ describe('chat route serving-default resolution', () => {
     return app.inject({ method: 'POST', url: '/api/v1/chat', payload: body });
   }
 
-  it('prefers the tenant serving default over the first approved model', async () => {
-    resolveServingModel.mockResolvedValue({ id: 'default-model' });
-    const res = await postChat({ content: 'hi' });
+  it('serves the turn with the capability-routed model', async () => {
+    resolveCapabilityModel.mockResolvedValue({
+      requested: 'syteline',
+      resolved: 'syteline',
+      model: { ...testModel, id: 'syteline-model', name: 'SyteLine Model' },
+      fallbackUsed: false,
+      strategy: 'quality',
+    });
+    const res = await postChat({ content: 'why is order SO-123 late?' });
     expect(res.statusCode).toBe(200);
-    // The default is re-verified through getApprovedModelForUser (authz), and
-    // the gateway is called with the default's id — not the list head's.
+    // The routed model is re-verified through getApprovedModelForUser
+    // (authz), and the gateway streams from the routed model's id.
     expect(getApprovedModelForUser).toHaveBeenCalledWith(
-      'default-model',
+      'syteline-model',
       expect.any(String),
       expect.any(String),
       expect.any(String)
     );
     const input = gatewayStream.mock.calls[0]![0] as { modelId: string };
-    expect(input.modelId).toBe('default-model');
+    expect(input.modelId).toBe('syteline-model');
+    // The meta frame tells operators which capability served the turn.
+    const payload = (res as unknown as { rawPayload: Buffer }).rawPayload.toString('utf8');
+    expect(payload).toContain('"resolved":"syteline"');
+    expect(payload).toContain('"fallbackUsed":false');
   });
 
-  it('an explicit modelId wins over the serving default', async () => {
+  it('an explicit modelId wins over capability routing', async () => {
     const explicitId = '55555555-5555-4555-8555-555555555555';
-    resolveServingModel.mockResolvedValue({ id: 'default-model' });
     const res = await postChat({ content: 'hi', modelId: explicitId });
     expect(res.statusCode).toBe(200);
-    // Explicit selection short-circuits: the default is never resolved.
-    expect(resolveServingModel).not.toHaveBeenCalled();
+    // Explicit selection short-circuits: the router is never consulted.
+    expect(resolveCapabilityModel).not.toHaveBeenCalled();
     expect(getApprovedModelForUser).toHaveBeenCalledWith(
       explicitId,
       expect.any(String),
@@ -378,10 +401,12 @@ describe('chat route serving-default resolution', () => {
     expect(input.modelId).toBe(explicitId);
   });
 
-  it('falls back to the first approved model when no default is configured', async () => {
-    resolveServingModel.mockResolvedValue(null);
-    const res = await postChat({ content: 'hi' });
+  it('an explicit capability hint is passed to the router', async () => {
+    const res = await postChat({ content: 'hi', capability: 'coding' });
     expect(res.statusCode).toBe(200);
+    expect(resolveCapabilityModel).toHaveBeenCalledWith(
+      expect.objectContaining({ capability: 'coding' })
+    );
     expect(getApprovedModelForUser).toHaveBeenCalledWith(
       'm1',
       expect.any(String),

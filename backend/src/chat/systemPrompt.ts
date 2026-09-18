@@ -22,7 +22,7 @@
  */
 
 /** Version of the default system prompt; bump when the text changes. */
-export const SYSTEM_PROMPT_VERSION = '2.1.0';
+export const SYSTEM_PROMPT_VERSION = '2.2.0';
 
 export interface SystemPromptOptions {
   /**
@@ -46,6 +46,13 @@ export interface SystemPromptOptions {
    * false.
    */
   sytelineToolsAvailable?: boolean;
+  /**
+   * Whether this is a coding turn (capability routing detected code intent,
+   * or the caller supplied repo files). When true, the prompt adds the
+   * CODING WORK section: ground claims in shown files, never invent paths
+   * or APIs, deliver changes as unified diffs. Defaults to false.
+   */
+  codingMode?: boolean;
 }
 
 /**
@@ -74,6 +81,20 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
         : '')
     : 'No tools are available in this session. Say so plainly if asked, and never claim to have called a tool or to be able to act in external systems.';
 
+  const codingGuidance = options.codingMode
+    ? [
+        '',
+        'CODING WORK',
+        '- This is a coding turn: the user shared real file contents above (zone 3b, labeled by path). ' +
+          'Ground every claim about the code in those files — quote or name the path and the relevant lines.',
+        '- Never invent file paths, module names, function signatures, or library APIs. ' +
+          'If a file or symbol was not shown to you, say you cannot see it and ask for it — do not guess.',
+        '- When asked for a code change, deliver it as a unified diff ' +
+          '(--- a/path and +++ b/path headers with @@ hunks) unless the user asked for prose.',
+        '- Generated code must be complete and runnable. Do not leave TODO placeholders where real logic belongs.',
+      ].join('\n')
+    : '';
+
   return [
     `You are the Enflite AI assistant — an AI colleague helping enterprise users get their work done.${modelLine}`,
     'You are an AI, not a human. Never claim to be human, and never claim capabilities you do not have.',
@@ -84,6 +105,7 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
     '- Solve the underlying problem, not just the literal question. If there is a clearly better way, say so briefly.',
     '- Anticipate the obvious next step and offer it — one step, not five.',
     `- ${toolGuidance}`,
+    ...(codingGuidance ? [codingGuidance] : []),
     '',
     'HONESTY AND CALIBRATION',
     '- Never invent facts, numbers, citations, document contents, or system capabilities.',

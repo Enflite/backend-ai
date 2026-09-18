@@ -41,17 +41,22 @@ header — an honest "retry shortly", never a silent drop. Per-tenant (20) and
 per-user (5) concurrency caps apply; see `docs/scale.md` for tuning.
 
 Request body: `{ conversationId?, content (1–32000 chars), modelId?,
-classification?, documentIds?[] }`. If `classification` is omitted, new
+classification?, documentIds?[], capability?, codeFiles?[] }`. If `classification` is omitted, new
 conversations default to `PUBLIC` for `PUBLIC`-cleared callers, otherwise
-`INTERNAL`; `UNKNOWN` is rejected.
+`INTERNAL`; `UNKNOWN` is rejected. `capability` is one of `chat | syteline |
+coding | embeddings` and selects the capability slot for model routing
+(an explicit `modelId` always wins); when omitted the route detects intent
+conservatively and defaults to `chat`. `codeFiles` is `[{ path, content }]`
+— caller-supplied repo-relative files (≤ 20 files, ≤ 200 KB each) assembled
+into labeled context for coding turns; see `docs/capabilities.md` §4.
 
 The response is `text/event-stream`, parsed client-side with `fetch()` +
 manual SSE frame parsing (see ADR-003 — this is **not** `EventSource`).
 Events:
 
-- `meta` — `{ conversationId, model: { id, name }, citations, contextDropped }`
+- `meta` — `{ conversationId, model: { id, name }, citations, contextDropped, capability: { requested, resolved, fallbackUsed, strategy }, codeFiles: { requested, included, dropped, truncated } }`
 - `delta` — `{ content }` (token chunks)
-- `notice` — `{ code, message, … }` (e.g. `MODEL_FAILOVER`, `TOOL_CALLS`)
+- `notice` — `{ code, message, … }` (e.g. `MODEL_FAILOVER`, `TOOL_PLAN`, `TOOL_CALLS`)
 - `done` — final message record
 - `error` — `{ code, message, requestId }`
 - `: ping` heartbeats keep the stream alive
@@ -122,8 +127,10 @@ in addition to `tool:use`), audited with tenant/user/tool/args/result
 size, timeout-bounded (`SYTELINE_TIMEOUT_MS`), and result-size-capped
 (`SYTELINE_MAX_ROWS`; truncated lists carry `truncated: true`). No
 free-form SQL; the model never touches SyteLine directly. Dependent
-chaining (output of one call feeding the next) runs inside the chat
-agentic loop's existing iteration budget (`AI_MAX_TOOL_ITERATIONS`).
+chaining (output of one call feeding the next) runs inside the generalized
+agentic loop (`backend/src/chat/agenticLoop.ts`; see `docs/capabilities.md`
+§3), which any tool family can use, under its iteration budget
+(`AI_MAX_TOOL_ITERATIONS`).
 
 | Tool | Purpose |
 |---|---|
@@ -160,6 +167,9 @@ The purge runs in-process every `RETENTION_PURGE_INTERVAL_HOURS` (see
 | POST | `/admin/models/:id/transition` | auth + `model:manage` | Lifecycle transition `{ status }`; `PENDING_APPROVAL → APPROVED` requires the eval promotion gate to pass and records `approved_by`/`approved_at` |
 | GET | `/admin/serving-defaults` | auth + `model:manage` | Per-tenant+capability serving defaults |
 | PUT | `/admin/serving-defaults/:capability` | auth + `model:manage` | Set the serving model for a capability `{ modelId }` |
+| GET | `/admin/routing-policies` | auth + `model:manage` | List routing policies (strategy + fallback) per capability |
+| GET | `/admin/routing-policies/:capability` | auth + `model:manage` | One policy, or the platform default when unconfigured |
+| PUT | `/admin/routing-policies/:capability` | auth + `model:manage` | Set `{ strategy: quality\|latency\|cost, fallbackToChat }`, audited |
 | GET | `/admin/models/artifacts/local` | auth + `model:manage` | **Dev only** — local Ollama artifacts |
 | POST | `/admin/models/artifacts/pull` | auth + `model:manage` | **Dev only** — pull a model artifact via Ollama |
 

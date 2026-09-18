@@ -6,20 +6,21 @@ import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
 import { CLASSIFICATIONS, Classification, AuthContext } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
-import { gatewayStream, applyContextWindow, GatewayTelemetry, ChatMessage, ProviderToolDefinition, streamMetadata } from '../ai/gateway/gateway.js';
-import { getApprovedModelForUser, listApprovedModelsForUser } from '../ai/gateway/modelRegistry.js';
-import { resolveServingModel } from '../ai/gateway/modelLifecycle.js';
+import { applyContextWindow, GatewayTelemetry, ProviderToolDefinition, streamMetadata } from '../ai/gateway/gateway.js';
+import { getApprovedModelForUser } from '../ai/gateway/modelRegistry.js';
+import { resolveCapabilityModel, type CapabilityResolution } from '../ai/gateway/capabilityRouter.js';
 import { retrieveAuthorizedContext } from '../rag/retrieval.js';
 import { recordAudit } from '../audit/audit.js';
-import { toolRegistry, runToolCall, zodToJsonSchema } from '../tools/gateway.js';
-import { buildSystemPrompt, wrapRetrievedContext, wrapToolResult, buildNoEvidenceNotice } from './systemPrompt.js';
-import { runToolCallWithRecovery } from './toolRecovery.js';
+import { toolRegistry, zodToJsonSchema } from '../tools/gateway.js';
+import { buildSystemPrompt, wrapRetrievedContext, buildNoEvidenceNotice } from './systemPrompt.js';
+import { detectCapability } from './capabilityDetect.js';
+import { runAgenticLoop, type AgenticLoopSink } from './agenticLoop.js';
+import { assembleCodeContext, normalizeCodeFiles } from './codeContext.js';
 import { canModelProcess } from '../policy/engine.js';
 import { config } from '../config.js';
 import { createChatConcurrencyLimiter, replyBusy } from '../ai/gateway/limits.js';
 import { recordChatTurn, recordRetrieval } from '../observability/metrics.js';
 import { DlpStreamGuard } from '../dlp/streamGuard.js';
-import type { DlpKind } from '../dlp/detectors.js';
 
 const chatBodySchema = z.object({
   conversationId: z.string().uuid().optional(),
@@ -29,6 +30,17 @@ const chatBodySchema = z.object({
   // resolves to the caller's clearance floor (PUBLIC for public-only callers).
   classification: z.enum(CLASSIFICATIONS).optional(),
   documentIds: z.array(z.string().uuid()).max(100).optional(),
+  // Optional capability hint for Phase 6 routing ('chat' | 'syteline' |
+  // 'coding' | 'embeddings'). When omitted the turn's capability is detected
+  // from the message text. An explicit modelId still wins over routing.
+  capability: z.enum(['chat', 'syteline', 'coding', 'embeddings']).optional(),
+  // Optional repo files for grounded coding help ("explain this code").
+  // Assembled into a path-labeled, budget-capped context block; the model
+  // must cite these paths and never invent others.
+  codeFiles: z.array(z.object({
+    path: z.string().min(1).max(256),
+    content: z.string().min(1).max(200000),
+  })).max(20).optional(),
 }).strict();
 
 const HEARTBEAT_INTERVAL_MS = 15000;
@@ -280,12 +292,28 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     // A caller may not self-assert a classification above their clearance, even
     // for a conversation they own (clearances can be lowered after creation).
     assertClassificationAllowed(auth.clearance, classification);
+    // Tools offered this turn (permission + classification filtered): needed
+    // before model resolution so capability detection knows whether the
+    // SyteLine family is actually available to this caller.
+    const providerTools = buildProviderTools(auth, classification);
+    const sytelineToolsOffered = providerTools.some((tool) => tool.function.name.startsWith('syteline.'));
+    // Phase 6 capability routing: an explicit `capability` on the request
+    // wins; otherwise the turn's capability is detected from its own text.
+    const requestedCapability = parsed.data.capability ?? detectCapability(parsed.data.content, { sytelineToolsOffered });
+    let capabilityResolution: CapabilityResolution | undefined;
     if (!modelId) {
-      // Admin-configured serving default first (re-verified servable and
-      // authorized on every resolution); legacy first-approved fallback.
-      modelId =
-        (await resolveServingModel(auth.tenantId, auth.userId, auth.roleId, 'chat'))?.id ??
-        (await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId))[0]?.id;
+      // Capability-routed model: the best authorized model for the turn's
+      // capability, with audited fallback to the chat default when the
+      // capability model is unavailable. The user never sees this machinery
+      // — they just get better answers faster.
+      capabilityResolution = await resolveCapabilityModel({
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        roleId: auth.roleId,
+        capability: requestedCapability,
+        requestId: req.requestId,
+      });
+      modelId = capabilityResolution.model.id;
     }
     if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
     const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
@@ -342,18 +370,42 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, action: 'RAG_RETRIEVAL', resource: 'documents', classification, metadata: { resultCount: citations.length } });
     }
 
+    // Phase 6 coding workflows: caller-supplied repo files are assembled
+    // into a path-labeled, budget-capped block (zone 3b, untrusted data) so
+    // "explain this code" answers stay grounded in real file contents. The
+    // block is inserted before the current user turn, like RAG context.
+    const codeFileInputs = parsed.data.codeFiles ? normalizeCodeFiles(parsed.data.codeFiles) : [];
+    let codeFilesIncluded: string[] = [];
+    let codeFilesDropped: Array<{ path: string; reason: string }> = [];
+    if (codeFileInputs.length > 0) {
+      const assembled = assembleCodeContext(codeFileInputs);
+      codeFilesIncluded = assembled.filesIncluded;
+      codeFilesDropped = assembled.dropped;
+      if (assembled.context) {
+        const userTurn = history.pop()!;
+        history.push({ role: 'user', content: assembled.context });
+        history.push(userTurn);
+      }
+    }
+
     // The charter-encoded system prompt for this turn: behavioral spec (§2),
     // labeled content zones, and tenant-safe model metadata (name/version
     // only — never secrets). The gateway pins it at index 0 of every
     // provider call and re-adds it after each truncation round, so it is
     // never dropped no matter how long the history grows.
-    const providerTools = buildProviderTools(auth, classification);
-    const chatSystemPrompt = buildSystemPrompt({
-      modelName: model.name,
-      modelVersion: model.version,
-      toolsAvailable: providerTools.length > 0,
-      sytelineToolsAvailable: providerTools.some((tool) => tool.function.name.startsWith('syteline.')),
-    });
+    const sytelineToolsAvailable = providerTools.some((tool) => tool.function.name.startsWith('syteline.'));
+    // Coding turns get the CODING WORK section: ground claims in shown files,
+    // never invent paths or APIs, deliver changes as unified diffs.
+    const codingMode = requestedCapability === 'coding' || codeFileInputs.length > 0;
+    const buildTurnSystemPrompt = (modelName: string, modelVersion?: string) =>
+      buildSystemPrompt({
+        modelName,
+        modelVersion,
+        toolsAvailable: providerTools.length > 0,
+        sytelineToolsAvailable,
+        codingMode,
+      });
+    const chatSystemPrompt = buildTurnSystemPrompt(model.name, model.version);
 
     // Context-window management: sliding window that always keeps the system
     // prompt and the most recent turns. The drop count is surfaced in `meta`
@@ -451,199 +503,100 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
         abortController.abort();
       }
     }, HEARTBEAT_INTERVAL_MS);
-    if (!(await send('meta', { conversationId, model: { id: model.id, name: model.name }, citations, contextDropped: windowed.dropped }))) {
+    if (!(await send('meta', {
+      conversationId,
+      model: { id: model.id, name: model.name },
+      citations,
+      contextDropped: windowed.dropped,
+      // Telemetry for operators: which capability served and whether the
+      // chat default covered for a missing capability model. Not user-facing.
+      capability: capabilityResolution
+        ? { requested: capabilityResolution.requested, resolved: capabilityResolution.resolved, fallbackUsed: capabilityResolution.fallbackUsed }
+        : undefined,
+      codeFiles: codeFileInputs.length > 0 ? { included: codeFilesIncluded, dropped: codeFilesDropped } : undefined,
+    }))) {
       // Nobody is listening; skip straight to persistence/cleanup.
       abortController.abort();
     }
 
     const telemetry: GatewayTelemetry = {};
-    const maxResponseChars = config.AI_MAX_RESPONSE_CHARS;
-    const maxIterations = config.AI_MAX_TOOL_ITERATIONS;
-
-    let content = '';
-    let finishReason = 'stop';
-    // Set when the stream errors after partial output was produced: the
-    // persisted message gets stream_interrupted metadata so a truncated
-    // reply is never mistaken for a finished one.
-    let streamInterrupted = false;
-    // Set when the stream's try block throws: the turn outcome for metrics is
-    // 'error' even when no partial content was produced (streamInterrupted
-    // only covers the partial-output case).
-    let turnFailed = false;
-    let truncatedByCap = false;
-    let toolIterations = 0;
     // DLP outbound boundary (Phase 5c): every assistant text chunk passes
     // through the stream guard before reaching the client or the persisted
-    // transcript. Detections are tallied for the turn-end audit; matched
+    // transcript. The loop tallies detections for the turn-end audit; matched
     // text is never persisted or logged.
     const dlpGuard = config.DLP_ENABLED ? new DlpStreamGuard(!!config.DLP_EXTERNAL_ENDPOINT) : null;
-    const dlpDetections: DlpKind[] = [];
-    // The working message list grows as the agentic loop appends tool calls
-    // and results; re-apply the window each round to stay within budget.
-    let turnMessages: ChatMessage[] = windowed.messages;
-    // After a mid-turn failover, subsequent tool rounds stay on the model that
-    // actually served the turn (with its own context window) instead of
-    // retrying the failed primary every round.
-    let roundModelId = modelId;
-    let roundContextWindow = model.context_window;
-    // The pinned system prompt for this round: rebuilt on failover so it
-    // keeps naming the model actually serving the turn.
-    let roundSystemPrompt = chatSystemPrompt;
 
+    const sink: AgenticLoopSink = {
+      text: (delta) => send('delta', { content: delta }),
+      // Brief plan narration before each tool round (Phase 6 loop contract).
+      plan: (planText, toolNames) => send('notice', { code: 'TOOL_PLAN', message: planText, tools: toolNames }),
+      toolCalls: (calls) =>
+        send('notice', {
+          code: 'TOOL_CALLS',
+          message: `Running ${calls.length} tool call${calls.length === 1 ? '' : 's'}…`,
+          tools: calls.map((call) => call.name),
+        }),
+      failover: (modelName, failoverModelId) =>
+        send('notice', {
+          code: 'MODEL_FAILOVER',
+          message: `Primary model unavailable; continued with ${modelName}`,
+          model: { id: failoverModelId, name: modelName },
+        }),
+      done: async (payload) => {
+        doneDelivered = await send('done', { ...payload, citations });
+        return doneDelivered;
+      },
+      error: async (code, message) => {
+        await send('error', { code, message, requestId: req.requestId });
+      },
+    };
+
+    // The generalized agentic loop (Phase 6): bounded tool rounds with
+    // per-step audit, dependent chaining, brief plan narration, and an
+    // approval gate that keeps destructive tools out of auto-execution.
+    // Everything that can throw or await lives inside the try below, so the
+    // concurrency slot acquired above cannot leak.
+    // Both the try and the catch assign loopResult before the finally runs.
+    let loopResult!: Awaited<ReturnType<typeof runAgenticLoop>>;
     try {
-      for (;;) {
-        const round = applyContextWindow(turnMessages.filter((m) => m.role !== 'system'), roundContextWindow, undefined, roundSystemPrompt);
-        turnMessages = round.messages;
-        const result = await gatewayStream({
-          tenantId: auth.tenantId,
-          userId: auth.userId,
-          roleId: auth.roleId,
-          requestId: req.requestId,
-          modelId: roundModelId,
-          classification,
-          messages: turnMessages,
-          tools: providerTools.length ? providerTools : undefined,
-          signal: abortController.signal,
-          telemetry,
-          systemPrompt: roundSystemPrompt,
-        });
-        const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
-        let roundTruncated = false;
-        let sendFailed = false;
-        for await (const event of result.events) {
-          if (abortController.signal.aborted) break;
-          if (event.type === 'text') {
-            let chunk = event.content;
-            if (content.length + chunk.length > maxResponseChars) {
-              chunk = chunk.slice(0, maxResponseChars - content.length);
-              roundTruncated = true;
-            }
-            // DLP: redact before the client or the transcript ever sees it.
-            // `content` accumulates the redacted text, so the persisted
-            // message matches what was streamed.
-            let emit = chunk;
-            if (dlpGuard) {
-              const dlp = await dlpGuard.process(chunk);
-              emit = dlp.emit;
-              dlpDetections.push(...dlp.detections);
-            }
-            content += emit;
-            // A failed send means the client is gone or too slow: stop
-            // consuming provider events for an answer nobody will read.
-            if (emit && !(await send('delta', { content: emit }))) {
-              sendFailed = true;
-              break;
-            }
-            if (roundTruncated) {
-              finishReason = 'length';
-              truncatedByCap = true;
-              abortController.abort();
-              break;
-            }
-          } else if (event.type === 'tool_call') {
-            toolCalls.push(event);
-          } else if (event.type === 'failover') {
-            roundModelId = event.modelId;
-            roundContextWindow = event.contextWindow;
-            // Keep the pinned prompt honest about which model is serving: the
-            // fallback's registry version is unknown here, so name only.
-            roundSystemPrompt = buildSystemPrompt({
-              modelName: event.modelName,
-              toolsAvailable: providerTools.length > 0,
-              sytelineToolsAvailable: providerTools.some((tool) => tool.function.name.startsWith('syteline.')),
-            });
-            if (!(await send('notice', { code: 'MODEL_FAILOVER', message: `Primary model unavailable; continued with ${event.modelName}`, model: { id: event.modelId, name: event.modelName } }))) {
-              sendFailed = true;
-              break;
-            }
-          }
-          // 'usage' events are folded into telemetry by the gateway.
-        }
-        if (sendFailed) break;
-        if (toolCalls.length === 0 || toolIterations >= maxIterations || roundTruncated || abortController.signal.aborted) {
-          if (toolCalls.length > 0 && toolIterations >= maxIterations) {
-            req.log.warn({ requestId: req.requestId, conversationId }, 'agentic loop hit max tool iterations; ending turn without further tool calls');
-          }
-          break;
-        }
-        toolIterations += 1;
-        if (!(await send('notice', { code: 'TOOL_CALLS', message: `Running ${toolCalls.length} tool call${toolCalls.length === 1 ? '' : 's'}…`, tools: toolCalls.map((c) => c.name) }))) {
-          break;
-        }
-        // Record the assistant's tool-call turn so the transcript is faithful.
-        turnMessages.push({
-          role: 'assistant',
-          content: null,
-          tool_calls: toolCalls.map((call) => ({
-            id: call.id,
-            type: 'function' as const,
-            function: { name: call.name, arguments: call.arguments },
-          })),
-        });
-        // Agentic error recovery (charter §2.5): a failed tool call is not a
-        // dead end. Transient-looking failures get exactly one retry; every
-        // outcome — success or sanitized error — is fed back to the model as
-        // a zone-4 tool result so it can retry with fixed arguments or
-        // explain gracefully and offer the next-best path.
-        const outcomes = await Promise.all(toolCalls.map((call) =>
-          runToolCallWithRecovery(runToolCall, {
-            auth,
-            name: call.name,
-            rawArguments: call.arguments,
-            classification,
-            confirmed: false, // The model can never self-confirm destructive tools.
-            requestId: req.requestId,
-            signal: abortController.signal,
-          })
-        ));
-        for (let i = 0; i < toolCalls.length; i += 1) {
-          const call = toolCalls[i]!;
-          const outcome = outcomes[i]!;
-          const execution = outcome.result;
-          if (outcome.retried) {
-            req.log.info(
-              { requestId: req.requestId, conversationId, tool: call.name, errorCode: execution.errorCode },
-              'tool call failed transiently; retried once'
-            );
-          }
-          const rendered = execution.ok
-            ? (execution.output ?? 'null')
-            : `error (${execution.errorCode}): ${execution.message ?? 'tool call failed'}`;
-          turnMessages.push({
-            role: 'tool',
-            tool_call_id: call.id,
-            name: call.name,
-            content: wrapToolResult(call.name, rendered),
-          });
-        }
-      }
-      // DLP: flush the guard's held-back tail so the complete redacted
-      // answer is what the client received (delta before done) and what
-      // gets persisted below. On a dead client the text still lands in
-      // the transcript, redacted; send() safely no-ops on a dead socket.
-      if (dlpGuard) {
-        const flushed = await dlpGuard.flush();
-        dlpDetections.push(...flushed.detections);
-        if (flushed.emit) {
-          content += flushed.emit;
-          await send('delta', { content: flushed.emit });
-        }
-      }
-      if (!abortController.signal.aborted || truncatedByCap) {
-        doneDelivered = await send('done', {
-          finishReason,
-          citations,
-          usage: telemetry.usage,
-          ...(telemetry.timeToFirstTokenMs !== undefined ? { timeToFirstTokenMs: telemetry.timeToFirstTokenMs } : {}),
-          ...(telemetry.fallbackUsed ? { fallback: { id: telemetry.fallbackModelId, name: telemetry.fallbackModelName } } : {}),
-          toolIterations,
-        });
-      }
+      loopResult = await runAgenticLoop({
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        roleId: auth.roleId,
+        requestId: req.requestId,
+        classification,
+        auth,
+        initialModel: { id: modelId, name: model.name, contextWindow: model.context_window, version: model.version },
+        buildSystemPrompt: buildTurnSystemPrompt,
+        providerTools,
+        messages: windowed.messages,
+        signal: abortController.signal,
+        telemetry,
+        maxIterations: config.AI_MAX_TOOL_ITERATIONS,
+        maxResponseChars: config.AI_MAX_RESPONSE_CHARS,
+        dlpGuard,
+        sink,
+        capabilityResolved: capabilityResolution?.resolved,
+        capabilityFallbackUsed: capabilityResolution?.fallbackUsed,
+      });
     } catch (error) {
-      turnFailed = true;
-      if (content) streamInterrupted = true;
-      const code = error instanceof AppError ? error.code : 'STREAM_ERROR';
-      await send('error', { code, message: error instanceof AppError ? error.message : 'Model request failed', requestId: req.requestId });
+      // The loop surfaces stream errors through the sink; a throw here is a
+      // defect in the loop machinery itself — log it, mark the turn failed,
+      // and tell the client honestly instead of hanging the stream.
+      req.log.error({ err: error }, 'agentic loop threw unexpectedly');
+      await send('error', { code: 'STREAM_ERROR', message: 'Model request failed', requestId: req.requestId });
+      loopResult = {
+        content: '',
+        finishReason: 'error',
+        toolIterations: 0,
+        truncatedByCap: false,
+        servingModel: { id: modelId, name: model.name },
+        interrupted: false,
+        failed: true,
+        aborted: abortController.signal.aborted,
+        completed: false,
+        dlpDetections: [],
+      };
     } finally {
       // Release the concurrency slot first: the stream is over (normal close,
       // error, abort, or shutdown), so the next waiting request may proceed.
@@ -654,13 +607,20 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       // a closure retaining reply, the abort controller, and request flags.
       req.raw.socket.off('close', onSocketClose);
       activeSseStreams.delete(activeStream);
-      // Persist the model that actually served the turn: after a mid-turn
-      // failover the transcript must name the fallback model, not the failed
-      // primary.
-      const servingModelId =
-        telemetry.fallbackUsed && telemetry.fallbackModelId ? telemetry.fallbackModelId : modelId;
-      const servingModelName =
-        telemetry.fallbackUsed && telemetry.fallbackModelName ? telemetry.fallbackModelName : model.name;
+      // The loop reports the model that actually served the turn: after a
+      // mid-turn failover the transcript names the fallback model, not the
+      // failed primary.
+      const servingModelId = loopResult.servingModel.id;
+      const servingModelName = loopResult.servingModel.name;
+      const content = loopResult.content;
+      // Set when the stream errored after partial output was produced: the
+      // persisted message gets stream_interrupted metadata so a truncated
+      // reply is never mistaken for a finished one.
+      const streamInterrupted = loopResult.interrupted;
+      // Set when the loop's run threw: the turn outcome for metrics is
+      // 'error' even when no partial content was produced.
+      const turnFailed = loopResult.failed;
+      const dlpDetections = loopResult.dlpDetections;
       // Domain RED metric for the turn: outcome reflects what the user
       // experienced (completed / error / aborted by disconnect).
       recordChatTurn(

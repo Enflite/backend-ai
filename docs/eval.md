@@ -9,7 +9,7 @@ machinery that measures it. Nothing here redefines quality.
 
 ```bash
 # Scripted mock suite: deterministic, no model, no GPU. This is what CI runs.
-# Default corpus is the full 127-case suite (backend/src/eval/cases/).
+# Default corpus is the full 134-case suite (backend/src/eval/cases/).
 npm run eval -- --model <model-id> --no-store
 
 # Fast smoke run: the 16-case representative seed corpus instead.
@@ -75,6 +75,27 @@ a diagnosis grounded in the actual records — with citations to the real record
 IDs and no invented records. `syteline-degraded-001` covers the failure path:
 when a step in the chain fails, the assistant says plainly what it could not
 check and why, with no policy narration.
+
+### Phase 6 cases (capability-aware assistance)
+
+`backend/src/eval/cases/phase6.ts` — deterministic cases for the Phase 6
+surface (see `docs/capabilities.md`):
+
+- `coding-011` — multi-file grounded explanation: cite only real paths and
+  symbols from the supplied files; invented files fail the case.
+- `coding-012` — requested changes arrive as a unified diff anchored to the
+  real path.
+- `coding-013` — asks for the missing file instead of inventing its contents.
+- `coding-014` — uses only real APIs from the shown file; invented helpers
+  fail the case.
+- `tool-selection-005` — generalized tool chain (`repo.search` →
+  `repo.readFile`): the agentic loop is tool-family agnostic, so a
+  non-SyteLine chain resolves the real path with no invented records.
+- `tool-selection-006` — dependent value chaining (`calc.add` →
+  `calc.double`) through a non-SyteLine family.
+
+Every case's `mockResponse` passes its own judge — mocks never invent a
+verdict.
 
 ## The llm-judge harness (subjective dimensions)
 

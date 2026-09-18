@@ -25,6 +25,7 @@ import {
 import { QUALITY_CASES } from './quality.js';
 import { SYTELINE_DIAG_CASES } from './syteline.js';
 import { RELIABILITY_CASES } from './reliability.js';
+import { PHASE6_CASES } from './phase6.js';
 
 export type { EvalCase, EvalCategory, QualityDimension } from '../types.js';
 
@@ -53,4 +54,5 @@ export const EVAL_CORPUS: EvalCase[] = [
   ...QUALITY_CASES,
   ...SYTELINE_DIAG_CASES,
   ...RELIABILITY_CASES,
+  ...PHASE6_CASES,
 ];
