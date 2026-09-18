@@ -341,14 +341,15 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     // Set once the terminal `done` frame was accepted: a socket close after
     // that is a normal post-response close, not a mid-stream disconnect.
     let doneDelivered = false;
-    req.raw.socket.once('close', () => {
+    const onSocketClose = () => {
       // The socket also closes after a normal response; only a close before
       // the response finished means the client disconnected mid-stream.
       if (!reply.raw.writableEnded && !doneDelivered) {
         clientDisconnected = true;
         abortController.abort();
       }
-    });
+    };
+    req.raw.socket.once('close', onSocketClose);
     // Register the hijacked response so shutdown can end it explicitly.
     const activeStream: ActiveSseStream = {
       end: () => {
@@ -538,6 +539,10 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       await send('error', { code, message: error instanceof AppError ? error.message : 'Model request failed', requestId: req.requestId });
     } finally {
       clearInterval(heartbeat);
+      // The response uses Connection: keep-alive, so the socket can serve
+      // later requests: remove the per-request listener or each request leaks
+      // a closure retaining reply, the abort controller, and request flags.
+      req.raw.socket.off('close', onSocketClose);
       activeSseStreams.delete(activeStream);
       // Persist the model that actually served the turn: after a mid-turn
       // failover the transcript must name the fallback model, not the failed

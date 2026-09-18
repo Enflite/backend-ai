@@ -264,7 +264,13 @@ describe('static: raw query() is never used on tenant tables', () => {
 
   it('audit.ts falls back to raw query only when no tenant is known', () => {
     const content = readSource('audit/audit.ts');
-    expect(content).toContain('input.tenantId ? tenantQuery.bind(null, input.tenantId) : query');
+    // recordAudit: tenant-scoped insert when a tenant is known, raw pool
+    // query only when none is.
+    expect(content).toContain('await tenantQuery(input.tenantId, INSERT_AUDIT_SQL, params)');
+    expect(content).toContain('await query(INSERT_AUDIT_SQL, params)');
+    // recordAuditInTx: sets the RLS tenant context inside the transaction
+    // when a tenant is known, so the WITH CHECK policy sees the right tenant.
+    expect(content).toContain('await client.query("SELECT set_config(\'app.tenant_id\', $1, true)", [input.tenantId])');
   });
 
   it('server refuses to boot on a superuser or BYPASSRLS role', () => {
