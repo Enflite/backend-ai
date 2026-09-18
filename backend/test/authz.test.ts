@@ -86,17 +86,17 @@ describe('Authorization & Classification', () => {
       expect(secAdminPerms?.includes('audit:read')).toBe(true);
     });
 
-    it('asserts Developer role does NOT have tool:admin', () => {
+    it('asserts Developer role does NOT have tenant:manage', () => {
       const devPerms = ROLE_PERMISSIONS['Developer'];
       expect(devPerms).toBeDefined();
-      expect(devPerms?.includes('tool:admin')).toBe(false);
+      expect(devPerms?.includes('tenant:manage')).toBe(false);
     });
 
     it('asserts Admin has all permissions', () => {
       const adminPerms = ROLE_PERMISSIONS['Admin'];
       expect(adminPerms).toBeDefined();
       expect(adminPerms?.includes('audit:read')).toBe(true);
-      expect(adminPerms?.includes('tool:admin')).toBe(true);
+      expect(adminPerms?.includes('tenant:manage')).toBe(true);
       expect(adminPerms?.includes('chat:create')).toBe(true);
     });
   });

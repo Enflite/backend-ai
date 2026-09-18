@@ -1,4 +1,20 @@
 import { query, tenantQuery } from '../db/pool.js';
+import { config } from '../config.js';
+import { AppError } from '../errors.js';
+
+/**
+ * Thrown by recordAudit when the audit write fails and AUDIT_FAIL_CLOSED is
+ * enabled (the production default). The request fails with a 503 instead of
+ * proceeding with a silently dropped audit trail. Carries no secrets: the
+ * underlying database error is deliberately not attached to the message or
+ * details, which the error handler renders into the HTTP response.
+ */
+export class AuditPersistenceError extends AppError {
+  constructor() {
+    super(503, 'AUDIT_PERSISTENCE_FAILED', 'Audit event could not be persisted');
+    this.name = 'AuditPersistenceError';
+  }
+}
 
 export interface AuditInput {
   tenantId?: string | null;
@@ -45,6 +61,26 @@ function sanitizeMetadata(metadata?: Record<string, unknown>): Record<string, un
   return cleaned;
 }
 
+const MAX_REASON_LENGTH = 500;
+
+// Upstream error messages can embed internal hostnames, URLs, or fragments of
+// request data. Audit reasons are stored, not shown to end users, but keep them
+// bounded and free of credential-shaped material anyway. The credential pattern
+// also matches quoted keys (`"password":"..."`) and quoted values
+// (`password="correct horse"`); a bare \S+ value would stop at the first space
+// and leak the rest.
+export function sanitizeReason(reason?: string | null): string | null {
+  if (reason == null) return null;
+  return reason
+    .replace(/\bbearer\s+\S+/gi, 'Bearer=[REDACTED]')
+    .replace(
+      /["']?(token|api[_-]?key|secret|password)["']?\s*[:=]\s*("[^"\r\n]*"|'[^'\r\n]*'|\S+)/gi,
+      '$1=[REDACTED]'
+    )
+    .replace(/:\/\/[^/\s:]+:[^/\s@]+@/g, '://[REDACTED]@')
+    .slice(0, MAX_REASON_LENGTH);
+}
+
 export async function recordAudit(input: AuditInput): Promise<void> {
   try {
     const sanitizedMeta = sanitizeMetadata(input.metadata);
@@ -66,11 +102,21 @@ export async function recordAudit(input: AuditInput): Promise<void> {
         input.model ?? null,
         input.tool ?? null,
         input.success ?? true,
-        input.reason ?? null,
+        sanitizeReason(input.reason),
         JSON.stringify(sanitizedMeta),
       ]
     );
   } catch (err) {
+    if (config.AUDIT_FAIL_CLOSED) {
+      // Fail closed: a dropped audit trail must not let the audited action
+      // proceed silently. Log only non-sensitive correlation fields — never
+      // the raw database error, which can embed connection details.
+      console.error('Audit persistence failed (fail-closed):', {
+        action: input.action,
+        requestId: input.requestId ?? undefined,
+      });
+      throw new AuditPersistenceError();
+    }
     console.error('Failed to record audit event:', err);
   }
 }

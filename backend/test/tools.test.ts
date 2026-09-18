@@ -13,7 +13,8 @@ describe('tool gateway', () => {
   });
 
   it('denies UNKNOWN data and invalid parameters before adapter execution', async () => {
-    await expect(executeTool(auth, 'syteline.getItem', { item: 'A', site: 'MAIN' }, 'UNKNOWN', false, new AbortController().signal)).rejects.toMatchObject({ code: 'TOOL_CLASSIFICATION_DENIED' });
+    // UNKNOWN is denied at the clearance boundary before the tool policy check.
+    await expect(executeTool(auth, 'syteline.getItem', { item: 'A', site: 'MAIN' }, 'UNKNOWN', false, new AbortController().signal)).rejects.toMatchObject({ code: 'CLASSIFICATION_DENIED' });
     await expect(executeTool(auth, 'syteline.getItem', { item: '../../etc/passwd', extra: true }, 'INTERNAL', false, new AbortController().signal)).rejects.toMatchObject({ code: 'INVALID_TOOL_PARAMETERS' });
   });
 

@@ -56,9 +56,8 @@ export default function EmptyState({ model, onPrompt }: EmptyStateProps) {
       </div>
 
       <div className="flex items-center gap-4 mt-8">
-        <SecurityBadge icon="🔒" label="End-to-end encrypted" />
+        <SecurityBadge icon="🔒" label="TLS in transit" />
         <SecurityBadge icon="🏠" label="Self-hosted" />
-        <SecurityBadge icon="🛡️" label="CMMC-ready" />
       </div>
     </div>
   );

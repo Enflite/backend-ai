@@ -2,6 +2,8 @@
 
 Copy `backend/.env.example` and provide test-only secrets. `docker compose up postgres minio minio-init` prepares PostgreSQL/pgvector and private S3-compatible storage. Run backend migrations before `npm run dev`; run the frontend with its documented pnpm command.
 
+Create users with `npm run create-user -- --email <email>`; the password comes from a no-echo TTY prompt unless `BACKEND_CREATE_USER_PASSWORD` is set (`--password` is not accepted).
+
 Document ingestion additionally needs an OpenAI-compatible embedding endpoint. `disabled-development` permits non-CUI parsing when no malware scanner is present, but records no clean verdict and cannot start in production. CUI remains quarantined without a clean scanner verdict.
 
 Validation commands are:

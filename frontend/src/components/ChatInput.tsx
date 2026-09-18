@@ -10,6 +10,10 @@ interface ChatInputProps {
   onModelClick: () => void;
 }
 
+/** Client-side upload cap. Must stay in sync with the backend's
+ *  MAX_UPLOAD_BYTES default (25 MiB); the server rejects larger files. */
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+
 export default function ChatInput({ onSend, onStop, isStreaming, disabled, model, onModelClick }: ChatInputProps) {
   const [text, setText] = useState('');
   const [files, setFiles] = useState<UploadedFile[]>([]);
@@ -34,11 +38,20 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
   }
 
   function submit() {
-    if ((!text.trim() && files.length === 0) || isStreaming || disabled) return;
-    onSend(text.trim(), files);
-    setText('');
-    setFiles([]);
-    if (textareaRef.current) textareaRef.current.style.height = 'auto';
+    const sendable = files.filter((f) => f.file);
+    if ((!text.trim() && sendable.length === 0) || isStreaming || disabled) return;
+    // Mark files as uploading for the duration of the send; oversized files
+    // (status 'error') were already excluded from `sendable`.
+    setFiles((prev) => prev.map((f) => (f.file ? { ...f, status: 'uploading' } : f)));
+    void (async () => {
+      try {
+        await onSend(text.trim(), sendable);
+      } finally {
+        setText('');
+        setFiles([]);
+        if (textareaRef.current) textareaRef.current.style.height = 'auto';
+      }
+    })();
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -48,14 +61,19 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
   }
 
   function addFiles(selected: File[]) {
-    const newFiles: UploadedFile[] = selected.map((f) => ({
-      id: Math.random().toString(36).slice(2),
-      name: f.name,
-      size: f.size,
-      type: f.type,
-      status: 'ready',
-      file: f,
-    }));
+    const newFiles: UploadedFile[] = selected.map((f) => {
+      const tooLarge = f.size > MAX_FILE_BYTES;
+      return {
+        id: Math.random().toString(36).slice(2),
+        name: f.name,
+        size: f.size,
+        type: f.type,
+        status: tooLarge ? 'error' : 'ready',
+        error: tooLarge ? `Exceeds the ${formatSize(MAX_FILE_BYTES)} upload limit` : undefined,
+        // Oversized files are excluded from the send entirely.
+        file: tooLarge ? undefined : f,
+      };
+    });
     setFiles((prev) => [...prev, ...newFiles]);
   }
 
@@ -75,7 +93,8 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
     return `${(bytes / 1048576).toFixed(1)} MB`;
   }
 
-  const canSend = text.trim().length > 0 && !isStreaming && !disabled;
+  const sendableCount = files.filter((f) => f.file).length;
+  const canSend = (text.trim().length > 0 || sendableCount > 0) && !isStreaming && !disabled;
 
   return (
     <div className="px-4 pb-4">
@@ -94,13 +113,30 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
         {files.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3 pt-3">
             {files.map((f) => (
-              <div key={f.id} className="flex items-center gap-1.5 px-2 py-1 rounded-md text-xs" style={{ background: 'var(--secondary)', color: 'var(--foreground)' }}>
+              <div
+                key={f.id}
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-xs"
+                style={{
+                  background: 'var(--secondary)',
+                  color: 'var(--foreground)',
+                  border: f.status === 'error' ? '1px solid #ef444480' : '1px solid transparent',
+                }}
+                title={f.error}
+              >
                 <IconFile />
                 <span className="max-w-[140px] truncate">{f.name}</span>
                 <span style={{ color: 'var(--muted-foreground)' }}>{formatSize(f.size)}</span>
-                <button onClick={() => removeFile(f.id)} className="ml-1 hover:text-red-400" style={{ color: 'var(--muted-foreground)' }}>
-                  <IconX />
-                </button>
+                {f.status === 'uploading' && (
+                  <span className="animate-pulse" style={{ color: 'var(--accent)' }}>Uploading…</span>
+                )}
+                {f.status === 'error' && (
+                  <span style={{ color: '#fca5a5' }}>{f.error ?? 'Upload blocked'}</span>
+                )}
+                {f.status !== 'uploading' && (
+                  <button onClick={() => removeFile(f.id)} className="ml-1 hover:text-red-400" style={{ color: 'var(--muted-foreground)' }} aria-label={`Remove ${f.name}`}>
+                    <IconX />
+                  </button>
+                )}
               </div>
             ))}
           </div>

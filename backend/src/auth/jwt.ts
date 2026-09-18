@@ -1,5 +1,5 @@
 import { SignJWT, jwtVerify } from 'jose';
-import { AuthContext, Classification, Permission } from '../authz/permissions.js';
+import { AuthContext, CLASSIFICATIONS, Classification, PERMISSIONS, Permission } from '../authz/permissions.js';
 import { config } from '../config.js';
 
 const secretKey = new TextEncoder().encode(config.JWT_SECRET);
@@ -32,15 +32,30 @@ export async function verifyToken(token: string): Promise<AuthContext> {
     throw new Error('Token is missing required claims');
   }
 
+  // Defense in depth: the middleware re-resolves role/permissions from the
+  // database, but never trust claim shapes blindly even on a signed token.
+  const clearance = payload['clearance'];
+  if (typeof clearance !== 'string' || !(CLASSIFICATIONS as readonly string[]).includes(clearance)) {
+    throw new Error('Token has an invalid clearance claim');
+  }
+  const permissions = payload['permissions'];
+  const validPermissions = new Set<string>(PERMISSIONS as readonly string[]);
+  if (
+    !Array.isArray(permissions) ||
+    permissions.some((permission) => typeof permission !== 'string' || !validPermissions.has(permission))
+  ) {
+    throw new Error('Token has invalid permission claims');
+  }
+
   return {
     userId: payload.sub as string,
     email: payload['email'] as string,
     displayName: payload['displayName'] as string,
-    clearance: payload['clearance'] as Classification,
+    clearance: clearance as Classification,
     tenantId: payload['tenantId'] as string,
     roleId: payload['roleId'] as string,
     roleName: payload['roleName'] as string,
-    permissions: (payload['permissions'] as Permission[]) ?? [],
+    permissions: permissions as Permission[],
     sessionId: payload['sid'] as string,
   };
 }

@@ -1,4 +1,4 @@
-import { FastifyInstance, FastifyReply } from 'fastify';
+import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { query, tenantQuery } from '../db/pool.js';
@@ -10,8 +10,12 @@ import {
   REFRESH_COOKIE,
   clearRefreshCookie,
   createSession,
+  findRefreshReuse,
   hashRefreshToken,
+  InvalidRefreshSessionError,
+  listUserSessions,
   refreshTokenTenant,
+  revokeAllUserSessions,
   revokeSession,
   rotateRefreshToken,
   setRefreshCookie,
@@ -90,16 +94,83 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post('/auth/login', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid login request');
+    // Per-account lockout with escalating backoff blunts distributed password
+    // spraying that the per-IP route limit cannot stop. The lockout state is
+    // checked before authentication; failures increment it, success resets it.
+    const lockState = (
+      await query<{ id: string; failed_login_attempts: number; locked_until: string | null }>(
+        'SELECT id, failed_login_attempts, locked_until FROM users WHERE lower(email) = $1',
+        [parsed.data.email]
+      )
+    ).rows[0];
+    if (lockState?.locked_until && new Date(lockState.locked_until) > new Date()) {
+      // Enumeration-safe: a locked account returns the same generic 401 as
+      // bad credentials. The lock is recorded server-side in the audit trail;
+      // the client learns nothing about whether the email exists.
+      await recordAudit({ action: 'AUTHENTICATION_FAILURE', success: false, reason: 'ACCOUNT_LOCKED', ip: req.ip, requestId: req.requestId, userId: lockState.id });
+      throw Errors.unauthorized('INVALID_CREDENTIALS', 'Invalid email or password');
+    }
     const user = await identityProvider.authenticate(parsed.data);
     if (!user) {
+      if (lockState) {
+        // Atomic read-modify-write in a single statement: concurrent failures
+        // cannot lose increments, and the escalating lockout is computed from
+        // the authoritative new attempt count (5 min, doubling to a 60-min
+        // cap from the 5th failure).
+        const updated = (
+          await query<{ failed_login_attempts: number; locked_until: string | null }>(
+            `UPDATE users
+             SET failed_login_attempts = failed_login_attempts + 1,
+                 locked_until = CASE
+                   WHEN failed_login_attempts + 1 >= 5
+                   THEN NOW() + (LEAST(POWER(2, failed_login_attempts + 1 - 5) * 5, 60) || ' minutes')::interval
+                   ELSE locked_until
+                 END
+             WHERE id = $1
+             RETURNING failed_login_attempts, locked_until`,
+            [lockState.id]
+          )
+        ).rows[0]!;
+        const lockMinutes = updated.failed_login_attempts >= 5
+          ? Math.min(5 * 2 ** (updated.failed_login_attempts - 5), 60)
+          : 0;
+        if (lockMinutes > 0) {
+          await recordAudit({ action: 'AUTHENTICATION_FAILURE', success: false, reason: 'ACCOUNT_LOCKED', ip: req.ip, requestId: req.requestId, userId: lockState.id, metadata: { failedAttempts: updated.failed_login_attempts } });
+        }
+      }
       await recordAudit({ action: 'AUTHENTICATION_FAILURE', success: false, reason: 'INVALID_CREDENTIALS', ip: req.ip, requestId: req.requestId });
       throw Errors.unauthorized('INVALID_CREDENTIALS', 'Invalid email or password');
     }
+    await query('UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = $1', [user.id]);
     const membership = chooseMembership(await membershipsFor(user.id), parsed.data.tenantId);
     const response = await issueLogin(user, membership, reply);
     await recordAudit({ tenantId: membership.tenant_id, userId: user.id, action: 'LOGIN', requestId: req.requestId, ip: req.ip });
     return reply.send(response);
   });
+
+  /**
+   * Shared invalid/reused refresh-token handling. A superseded token presented
+   * after rotation signals token theft: legitimate clients only ever hold the
+   * newest token. Revoke everything and raise a security audit event so the
+   * victim is not silently impersonated.
+   */
+  async function handleInvalidRefresh(
+    tenantId: string,
+    refreshToken: string,
+    req: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<never> {
+    const reuse = await findRefreshReuse(tenantId, refreshToken);
+    clearRefreshCookie(reply);
+    if (reuse) {
+      await revokeAllUserSessions(tenantId, reuse.userId);
+      await recordAudit({ tenantId, userId: reuse.userId, requestId: req.requestId, ip: req.ip,
+        action: 'SECURITY_REFRESH_TOKEN_REUSED', resource: 'session', resourceId: reuse.sessionId,
+        metadata: { revokedAllSessions: true } });
+      throw Errors.unauthorized('REFRESH_TOKEN_REUSED', 'Refresh token was already rotated; all sessions revoked');
+    }
+    throw Errors.unauthorized('INVALID_REFRESH_TOKEN', 'Refresh session is invalid or expired');
+  }
 
   fastify.post('/auth/refresh', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
     const refreshToken = req.cookies[REFRESH_COOKIE];
@@ -118,12 +189,26 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
       )
     ).rows[0];
     if (!row) {
-      clearRefreshCookie(reply);
-      throw Errors.unauthorized('INVALID_REFRESH_TOKEN', 'Refresh session is invalid or expired');
+      return handleInvalidRefresh(tenantId, refreshToken, req, reply);
     }
-    const rotated = await rotateRefreshToken(refreshToken, await buildAuth(row, row), row.session_id);
-    setRefreshCookie(reply, rotated.refreshToken);
-    return reply.send({ accessToken: rotated.accessToken, expiresIn: config.JWT_EXPIRES_IN, user: rotated.auth });
+    // The rotation UPDATE is conditional on the presented hash, so two
+    // concurrent refreshes with the same token cannot both succeed: the loser
+    // throws InvalidRefreshSessionError and is routed through reuse detection
+    // (its token is now superseded) rather than surfacing a 500. Only that
+    // typed error is caught here: signing failures, DB errors, and caller
+    // cancellation (AbortError) propagate so a broken signer is never
+    // misreported as token theft.
+    const completeAuth = await buildAuth(row, row);
+    try {
+      const rotated = await rotateRefreshToken(refreshToken, completeAuth, row.session_id);
+      setRefreshCookie(reply, rotated.refreshToken);
+      return reply.send({ accessToken: rotated.accessToken, expiresIn: config.JWT_EXPIRES_IN, user: rotated.auth });
+    } catch (error) {
+      if (error instanceof InvalidRefreshSessionError) {
+        return handleInvalidRefresh(tenantId, refreshToken, req, reply);
+      }
+      throw error;
+    }
   });
 
   fastify.post('/auth/logout', { preHandler: [requireAuth] }, async (req, reply) => {
@@ -133,8 +218,38 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
     return reply.status(204).send();
   });
 
+  // Log out everywhere: revokes all of the user's sessions, so a stolen
+  // refresh token does not survive the victim logging out.
+  fastify.post('/auth/logout/all', { preHandler: [requireAuth] }, async (req, reply) => {
+    const revoked = await revokeAllUserSessions(req.auth!.tenantId, req.auth!.userId);
+    clearRefreshCookie(reply);
+    await recordAudit({ tenantId: req.auth!.tenantId, userId: req.auth!.userId, action: 'LOGOUT_ALL', requestId: req.requestId, ip: req.ip, metadata: { revokedSessions: revoked } });
+    return reply.send({ revokedSessions: revoked });
+  });
+
+  // Session inventory: list and revoke the caller's own sessions.
+  fastify.get('/auth/sessions', { preHandler: [requireAuth] }, async (req, reply) => {
+    const sessions = await listUserSessions(req.auth!.tenantId, req.auth!.userId);
+    const currentId = req.auth!.sessionId;
+    return reply.send({ sessions: sessions.map((session) => ({ ...session, current: session.id === currentId })) });
+  });
+
+  fastify.delete('/auth/sessions/:id', { preHandler: [requireAuth] }, async (req, reply) => {
+    const parsed = z.object({ id: z.string().uuid() }).safeParse(req.params);
+    if (!parsed.success) throw Errors.badRequest('INVALID_ID', 'Invalid session ID');
+    const owned = await tenantQuery(
+      req.auth!.tenantId,
+      'SELECT 1 FROM sessions WHERE id = $1 AND tenant_id = $2 AND user_id = $3 AND revoked_at IS NULL',
+      [parsed.data.id, req.auth!.tenantId, req.auth!.userId]
+    );
+    if (owned.rowCount !== 1) throw Errors.notFound('SESSION_NOT_FOUND', 'Session not found');
+    await revokeSession(req.auth!.tenantId, parsed.data.id);
+    await recordAudit({ tenantId: req.auth!.tenantId, userId: req.auth!.userId, action: 'SESSION_REVOKE', requestId: req.requestId, ip: req.ip, resource: 'session', resourceId: parsed.data.id });
+    return reply.status(204).send();
+  });
+
   if (config.DEV_AUTH_ENABLED) {
-    fastify.post('/auth/dev-login', async (req, reply) => {
+    fastify.post('/auth/dev-login', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
       const parsed = devLoginSchema.safeParse(req.body);
       if (!parsed.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid development login request');
       const user = (

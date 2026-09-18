@@ -11,6 +11,12 @@ export interface Citation {
   chunkId?: string;
 }
 
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
@@ -20,6 +26,11 @@ export interface Message {
   isStreaming?: boolean;
   model?: string;
   classification?: DataClassification;
+  usage?: TokenUsage;
+  /** Transient status shown while streaming (tool calls, failover notices). */
+  notice?: string;
+  /** Set when the turn failed; the message keeps partial content for retry. */
+  error?: string;
 }
 
 export interface Conversation {
@@ -48,6 +59,8 @@ export interface UploadedFile {
   size: number;
   type: string;
   status: 'uploading' | 'processing' | 'ready' | 'error';
+  /** Present when status is 'error' (e.g. file exceeds the size limit). */
+  error?: string;
   file?: File;
 }
 
