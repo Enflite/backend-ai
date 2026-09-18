@@ -168,6 +168,9 @@ describe('static: raw query() is never used on tenant tables', () => {
   // documented, tenant-free purpose:
   //  - audit/audit.ts: tenant-less authentication-failure records, behind a
   //    `tenantId ? tenantQuery : query` guard (asserted separately).
+  //  - ai/gateway/routes.ts: model-admin routes read/write the `models`
+  //    table, which is platform-level (no tenant_id, not RLS-protected);
+  //    gated by requirePermission('model:manage').
   //  - auth/identityProvider.ts, auth/routes.ts: login flow reads `users`,
   //    `memberships`, `tenants`, `roles`, `permissions` — none carry RLS;
   //    session writes go through tenantQuery.
@@ -178,6 +181,7 @@ describe('static: raw query() is never used on tenant tables', () => {
   //    roles (a BYPASSRLS role would silently defeat even FORCE RLS).
   const RAW_QUERY_ALLOWLIST = new Set([
     'audit/audit.ts',
+    'ai/gateway/routes.ts',
     'auth/identityProvider.ts',
     'auth/routes.ts',
     'documents/queue.ts',

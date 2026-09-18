@@ -79,7 +79,7 @@ export async function conversationRoutes(fastify: FastifyInstance): Promise<void
     if (!pagination.success) throw Errors.badRequest('INVALID_PAGINATION', 'Invalid pagination parameters');
     const result = await tenantQuery(
       auth.tenantId,
-      `SELECT m.id, m.conversation_id, m.role, m.content, m.model_id, m.citations, m.created_at
+      `SELECT m.id, m.conversation_id, m.role, m.content, m.model_id, m.citations, m.metadata, m.created_at
        FROM messages m JOIN conversations c ON c.id = m.conversation_id AND c.tenant_id = m.tenant_id
        WHERE m.conversation_id = $1 AND m.tenant_id = $2 AND c.user_id = $3 ORDER BY m.created_at LIMIT $4 OFFSET $5`,
       [params.data.id, auth.tenantId, auth.userId, pagination.data.limit, pagination.data.offset]
