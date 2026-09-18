@@ -28,7 +28,7 @@ const auth = {
   displayName: 'U',
   roleName: 'User',
   clearance: 'INTERNAL' as const,
-  permissions: ['tool:use'] as Permission[],
+  permissions: ['tool:use', 'syteline:read'] as Permission[],
 };
 
 const sytelineTool = toolRegistry.find((tool) => tool.name === 'syteline.getItem')!;
@@ -168,6 +168,29 @@ describe('runToolCall', () => {
     expect(result.ok).toBe(true);
     expect(result.truncated).toBeUndefined();
     expect(result.data).toEqual({ item: 'A', qty: 3 });
+  });
+
+  it('audits successful calls with bounded result-size metadata (counts only)', async () => {
+    sytelineTool.execute = vi.fn(async () => ({ item: 'A', qty: 3 })) as never;
+    const result = await runToolCall({
+      auth,
+      name: 'syteline.getItem',
+      rawArguments: '{"item":"A","site":"MAIN"}',
+      classification: 'INTERNAL',
+      requestId: 'req-size',
+      signal: new AbortController().signal,
+    });
+    expect(result.ok).toBe(true);
+    const auditCall = recordAudit.mock.calls.find(
+      (call) => (call[0] as { action: string }).action === 'TOOL_EXECUTION'
+    );
+    expect(auditCall).toBeDefined();
+    const metadata = (auditCall![0] as { metadata: Record<string, unknown> }).metadata;
+    expect(metadata.executionId).toBe('exec-1');
+    expect(metadata.resultChars).toBe(JSON.stringify({ item: 'A', qty: 3 }).length);
+    expect(metadata.truncated).toBe(false);
+    // No result content in the audit trail.
+    expect(JSON.stringify(metadata)).not.toContain('"qty"');
   });
 
   it('survives non-JSON-serializable tool output', async () => {

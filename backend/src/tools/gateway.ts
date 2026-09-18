@@ -327,8 +327,10 @@ export async function runToolCall(options: {
       deadline,
     ]);
     await tenantQuery(auth.tenantId, "UPDATE tool_executions SET status = 'SUCCEEDED', completed_at = NOW() WHERE id = $1", [executionId]);
-    await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId, action: 'TOOL_EXECUTION', tool: name, classification, metadata: { executionId } });
     const rendered = safeStringify(output);
+    // Bounded result-size metadata (counts only, never result content):
+    // operators can see when an upstream returns pathological payloads.
+    await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId, action: 'TOOL_EXECUTION', tool: name, classification, metadata: { executionId, resultChars: rendered.length, truncated: rendered.length > config.AI_TOOL_OUTPUT_MAX_CHARS } });
     if (rendered.length > config.AI_TOOL_OUTPUT_MAX_CHARS) {
       // Never hand API consumers truncated-then-reparsed JSON: the structured
       // result becomes an explicit marker while the model still gets a preview.

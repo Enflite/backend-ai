@@ -17,7 +17,7 @@
  *     case cites exists in the fixture outputs — the deterministic
  *     "zero invented records" check.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
@@ -33,6 +33,7 @@ import { MockSyteLineAdapter } from '../src/tools/sytelineFixture.js';
 import { overrideSyteLineAdapter } from '../src/tools/syteline.js';
 import { SYTELINE_DIAG_CASES } from '../src/eval/cases/syteline.js';
 import { authFor, TENANT_A, USER_A1 } from './helpers/securityFixtures.js';
+import { config } from '../src/config.js';
 import type { Permission } from '../src/authz/permissions.js';
 
 const SYTELINE_TOOLS = [
@@ -288,5 +289,92 @@ describe('syteline fixture consistency with the eval corpus', () => {
     // 400 needed for 100 FG-9000, 60 available → 340 short, builds capped at 15.
     expect(400 - compAvail.available).toBe(340);
     expect(Math.floor(compAvail.available / pinion.quantityPer)).toBe(15);
+  });
+});
+
+describe('HttpSyteLineAdapter', () => {
+  const BASE_URL = 'https://syteline.example';
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let originalBaseUrl: unknown;
+  let originalToken: unknown;
+  let originalMaxRows: unknown;
+
+  // Config is read at call time by the adapter, so it can be overridden per
+  // test after the static imports above have loaded it.
+  beforeEach(() => {
+    originalBaseUrl = config.SYTELINE_BASE_URL;
+    originalToken = config.SYTELINE_API_TOKEN;
+    originalMaxRows = config.SYTELINE_MAX_ROWS;
+    (config as Record<string, unknown>).SYTELINE_BASE_URL = BASE_URL;
+    (config as Record<string, unknown>).SYTELINE_API_TOKEN = 'test-token';
+    fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) }));
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    (config as Record<string, unknown>).SYTELINE_BASE_URL = originalBaseUrl;
+    (config as Record<string, unknown>).SYTELINE_API_TOKEN = originalToken;
+    (config as Record<string, unknown>).SYTELINE_MAX_ROWS = originalMaxRows;
+    vi.unstubAllGlobals();
+  });
+
+  const signal = AbortSignal.timeout(5000);
+  const adapter = () => new HttpSyteLineAdapter();
+
+  it('builds the item URL with query params and a Bearer token', async () => {
+    await adapter().getItem({ item: 'WIDGET', site: 'MAIN' }, signal);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe(`${BASE_URL}/api/items?item=WIDGET&site=MAIN`);
+    expect((init.headers as Record<string, string>).authorization).toBe('Bearer test-token');
+    expect((init.headers as Record<string, string>).accept).toBe('application/json');
+  });
+
+  it('omits undefined and empty query params', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ lines: [] }) });
+    await adapter().getSalesOrder({ orderNumber: 'SO-1' }, signal);
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe(`${BASE_URL}/api/sales-orders?orderNumber=SO-1`);
+  });
+
+  it('maps HTTP failures to a structured upstream error without leaking the token', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 503, json: async () => ({}) });
+    await expect(adapter().getItem({ item: 'WIDGET', site: 'MAIN' }, signal)).rejects.toMatchObject({
+      code: 'SYTELINE_UPSTREAM_ERROR',
+    });
+    await expect(adapter().getItem({ item: 'WIDGET', site: 'MAIN' }, signal)).rejects.not.toThrowError(/test-token/);
+  });
+
+  it('fails closed when the adapter is not configured', async () => {
+    (config as Record<string, unknown>).SYTELINE_BASE_URL = undefined;
+    await expect(adapter().getItem({ item: 'WIDGET', site: 'MAIN' }, signal)).rejects.toMatchObject({
+      code: 'SYTELINE_NOT_CONFIGURED',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('caps list results at SYTELINE_MAX_ROWS with a truncated marker', async () => {
+    (config as Record<string, unknown>).SYTELINE_MAX_ROWS = 3;
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ purchaseOrders: [{ po: 1 }, { po: 2 }, { po: 3 }, { po: 4 }, { po: 5 }] }),
+    });
+    const result = await adapter().getOpenPurchaseOrders({ item: 'WIDGET' }, signal);
+    expect(result.purchaseOrders).toHaveLength(3);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('aborts the request when the caller signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let seenSignal: AbortSignal | undefined;
+    fetchMock.mockImplementation(async (_url: unknown, init?: { signal?: AbortSignal }) => {
+      seenSignal = init?.signal;
+      if (seenSignal?.aborted) throw new DOMException('aborted', 'AbortError');
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    await expect(adapter().getItem({ item: 'WIDGET', site: 'MAIN' }, controller.signal)).rejects.toThrowError(/abort/i);
+    expect(seenSignal?.aborted).toBe(true);
   });
 });
