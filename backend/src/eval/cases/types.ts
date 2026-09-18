@@ -27,6 +27,16 @@ export type EvalCategory =
   | 'adversarial'
   | 'sensitive-data';
 
+export type QualityDimension =
+  | 'helpfulness'
+  | 'honesty-calibration'
+  | 'instruction-following'
+  | 'grounding-citations'
+  | 'tool-competence'
+  | 'multi-turn-coherence'
+  | 'refusal-correctness'
+  | 'tone';
+
 export interface EvalCase {
   id: string;
   category: EvalCategory;
@@ -43,14 +53,19 @@ export interface EvalCase {
       | 'refusal'
       | 'citation-grounding'
       | 'tool-call'
-      | 'no-exfiltration';
+      | 'no-exfiltration'
+      | 'llm-judge';
     expectedSubstrings?: string[];
     forbiddenSubstrings?: string[];
     jsonSchema?: unknown;
     requiredCitations?: string[];
     expectedTool?: string;
     expectedToolArgs?: Record<string, unknown>;
+    /** Present only when kind === 'llm-judge'. Runner skips these without a judge model; they never gate CI. */
+    llmJudge?: { dimension: QualityDimension; rubric: string };
   };
   mockResponse?: string | { toolCalls: Array<{ name: string; args: unknown }>; content?: string };
   severity: 'p0' | 'p1' | 'p2';
+  /** Assistant-quality dimensions (docs/assistant-quality.md §5) this case measures. */
+  dimensions?: QualityDimension[];
 }
