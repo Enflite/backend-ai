@@ -39,6 +39,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const filtered = conversations.filter((c) =>
     c.title.toLowerCase().includes(search.toLowerCase())
@@ -48,7 +49,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
   function startRename(conv: Conversation) {
     setRenamingId(conv.id);
     setRenameValue(conv.title);
-    setContextMenu(null);
+    closeContextMenu();
   }
 
   function commitRename(id: string) {
@@ -58,7 +59,13 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
 
   function handleContextMenu(e: React.MouseEvent, id: string) {
     e.preventDefault();
+    setConfirmDeleteId(null);
     setContextMenu({ id, x: e.clientX, y: e.clientY });
+  }
+
+  function closeContextMenu() {
+    setContextMenu(null);
+    setConfirmDeleteId(null);
   }
 
   if (collapsed) {
@@ -79,7 +86,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
       <aside
         className="flex flex-col h-full"
         style={{ width: 260, background: 'var(--card)', borderRight: '1px solid var(--border)', flexShrink: 0 }}
-        onClick={() => contextMenu && setContextMenu(null)}
+        onClick={() => contextMenu && closeContextMenu()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-3 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
@@ -208,13 +215,37 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
           >
             <IconEdit size={14} /> Rename
           </button>
-          <button
-            className="w-full text-left px-3 py-1.5 hover:bg-secondary flex items-center gap-2"
-            style={{ color: '#ef4444' }}
-            onClick={() => { onDelete(contextMenu.id); setContextMenu(null); }}
-          >
-            <IconTrash size={14} /> Delete
-          </button>
+          {confirmDeleteId === contextMenu.id ? (
+            <div className="px-3 py-1.5">
+              <p className="text-xs mb-2" style={{ color: 'var(--muted-foreground)' }}>
+                Delete this conversation? This cannot be undone.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  className="flex-1 px-2 py-1 rounded text-xs font-medium"
+                  style={{ background: '#ef4444', color: '#fff' }}
+                  onClick={() => { onDelete(contextMenu.id); closeContextMenu(); }}
+                >
+                  Confirm
+                </button>
+                <button
+                  className="flex-1 px-2 py-1 rounded text-xs"
+                  style={{ border: '1px solid var(--border)', color: 'var(--foreground)' }}
+                  onClick={() => setConfirmDeleteId(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              className="w-full text-left px-3 py-1.5 hover:bg-secondary flex items-center gap-2"
+              style={{ color: '#ef4444' }}
+              onClick={() => setConfirmDeleteId(contextMenu.id)}
+            >
+              <IconTrash size={14} /> Delete
+            </button>
+          )}
         </div>
       )}
     </>

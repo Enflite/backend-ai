@@ -59,6 +59,8 @@ export interface UploadedFile {
   size: number;
   type: string;
   status: 'uploading' | 'processing' | 'ready' | 'error';
+  /** Present when status is 'error' (e.g. file exceeds the size limit). */
+  error?: string;
   file?: File;
 }
 
