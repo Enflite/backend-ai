@@ -45,6 +45,55 @@ function escapeUntrusted(value: string): string {
 }
 
 /**
+ * Light, deterministic query normalization before embedding: trim, collapse
+ * internal whitespace runs, and cap length. No LLM query rewriting — the
+ * embedding model sees the user's literal question.
+ */
+export function normalizeQuery(queryText: string): string {
+  return queryText.trim().replace(/\s+/g, ' ').slice(0, config.RAG_QUERY_MAX_CHARS);
+}
+
+/**
+ * Maximal-marginal-relevance-lite diversity pass over the hybrid-scored
+ * candidates. Greedily selects up to topK chunks; a chunk from an already
+ * represented document is discounted by `lambda`, so when the top results all
+ * come from one document, the best chunk from a second document is blended in
+ * instead of a near-duplicate sibling — provided it is competitive. lambda = 0
+ * preserves strict top-K order. Deterministic: ties break by chunkId.
+ */
+export function applyDiversity(
+  candidates: AuthorizedChunk[],
+  topK: number,
+  lambda: number
+): AuthorizedChunk[] {
+  if (lambda <= 0 || candidates.length <= topK) return candidates.slice(0, topK);
+  const effective = (chunk: AuthorizedChunk, represented: Set<string>): number =>
+    represented.has(chunk.documentId) ? chunk.score * (1 - lambda) : chunk.score;
+  const selected: AuthorizedChunk[] = [];
+  const represented = new Set<string>();
+  const remaining = [...candidates];
+  while (selected.length < topK && remaining.length > 0) {
+    let best = 0;
+    for (let i = 1; i < remaining.length; i += 1) {
+      const contender = remaining[i]!;
+      const incumbent = remaining[best]!;
+      const contenderValue = effective(contender, represented);
+      const incumbentValue = effective(incumbent, represented);
+      if (
+        contenderValue > incumbentValue ||
+        (contenderValue === incumbentValue && contender.chunkId < incumbent.chunkId)
+      ) {
+        best = i;
+      }
+    }
+    const picked = remaining.splice(best, 1)[0]!;
+    selected.push(picked);
+    represented.add(picked.documentId);
+  }
+  return selected;
+}
+
+/**
  * Reranker hook point. Retrieval always applies the in-process hybrid score
  * (85% vector cosine + 15% lexical overlap) over already-authorized candidates;
  * an operator may inject an external reranker (e.g. a cross-encoder service) via
@@ -82,7 +131,11 @@ export async function retrieveAuthorizedContext(
   requestedTopK = 8
 ): Promise<RetrievalResult> {
   const topK = Math.min(Math.max(1, requestedTopK), config.RAG_TOP_K_MAX);
-  const [embedding] = await internalEmbeddingProvider.embed([queryText], AbortSignal.timeout(30000));
+  const query = normalizeQuery(queryText);
+  // An empty query has no retrievable meaning: return the empty retrieval
+  // shape instead of embedding a meaningless vector.
+  if (!query) return { context: '', citations: [], results: [] };
+  const [embedding] = await internalEmbeddingProvider.embed([query], AbortSignal.timeout(30000));
   if (!embedding || embedding.length !== internalEmbeddingProvider.dimensions || !embedding.every(Number.isFinite)) {
     throw new Error('Embedding provider returned an invalid query vector');
   }
@@ -105,6 +158,7 @@ export async function retrieveAuthorizedContext(
        JOIN documents d ON d.id = dc.document_id AND d.tenant_id = dc.tenant_id
        WHERE dc.tenant_id = $1 AND d.status = 'READY' AND d.deleted_at IS NULL
          AND d.classification = ANY($2::text[]) AND dc.classification = d.classification
+         AND dc.classification <> 'UNKNOWN' AND d.classification <> 'UNKNOWN'
          AND dc.embedding_model = $7 AND dc.embedding_version = $8 AND dc.embedding_dimensions = $9
          AND ($3::uuid[] IS NULL OR d.id = ANY($3::uuid[]))
          AND (
@@ -133,9 +187,12 @@ export async function retrieveAuthorizedContext(
     ).rows;
   });
 
-  const results = rows.map((row) => {
+  const scored = rows.map((row) => {
     const vectorScore = Math.max(0, Math.min(1, Number(row.vector_score)));
-    const score = (vectorScore * 0.85) + (lexicalScore(queryText, row.content) * 0.15);
+    const score = (vectorScore * 0.85) + (lexicalScore(query, row.content) * 0.15);
+    // Citations are populated exclusively from the DB row — never synthesized.
+    // Every citation field (documentId/documentName/chunkId/page/section)
+    // must trace back to an authorized row returned by the SQL above.
     const citation: Citation = {
       documentId: row.document_id,
       documentName: row.filename,
@@ -146,12 +203,17 @@ export async function retrieveAuthorizedContext(
     };
     return { documentId: row.document_id, documentName: row.filename, chunkId: row.chunk_id,
       text: row.content, score, citation };
-  }).sort((a, b) => b.score - a.score).slice(0, topK);
+  }).sort((a, b) => b.score - a.score);
+
+  // MMR-lite diversity pass: when the top hybrid hits all come from one
+  // document, blend in the best chunk from another document so a single long
+  // document cannot monopolize every topK slot.
+  const selected = applyDiversity(scored, topK, config.RAG_DIVERSITY_LAMBDA);
 
   // Optional similarity floor (RAG_SIMILARITY_THRESHOLD, default 0 = disabled).
   // Applied after the hybrid rerank so low-relevance authorized chunks never
   // reach model context even when topK slots are unfilled.
-  const reranked = await activeReranker.rerank(queryText, results);
+  const reranked = await activeReranker.rerank(query, selected);
   // Reranker output is untrusted: reconstruct every result from the canonical
   // authorized candidate map instead of accepting the reranker's object. A
   // compromised reranker can therefore only reorder candidates and propose a
@@ -159,7 +221,7 @@ export async function retrieveAuthorizedContext(
   // canonical candidate, so mutated content injected alongside a known chunkId
   // is discarded. Unknown or duplicated chunk IDs are dropped so only the
   // SQL-authorized set can flow through, in the reranker's order.
-  const canonical = new Map(results.map((result) => [result.chunkId, result]));
+  const canonical = new Map(selected.map((result) => [result.chunkId, result]));
   const seen = new Set<string>();
   const sanitized: AuthorizedChunk[] = [];
   for (const chunk of reranked) {
