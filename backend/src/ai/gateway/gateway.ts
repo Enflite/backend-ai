@@ -48,28 +48,31 @@ export interface GatewayStreamResult {
 }
 
 /**
- * Trailing marker appended to the persisted assistant message when the chat
- * stream errored mid-way, so a truncated transcript is never mistaken for a
- * complete answer.
+ * Persisted `messages.metadata` stream status for assistant turns.
  *
- * The messages table currently has no metadata/status column (there is no
- * JSON metadata column either), so until a migration adds one the marker
- * travels in the message body itself — where it also surfaces to any client
- * reading conversation history, and the SSE 'error' event already surfaces it
- * to the live stream client.
+ * The interrupted marker used to travel in the message body itself; it now
+ * lives in metadata so history readers see the clean model text plus an
+ * explicit machine-readable status. Migration 015
+ * (`015_message_metadata.sql`) adds the column and backfills rows that still
+ * carry the legacy in-content marker.
  */
-export const STREAM_INTERRUPTED_MARKER =
-  '[incomplete: stream ended before the model finished]';
+export type StreamStatus = 'completed' | 'interrupted';
+
+export interface StreamMetadata {
+  stream_status: StreamStatus;
+  /** Present and true only when the stream did not run to completion. */
+  stream_interrupted?: boolean;
+}
 
 /**
- * Appends the stream-interrupted marker to assistant content that was cut
- * short by a stream error. Idempotent: content already carrying the marker is
- * returned unchanged.
+ * Builds the `messages.metadata` value for a finished assistant turn.
+ * `interrupted` covers provider errors, client disconnects, and stalled
+ * consumers; `completed` means the terminal `done` frame was delivered.
  */
-export function markStreamInterrupted(content: string): string {
-  const trimmed = content.trimEnd();
-  if (trimmed.endsWith(STREAM_INTERRUPTED_MARKER)) return content;
-  return `${trimmed}\n\n${STREAM_INTERRUPTED_MARKER}`;
+export function streamMetadata(status: StreamStatus): StreamMetadata {
+  return status === 'interrupted'
+    ? { stream_status: status, stream_interrupted: true }
+    : { stream_status: status };
 }
 
 function resolveEndpoint(model: ApprovedModel): void {
