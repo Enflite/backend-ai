@@ -1,13 +1,21 @@
 import { config } from '../config.js';
 import { tenantQuery } from '../db/pool.js';
 import { Errors } from '../errors.js';
-import { s3Storage } from '../storage/storage.js';
+import { ObjectStorage, s3Storage } from '../storage/storage.js';
+import { ExtractedSection, extractDocument } from './extraction.js';
+import { MalwareScanner, malwareScanner, scanMayProceed } from './malware.js';
 
 export interface EmbeddingProvider {
+  readonly model: string;
+  readonly version: string;
+  readonly dimensions: number;
   embed(texts: string[], signal?: AbortSignal): Promise<number[][]>;
 }
 
 export const internalEmbeddingProvider: EmbeddingProvider = {
+  model: config.EMBEDDING_MODEL ?? '',
+  version: config.EMBEDDING_MODEL_VERSION,
+  dimensions: config.EMBEDDING_DIMENSIONS,
   async embed(texts, signal) {
     if (!config.EMBEDDING_BASE_URL || !config.EMBEDDING_MODEL) {
       throw Errors.internal('Internal embedding provider is not configured', undefined, 'EMBEDDING_NOT_CONFIGURED');
@@ -31,6 +39,13 @@ export const internalEmbeddingProvider: EmbeddingProvider = {
   },
 };
 
+export interface DocumentChunk {
+  text: string;
+  page?: number;
+  section?: string;
+  sourceLocation?: string;
+}
+
 export function chunkText(text: string, maxCharacters = 1600, overlap = 200): string[] {
   const normalized = text.replace(/\r\n/g, '\n').replace(/\u0000/g, '').trim();
   if (!normalized) return [];
@@ -49,71 +64,99 @@ export function chunkText(text: string, maxCharacters = 1600, overlap = 200): st
   return chunks.filter(Boolean);
 }
 
-async function scan(bytes: Uint8Array): Promise<boolean> {
-  if (!config.MALWARE_SCANNER_ENDPOINT) return !config.MALWARE_SCAN_REQUIRED;
-  const response = await fetch(config.MALWARE_SCANNER_ENDPOINT, {
-    method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: bytes,
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!response.ok) return false;
-  const result = await response.json() as { clean?: boolean };
-  return result.clean === true;
+export function chunkSections(sections: ExtractedSection[]): DocumentChunk[] {
+  return sections.flatMap((source) => chunkText(source.text).map((text) => ({
+    text,
+    ...(source.page ? { page: source.page } : {}),
+    ...(source.section ? { section: source.section } : {}),
+    ...(source.sourceLocation ? { sourceLocation: source.sourceLocation } : {}),
+  })));
 }
 
-async function extract(bytes: Uint8Array, mimeType: string, filename: string): Promise<string> {
-  if (mimeType.startsWith('text/')) return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  if (!config.DOCUMENT_EXTRACTOR_ENDPOINT) {
-    throw Errors.internal('Binary document extractor is not configured', undefined, 'EXTRACTOR_NOT_CONFIGURED');
-  }
-  const response = await fetch(config.DOCUMENT_EXTRACTOR_ENDPOINT, {
-    method: 'POST',
-    headers: { 'content-type': mimeType, 'x-document-filename': encodeURIComponent(filename) },
-    body: bytes,
-    signal: AbortSignal.timeout(120000),
-  });
-  if (!response.ok) throw Errors.internal('Document extraction failed', { status: response.status }, 'EXTRACTION_FAILED');
-  const result = await response.json() as { text?: string };
-  if (!result.text) throw Errors.internal('Document extractor returned no text', undefined, 'EXTRACTION_FAILED');
-  return result.text;
+interface IngestionDependencies {
+  storage: ObjectStorage;
+  scanner: MalwareScanner;
+  extractor: typeof extractDocument;
+  embeddings: EmbeddingProvider;
 }
 
-export async function ingestDocument(documentId: string, tenantId: string): Promise<void> {
+const defaultDependencies: IngestionDependencies = {
+  storage: s3Storage,
+  scanner: malwareScanner,
+  extractor: extractDocument,
+  embeddings: internalEmbeddingProvider,
+};
+
+function errorCode(error: unknown): string {
+  if (error instanceof Error && 'code' in error) return String((error as Error & { code: unknown }).code).slice(0, 100);
+  return 'INGESTION_FAILED';
+}
+
+export async function ingestDocument(
+  documentId: string,
+  tenantId: string,
+  dependencies: IngestionDependencies = defaultDependencies
+): Promise<'READY' | 'QUARANTINED'> {
   const document = (
-    await tenantQuery<{ object_key: string; mime_type: string; filename: string; classification: string }>(
+    await tenantQuery<{ object_key: string; mime_type: string; classification: string }>(
       tenantId,
       `UPDATE documents SET status = 'PROCESSING', error_code = NULL, updated_at = NOW()
        WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-       RETURNING object_key, mime_type, filename, classification`,
+       RETURNING object_key, mime_type, classification`,
       [documentId, tenantId]
     )
   ).rows[0];
   if (!document) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
   if (document.classification === 'UNKNOWN') {
     await tenantQuery(tenantId, "UPDATE documents SET status = 'FAILED', error_code = 'CLASSIFICATION_REQUIRED', updated_at = NOW() WHERE id = $1", [documentId]);
-    return;
+    throw Errors.badRequest('CLASSIFICATION_REQUIRED', 'Document classification is required before ingestion');
   }
+
   try {
-    const bytes = await s3Storage.get(document.object_key);
-    if (!(await scan(bytes))) {
-      await tenantQuery(tenantId, "UPDATE documents SET status = 'QUARANTINED', error_code = 'MALWARE_SCAN_FAILED', updated_at = NOW() WHERE id = $1", [documentId]);
-      return;
+    const bytes = await dependencies.storage.get(document.object_key);
+    const scan = await dependencies.scanner.scan(bytes, AbortSignal.timeout(30000));
+    if (!scanMayProceed(scan, document.classification)) {
+      const code = scan.verdict === 'INFECTED' ? 'MALWARE_DETECTED' : 'SCANNER_UNAVAILABLE';
+      await tenantQuery(tenantId, "UPDATE documents SET status = 'QUARANTINED', error_code = $2, updated_at = NOW() WHERE id = $1", [documentId, code]);
+      return 'QUARANTINED';
     }
-    const chunks = chunkText(await extract(bytes, document.mime_type, document.filename));
+
+    const chunks = chunkSections(await dependencies.extractor(bytes, document.mime_type));
     if (chunks.length === 0) throw Errors.badRequest('EMPTY_DOCUMENT', 'No extractable document text found');
-    const embeddings = await internalEmbeddingProvider.embed(chunks, AbortSignal.timeout(config.AI_REQUEST_TIMEOUT_MS));
+    if (chunks.length > config.MAX_DOCUMENT_CHUNKS) {
+      throw Errors.badRequest('TOO_MANY_CHUNKS', 'Document exceeds the configured chunk limit');
+    }
+
+    const vectors: number[][] = [];
+    for (let offset = 0; offset < chunks.length; offset += config.EMBEDDING_BATCH_SIZE) {
+      const batch = chunks.slice(offset, offset + config.EMBEDDING_BATCH_SIZE);
+      vectors.push(...await dependencies.embeddings.embed(
+        batch.map((chunk) => chunk.text),
+        AbortSignal.timeout(config.AI_REQUEST_TIMEOUT_MS)
+      ));
+    }
+    if (vectors.length !== chunks.length || vectors.some((vector) => vector.length !== dependencies.embeddings.dimensions)) {
+      throw Errors.internal('Embedding provider returned invalid dimensions', undefined, 'INVALID_EMBEDDING_RESPONSE');
+    }
+
     await tenantQuery(tenantId, 'DELETE FROM document_chunks WHERE document_id = $1', [documentId]);
     for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index]!;
       await tenantQuery(
         tenantId,
-        `INSERT INTO document_chunks (document_id, tenant_id, chunk_index, content, embedding)
-         VALUES ($1, $2, $3, $4, $5::vector)`,
-        [documentId, tenantId, index, chunks[index], `[${embeddings[index]!.join(',')}]`]
+        `INSERT INTO document_chunks (
+          document_id, tenant_id, chunk_index, content, embedding, classification,
+          embedding_model, embedding_version, embedding_dimensions, page, section, source_location
+        ) VALUES ($1,$2,$3,$4,$5::vector,$6,$7,$8,$9,$10,$11,$12)`,
+        [documentId, tenantId, index, chunk.text, `[${vectors[index]!.join(',')}]`, document.classification,
+          dependencies.embeddings.model, dependencies.embeddings.version, dependencies.embeddings.dimensions,
+          chunk.page ?? null, chunk.section ?? null, chunk.sourceLocation ?? null]
       );
     }
-    await tenantQuery(tenantId, "UPDATE documents SET status = 'COMPLETED', updated_at = NOW() WHERE id = $1", [documentId]);
+    await tenantQuery(tenantId, "UPDATE documents SET status = 'READY', updated_at = NOW() WHERE id = $1", [documentId]);
+    return 'READY';
   } catch (error) {
-    const code = error instanceof Error && 'code' in error ? String((error as any).code) : 'INGESTION_FAILED';
-    await tenantQuery(tenantId, "UPDATE documents SET status = 'FAILED', error_code = $2, updated_at = NOW() WHERE id = $1", [documentId, code]);
+    await tenantQuery(tenantId, "UPDATE documents SET status = 'FAILED', error_code = $2, updated_at = NOW() WHERE id = $1 AND status <> 'QUARANTINED'", [documentId, errorCode(error)]);
     throw error;
   }
 }

@@ -22,6 +22,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/ai
       # WARNING: dev-only placeholder. In production, provide a securely generated secret (>=32 chars).
@@ -32,11 +34,44 @@ services:
       DEV_AUTH_ENABLED: "true"
       NODE_ENV: development
       PORT: 8080
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_BUCKET: enflite-ai-documents
+      OBJECT_STORAGE_ACCESS_KEY: dev-minio-user
+      OBJECT_STORAGE_SECRET_KEY: dev-minio-password-change-me
+      MALWARE_SCAN_MODE: disabled-development
     ports:
       - "8080:8080"
     volumes:
       - ./backend:/app
     command: sh -c "npm ci && npm run migrate && npm run dev"
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: dev-minio-user
+      MINIO_ROOT_PASSWORD: dev-minio-password-change-me
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - objectdata:/data
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000 dev-minio-user dev-minio-password-change-me &&
+        mc mb --ignore-existing local/enflite-ai-documents
 
   vllm:
     profiles:
@@ -48,3 +83,4 @@ services:
 
 volumes:
   pgdata:
+  objectdata:

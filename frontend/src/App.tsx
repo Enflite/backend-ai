@@ -4,8 +4,9 @@ import MessageBubble from './components/Message';
 import ChatInput from './components/ChatInput';
 import ModelSelector from './components/ModelSelector';
 import EmptyState from './components/EmptyState';
+import DocumentsPanel from './components/DocumentsPanel';
 import { api, mapCitation, streamChat } from './api';
-import type { AuthUser, Conversation, DataClassification, Message, Model, UploadedFile } from './types';
+import type { AuthUser, Conversation, DataClassification, DocumentRecord, Message, Model, UploadedFile } from './types';
 
 const CLASSIFICATION_COLOR: Record<string, string> = {
   PUBLIC: '#22c55e', INTERNAL: '#3b82f6', CONFIDENTIAL: '#f59e0b',
@@ -51,20 +52,25 @@ export default function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState('');
+  const [documents, setDocuments] = useState<DocumentRecord[]>([]);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
+  const [showDocuments, setShowDocuments] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) ?? null;
 
   async function loadWorkspace() {
-    const [modelResponse, conversationResponse] = await Promise.all([
+    const [modelResponse, conversationResponse, documentResponse] = await Promise.all([
       api.request<{ models: any[] }>('/models'),
       api.request<{ conversations: any[] }>('/conversations'),
+      api.documents(),
     ]);
     const loadedModels = modelResponse.models.map(toModel);
     const loadedConversations = conversationResponse.conversations.map(toConversation);
     setModels(loadedModels);
     setSelectedModel((current) => loadedModels.find((model) => model.id === current?.id) ?? loadedModels[0] ?? null);
     setConversations(loadedConversations);
+    setDocuments(documentResponse);
     setActiveId((current) => current && loadedConversations.some((item) => item.id === current) ? current : loadedConversations[0]?.id ?? null);
   }
 
@@ -76,6 +82,12 @@ export default function App() {
   }, []);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [activeConversation?.messages, isStreaming]);
+
+  useEffect(() => {
+    if (!user || !documents.some((document) => document.status === 'PENDING' || document.status === 'PROCESSING')) return;
+    const timer = window.setInterval(() => { void api.documents().then(setDocuments).catch(() => undefined); }, 2000);
+    return () => window.clearInterval(timer);
+  }, [user, documents]);
 
   async function selectConversation(id: string) {
     setActiveId(id);
@@ -142,7 +154,23 @@ export default function App() {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const documentIds = await Promise.all(files.filter((item) => item.file).map((item) => api.upload(item.file!, conversation.classification)));
+      const canClassify = user?.permissions.includes('document:classify') ?? false;
+      const uploaded = await Promise.all(files.filter((item) => item.file).map((item) => api.upload(item.file!, canClassify ? conversation.classification : undefined)));
+      if (uploaded.length) setDocuments((current) => [...uploaded, ...current]);
+      const uploadedReadyIds: string[] = [];
+      for (const document of uploaded) {
+        let current = document;
+        for (let attempt = 0; attempt < 120 && (current.status === 'PENDING' || current.status === 'PROCESSING'); attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1000));
+          if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+          current = await api.document(document.id, controller.signal);
+          setDocuments((items) => items.map((item) => item.id === current.id ? current : item));
+        }
+        if (current.status !== 'READY') throw new Error(`Document ${current.filename} is ${current.status}${current.errorCode ? `: ${current.errorCode}` : ''}`);
+        uploadedReadyIds.push(current.id);
+      }
+      const documentIds = [...new Set([...selectedDocumentIds, ...uploadedReadyIds])];
+      if (uploadedReadyIds.length) setSelectedDocumentIds(documentIds);
       await streamChat({
         conversationId: conversation.id,
         content,
@@ -186,7 +214,7 @@ export default function App() {
           <div className="flex items-center gap-3">
             {activeConversation && <><h1 className="text-sm font-medium truncate max-w-xs">{activeConversation.title}</h1><ClassificationBadge level={activeConversation.classification} /></>}
           </div>
-          <UserMenu user={user} onLogout={async () => { await api.logout(); setUser(null); setConversations([]); }} />
+          <div className="flex items-center gap-3"><button className="text-sm px-3 py-1.5 rounded-md" style={{ border: '1px solid var(--border)' }} onClick={() => setShowDocuments(true)}>Documents{selectedDocumentIds.length ? ` (${selectedDocumentIds.length})` : ''}</button><UserMenu user={user} onLogout={async () => { await api.logout(); setUser(null); setConversations([]); setDocuments([]); }} /></div>
         </header>
         {error && <div role="alert" className="px-4 py-2 text-sm flex justify-between" style={{ color: '#fca5a5', background: '#7f1d1d55' }}><span>{error}</span><button onClick={() => setError('')}>Dismiss</button></div>}
         <div className="flex-1 overflow-y-auto"><div className="max-w-3xl mx-auto px-4">
@@ -197,6 +225,7 @@ export default function App() {
         {selectedModel && <div className="flex-shrink-0 max-w-3xl mx-auto w-full"><ChatInput onSend={sendMessage} onStop={() => abortRef.current?.abort()} isStreaming={isStreaming} model={selectedModel} onModelClick={() => setShowModelSelector(true)} /></div>}
       </div>
       {showModelSelector && selectedModel && <ModelSelector models={models} selected={selectedModel} onSelect={setSelectedModel} onClose={() => setShowModelSelector(false)} />}
+      {showDocuments && <DocumentsPanel user={user} documents={documents} selectedIds={selectedDocumentIds} onSelectedIds={setSelectedDocumentIds} onChanged={async () => setDocuments(await api.documents())} onClose={() => setShowDocuments(false)} />}
       {copied && <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-lg text-xs z-50" style={{ background: 'var(--secondary)' }}>Copied to clipboard</div>}
     </div>
   );
