@@ -10,7 +10,12 @@
 # explicit CORS_ORIGIN, and a high-entropy JWT_SECRET (>= 32 chars).
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    # Pinned minor version (0.8.x on PostgreSQL 16). Do not use the floating
+    # :pg16 tag: filtered HNSW scans require vector >= 0.7.0 (iterative scan
+    # fix, pgvector 0.7.0), and an unpinned tag could silently change the
+    # extension version under a running database. After upgrading the image,
+    # run `ALTER EXTENSION vector UPDATE;` in each database.
+    image: pgvector/pgvector:0.8.4-pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -90,7 +95,9 @@ services:
   vllm:
     profiles:
       - "gpu"
-    image: vllm/vllm-openai:latest
+    # Pinned to a specific release; :latest is not reproducible and can pull a
+    # breaking server change under the compose stack without review.
+    image: vllm/vllm-openai:v0.15.1
     command: ["--model", "${VLLM_MODEL:-meta-llama/Meta-Llama-3.1-8B-Instruct}"]
     ports:
       - "8000:8000"
