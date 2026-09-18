@@ -25,7 +25,9 @@ const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 const { embed } = vi.hoisted(() => ({ embed: vi.fn() }));
 const { currentAuth } = vi.hoisted(() => ({ currentAuth: {} as Record<string, unknown> }));
 
+const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenant }));
+vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({ resolveServingModel }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
 vi.mock('../src/documents/ingestion.js', () => ({
   internalEmbeddingProvider: () => ({ model: 'emb', version: '1', dimensions: 3, embed }),

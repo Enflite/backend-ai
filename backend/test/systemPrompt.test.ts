@@ -196,7 +196,9 @@ const { currentAuth } = vi.hoisted(() => ({
   },
 }));
 
+const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
 vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({ resolveServingModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
 vi.mock('../src/ai/gateway/gateway.js', async (importOriginal) => {
@@ -313,5 +315,80 @@ describe('chat route system-prompt wiring', () => {
     const ragMessage = seenMessages.find((m) => String(m.content).includes('ZONE 3: RETRIEVED RAG CONTEXT'));
     expect(ragMessage).toBeDefined();
     expect(String(ragMessage!.content)).toContain('<retrieved_context>');
+  });
+});
+
+describe('chat route serving-default resolution', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tenantQuery.mockImplementation(async (_tenantId: string, sql: string) => {
+      if (sql.includes('INSERT INTO conversations')) return { rows: [{ id: 'conv-1' }] };
+      if (sql.includes('FROM messages')) return { rows: [] };
+      if (sql.includes('INSERT INTO messages')) return { rows: [] };
+      if (sql.includes('UPDATE conversations')) return { rows: [] };
+      throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
+    });
+    listApprovedModelsForUser.mockResolvedValue([testModel]);
+    getApprovedModelForUser.mockResolvedValue(testModel);
+    retrieveAuthorizedContext.mockResolvedValue({ context: '', citations: [], results: [] });
+    recordAudit.mockResolvedValue(undefined);
+    gatewayStream.mockImplementation(async () => ({ events: textOnly('hello'), model: testModel, telemetry: {} }));
+  });
+
+  async function postChat(body: Record<string, unknown>) {
+    const app = Fastify();
+    app.addHook('onRequest', (req: any, _reply, done) => {
+      req.requestId = 'req-1';
+      done();
+    });
+    await app.register(chatRoutes, { prefix: '/api/v1' });
+    return app.inject({ method: 'POST', url: '/api/v1/chat', payload: body });
+  }
+
+  it('prefers the tenant serving default over the first approved model', async () => {
+    resolveServingModel.mockResolvedValue({ id: 'default-model' });
+    const res = await postChat({ content: 'hi' });
+    expect(res.statusCode).toBe(200);
+    // The default is re-verified through getApprovedModelForUser (authz), and
+    // the gateway is called with the default's id — not the list head's.
+    expect(getApprovedModelForUser).toHaveBeenCalledWith(
+      'default-model',
+      expect.any(String),
+      expect.any(String),
+      expect.any(String)
+    );
+    const input = gatewayStream.mock.calls[0]![0] as { modelId: string };
+    expect(input.modelId).toBe('default-model');
+  });
+
+  it('an explicit modelId wins over the serving default', async () => {
+    const explicitId = '55555555-5555-4555-8555-555555555555';
+    resolveServingModel.mockResolvedValue({ id: 'default-model' });
+    const res = await postChat({ content: 'hi', modelId: explicitId });
+    expect(res.statusCode).toBe(200);
+    // Explicit selection short-circuits: the default is never resolved.
+    expect(resolveServingModel).not.toHaveBeenCalled();
+    expect(getApprovedModelForUser).toHaveBeenCalledWith(
+      explicitId,
+      expect.any(String),
+      expect.any(String),
+      expect.any(String)
+    );
+    const input = gatewayStream.mock.calls[0]![0] as { modelId: string };
+    expect(input.modelId).toBe(explicitId);
+  });
+
+  it('falls back to the first approved model when no default is configured', async () => {
+    resolveServingModel.mockResolvedValue(null);
+    const res = await postChat({ content: 'hi' });
+    expect(res.statusCode).toBe(200);
+    expect(getApprovedModelForUser).toHaveBeenCalledWith(
+      'm1',
+      expect.any(String),
+      expect.any(String),
+      expect.any(String)
+    );
+    const input = gatewayStream.mock.calls[0]![0] as { modelId: string };
+    expect(input.modelId).toBe('m1');
   });
 });
