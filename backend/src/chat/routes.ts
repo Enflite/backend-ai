@@ -412,6 +412,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       // provider call and re-adds it after each truncation round, so it is
       // never dropped no matter how long the history grows.
       const sytelineToolsAvailable = providerTools.some((tool) => tool.function.name.startsWith('syteline.'));
+      const repoToolsAvailable = providerTools.some((tool) => tool.function.name.startsWith('repo.'));
       // Coding turns get the CODING WORK section: ground claims in shown files,
       // never invent paths or APIs, deliver changes as unified diffs.
       const codingMode = requestedCapability === 'coding' || codeFileInputs.length > 0;
@@ -422,6 +423,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           toolsAvailable: providerTools.length > 0,
           sytelineToolsAvailable,
           codingMode,
+          repoToolsAvailable,
         });
       const chatSystemPrompt = buildTurnSystemPrompt(model.name, model.version);
 

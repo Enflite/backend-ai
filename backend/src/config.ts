@@ -140,6 +140,32 @@ const envSchema = z.object({
   RAG_QUERY_MAX_CHARS: z.coerce.number().int().min(64).max(20000).default(2000),
   RAG_CHUNK_MAX_CHARS: z.coerce.number().int().min(64).max(20000).default(1600),
   RAG_CHUNK_OVERLAP: z.coerce.number().int().min(0).max(5000).default(200),
+  // ---------------------------------------------------------------------------
+  // Multi-repo code indexing (backend/src/repos/). Repositories are
+  // registered per-tenant via the admin API; the indexer clones git_url (or
+  // reads local_path), chunks text files, and embeds them with the shared
+  // internal embedding provider. GITHUB_TOKEN authenticates private clones;
+  // it is passed to git via config env (never a URL, log, or database row).
+  // ---------------------------------------------------------------------------
+  REPO_WORKDIR: z.string().min(1).default('/data/repos'),
+  REPO_GIT_HOST_ALLOWLIST: z.string().default('github.com'),
+  // localPath registrations are confined to this root (see
+  // assertLocalPathAllowed): the admin API must not become a read primitive
+  // for arbitrary server paths, because indexed content is retrievable via
+  // repo.search / repo.readFile.
+  REPO_LOCAL_ROOT: z.string().min(1).default('/data/repos-local'),
+  GITHUB_TOKEN: z.string().optional(),
+  // Organization discovery ("use all of my existing repos"): GET/POST
+  // /api/v1/repos/discover|import list the repos GITHUB_TOKEN can see in
+  // this org so an admin can import them all at once.
+  GITHUB_ORG: z.string().min(1).default('Enflite'),
+  GITHUB_API_BASE: z.string().url().default('https://api.github.com'),
+  REPO_CHUNK_MAX_CHARS: z.coerce.number().int().min(64).max(20000).default(6000),
+  REPO_CHUNK_OVERLAP: z.coerce.number().int().min(0).max(5000).default(300),
+  REPO_MAX_FILE_BYTES: z.coerce.number().int().min(1024).max(104857600).default(524288),
+  REPO_MAX_FILES: z.coerce.number().int().min(1).max(200000).default(50000),
+  REPO_MAX_CHUNKS_PER_REPO: z.coerce.number().int().min(1).max(100000).default(20000),
+  REPO_SEARCH_TOP_K_MAX: z.coerce.number().int().min(1).max(50).default(20),
   MAX_RAG_CONTEXT_CHARACTERS: z.coerce.number().int().min(1000).max(200000).default(24000),
   // ---------------------------------------------------------------------------
   // Ingestion worker pool (backend/src/documents/queue.ts). The pool runs as

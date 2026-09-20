@@ -22,6 +22,7 @@ import { conversationRoutes } from './conversations/routes.js';
 import { chatRoutes, closeActiveSseStreams } from './chat/routes.js';
 import { documentRoutes } from './documents/routes.js';
 import { toolRoutes } from './tools/routes.js';
+import { repoRoutes } from './repos/routes.js';
 import { evalRoutes } from './eval/routes.js';
 import { retentionRoutes } from './retention/routes.js';
 import { startRetentionScheduler, stopRetentionScheduler } from './retention/scheduler.js';
@@ -225,6 +226,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(chatRoutes);
       await api.register(documentRoutes);
       await api.register(toolRoutes);
+      await api.register(repoRoutes);
       await api.register(evalRoutes);
       await api.register(retentionRoutes);
     },

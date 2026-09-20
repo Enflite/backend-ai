@@ -113,6 +113,27 @@ describe('gateway authorization', () => {
     await drain(result);
     expect(streamChat.mock.calls[0]![0]).toMatchObject({ timeoutMs: 5000, maxTokens: 512, temperature: 0.3 });
   });
+
+  it('sends byte-identical messages to vLLM and Ollama providers', async () => {
+    // Provider parity: the system prompt (including the SyteLine domain
+    // expertise pack on SyteLine turns) is assembled before provider
+    // dispatch and passed through untouched, so the production LLM and the
+    // Ollama dev backend receive exactly the same prompt.
+    const sytelinePrompt = `You are the Enflite AI assistant.\nSYTELINE DOMAIN EXPERTISE\nAn IDO is ...`;
+    const messages = [{ role: 'user' as const, content: 'why is order 123 late?' }];
+    const vllmModel = model({ id: 'model-vllm', provider: 'vllm' });
+    const ollamaModel = model({ id: 'model-ollama', provider: 'ollama', endpoint: 'http://localhost:8000/v1' });
+    getApprovedModelForUser.mockImplementation(async (id: string) => (id === 'model-ollama' ? ollamaModel : vllmModel));
+    streamChat.mockImplementation(async function* () {
+      yield { type: 'text', content: 'hi' };
+    });
+    await drain(await gatewayStream({ ...baseInput, modelId: 'model-vllm', systemPrompt: sytelinePrompt, messages }));
+    await drain(await gatewayStream({ ...baseInput, modelId: 'model-ollama', systemPrompt: sytelinePrompt, messages }));
+    const vllmMessages = streamChat.mock.calls[0]![0].messages;
+    const ollamaMessages = streamChat.mock.calls[1]![0].messages;
+    expect(vllmMessages).toEqual(ollamaMessages);
+    expect(vllmMessages[0]).toMatchObject({ role: 'system', content: sytelinePrompt });
+  });
 });
 
 describe('gateway failover', () => {

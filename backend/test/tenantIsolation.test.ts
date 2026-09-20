@@ -457,9 +457,12 @@ describe('cross-tenant tool execution', () => {
         expect(params[2]).toBe(USER_B1);
       }
     }
-    // The tool received only schema-validated parameters; nothing tenant-shaped.
+    // The tool received only schema-validated parameters plus the
+    // authenticated context; nothing tenant-shaped beyond auth itself.
     expect(sytelineTool.execute).toHaveBeenCalledWith(
-      { item: 'WIDGET', site: 'MAIN' }, expect.any(AbortSignal)
+      { item: 'WIDGET', site: 'MAIN' },
+      expect.objectContaining({ classification: 'INTERNAL' }),
+      expect.any(AbortSignal)
     );
     // Audit trail is tenant-attributed to the caller.
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({

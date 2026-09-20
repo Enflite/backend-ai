@@ -27,7 +27,7 @@
 import { SYTELINE_EXPERT_KNOWLEDGE } from './sytelineExpertKnowledge.js';
 
 /** Version of the default system prompt; bump when the text changes. */
-export const SYSTEM_PROMPT_VERSION = '2.3.0';
+export const SYSTEM_PROMPT_VERSION = '2.4.0';
 
 export interface SystemPromptOptions {
   /**
@@ -62,6 +62,13 @@ export interface SystemPromptOptions {
    * or APIs, deliver changes as unified diffs. Defaults to false.
    */
   codingMode?: boolean;
+  /**
+   * Whether the repo code-search tools (repo.search / repo.readFile) are
+   * offered this turn. When true, the CODING WORK section tells the model
+   * to reach for the indexed repositories instead of asking the user to
+   * paste files. Defaults to false.
+   */
+  repoToolsAvailable?: boolean;
 }
 
 /**
@@ -109,6 +116,13 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
         '- When asked for a code change, deliver it as a unified diff ' +
           '(--- a/path and +++ b/path headers with @@ hunks) unless the user asked for prose.',
         '- Generated code must be complete and runnable. Do not leave TODO placeholders where real logic belongs.',
+        ...(options.repoToolsAvailable
+          ? [
+              '- The indexed repositories are searchable: use repo.search to find relevant code by meaning ' +
+                '(across all repos, or one repo with the repo parameter), then repo.readFile to read full files. ' +
+                'Prefer searching the index over asking the user to paste files; cite repo name and path for every claim.',
+            ]
+          : []),
       ].join('\n')
     : '';
 
