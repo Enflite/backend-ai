@@ -145,6 +145,31 @@ agentic loop (`backend/src/chat/agenticLoop.ts`; see `docs/capabilities.md`
 | `syteline.getBom` | BOM explosion for a manufactured item (components, qty-per, lead time) |
 | `syteline.getCustomer` | Customer record by customer number |
 
+## Repositories & code search
+
+Multi-repo code indexing for coding turns (see `docs/repo-indexing.md`).
+Admins register git repositories per tenant; the backend clones, chunks,
+embeds, and indexes them. Chat models then use `repo.search` /
+`repo.readFile` (each requires `repo:read` in addition to `tool:use`) to
+find and read code with repo/path/commit provenance. Registration, sync,
+and deletion require `repo:manage`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/repos` | List the tenant's registered repos with sync state |
+| POST | `/repos` | Register a repo: `{ name, gitUrl }` or `{ name, localPath }` (exactly one) |
+| GET | `/repos/discover` | List the `GITHUB_ORG` repos visible to `GITHUB_TOKEN`, flagged `registered` |
+| POST | `/repos/import` | Register every not-yet-registered org repo at once (does not sync) |
+| GET | `/repos/:id` | One repo's sync state |
+| POST | `/repos/:id/sync` | Clone/fetch + reindex one repo (202; poll GET for completion) |
+| POST | `/repos/sync` | Sync all registered repos, or one by `{ repo: name }` (202) |
+| DELETE | `/repos/:id` | Delete a repo and its index |
+
+| Tool | Purpose |
+|---|---|
+| `repo.search` | Semantic code search: `{ query, repo?, topK? }`; hits carry repo, path, commit SHA, snippet |
+| `repo.readFile` | Exact indexed file content: `{ repo, path }`; path is confined to the repo |
+
 ## Retention & legal hold (Phase 5c)
 
 All endpoints require the `retention:manage` permission (Admin, Security Admin).

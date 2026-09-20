@@ -18,21 +18,26 @@ import type { EvalCase, EvalToolDef } from '../types.js';
 
 const REPO_SEARCH: EvalToolDef = {
   name: 'repo.search',
-  description: 'Search the repository for a symbol definition and return the file paths that define it.',
+  description:
+    'Semantic search across the tenant\'s indexed code repositories. Returns code snippets with repo, path, and commit provenance.',
   parameters: {
     type: 'object',
-    required: ['symbol'],
-    properties: { symbol: { type: 'string' } },
+    required: ['query'],
+    properties: {
+      query: { type: 'string' },
+      repo: { type: 'string' },
+      topK: { type: 'number' },
+    },
   },
 };
 
 const REPO_READ_FILE: EvalToolDef = {
   name: 'repo.readFile',
-  description: 'Read a repo-relative file and return its contents.',
+  description: 'Read a file from a registered repository as indexed (with its indexed commit).',
   parameters: {
     type: 'object',
-    required: ['path'],
-    properties: { path: { type: 'string' } },
+    required: ['repo', 'path'],
+    properties: { repo: { type: 'string' }, path: { type: 'string' } },
   },
 };
 
@@ -207,7 +212,7 @@ export const PHASE6_CASES: EvalCase[] = [
     category: 'tool-selection',
     title: 'Chain a generalized repo tool family: search then read',
     description:
-      'The agentic loop is tool-family agnostic. A repo.search -> repo.readFile chain must resolve the symbol to the real file, with no invented paths in the synthesis.',
+      'The agentic loop is tool-family agnostic. A repo.search -> repo.readFile chain must resolve the query to the real file, with no invented paths in the synthesis.',
     messages: [
       {
         role: 'user',
@@ -227,8 +232,8 @@ export const PHASE6_CASES: EvalCase[] = [
     },
     mockResponse: {
       toolCalls: [
-        { name: 'repo.search', args: { symbol: 'buildPlanNarrative' } },
-        { name: 'repo.readFile', args: { path: 'backend/src/chat/agenticLoop.ts' } },
+        { name: 'repo.search', args: { query: 'where is buildPlanNarrative defined' } },
+        { name: 'repo.readFile', args: { repo: 'backend-ai', path: 'backend/src/chat/agenticLoop.ts' } },
       ],
       content:
         "I'll search the repo for buildPlanNarrative, then read the file that defines it.\n\n" +

@@ -5,6 +5,9 @@ COPY package*.json ./
 
 FROM base AS dev
 ENV NODE_ENV=development
+# git is required by the repo indexer (backend/src/repos) to clone registered
+# repositories for code search.
+RUN apk add --no-cache git
 RUN npm ci
 COPY . .
 EXPOSE 8080
@@ -18,6 +21,9 @@ RUN npm run build
 FROM node:20.19.5-alpine3.22 AS prod
 WORKDIR /app
 ENV NODE_ENV=production
+# git is required by the repo indexer (backend/src/repos) to clone registered
+# repositories for code search.
+RUN apk add --no-cache git && mkdir -p /data/repos /data/repos-local && chown node:node /data/repos /data/repos-local
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist

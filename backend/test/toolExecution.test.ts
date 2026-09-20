@@ -260,7 +260,7 @@ describe('tool timeout hardening', () => {
     config.AI_TOOL_TIMEOUT_MS = 50;
     try {
       let aborted = false;
-      sytelineTool.execute = vi.fn((_input: unknown, signal: AbortSignal) => {
+      sytelineTool.execute = vi.fn((_input: unknown, _ctx: unknown, signal: AbortSignal) => {
         // The adapter registers on the signal but never settles: a timeout
         // that only aborts the signal would hang here forever.
         signal.addEventListener('abort', () => { aborted = true; });

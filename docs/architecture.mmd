@@ -38,7 +38,7 @@ flowchart TB
     end
 
     subgraph Data["Data plane"]
-        PG[("[CURRENT] PostgreSQL 16 + pgvector<br/>25 migrations<br/>backend/src/db/migrations/")]
+        PG[("[CURRENT] PostgreSQL 16 + pgvector<br/>26 migrations<br/>backend/src/db/migrations/")]
         S3[("[CURRENT] S3-compatible storage<br/>MinIO (dev)<br/>backend/src/storage/storage.ts")]
     end
 
@@ -51,6 +51,7 @@ flowchart TB
     subgraph Ext["External integrations (boundaries)"]
         Scan["[PARTIAL] Malware scanner boundary<br/>MALWARE_SCAN_MODE=http | disabled-development<br/>backend/src/documents/malware.ts"]
         Syte["[CURRENT] SyteLine ERP (read-only)<br/>HttpSyteLineAdapter :: getItem<br/>backend/src/tools/gateway.ts"]
+        RepoIdx["[CURRENT] Repo code index<br/>repo.search / repo.readFile<br/>backend/src/repos/ :: pgvector HNSW"]
         IdP["[FUTURE] External IdP<br/>backend/src/auth/identityProvider.ts<br/>(P2-e)"]
     end
 
@@ -83,6 +84,8 @@ flowchart TB
     Embed --> PG
     Docs --> Scan
     Tools --> Syte
+    Tools --> RepoIdx
+    RepoIdx --> PG
     Auth -.-> IdP
     Chat --> Audit
     Docs --> Audit

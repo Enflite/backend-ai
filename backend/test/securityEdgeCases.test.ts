@@ -222,7 +222,11 @@ describe('destructive tool confirmation gate', () => {
       requestId: 'req-6', signal: AbortSignal.timeout(5000),
     });
     expect(result.ok).toBe(true);
-    expect(destructiveTool.execute).toHaveBeenCalledWith({ target: 'x' }, expect.any(AbortSignal));
+    expect(destructiveTool.execute).toHaveBeenCalledWith(
+      { target: 'x' },
+      expect.objectContaining({ classification: 'PUBLIC' }),
+      expect.any(AbortSignal)
+    );
   });
 
   it('runToolCall denies an unconfirmed destructive call without executing', async () => {

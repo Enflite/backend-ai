@@ -60,6 +60,7 @@ services:
       - "8080:8080"
     volumes:
       - ./backend:/app
+      - repodata:/data/repos
     command: sh -c "npm ci && npm run migrate && npm run dev"
 
   minio:
@@ -105,3 +106,4 @@ services:
 volumes:
   pgdata:
   objectdata:
+  repodata:

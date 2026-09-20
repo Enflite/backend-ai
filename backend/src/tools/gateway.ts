@@ -7,6 +7,19 @@ import { config } from '../config.js';
 import { Errors } from '../errors.js';
 import { canModelProcess } from '../policy/engine.js';
 import { getSyteLineAdapter } from './syteline.js';
+import { repoToolDefinitions } from './repos.js';
+
+/**
+ * Context handed to every tool execution. Carries the caller's auth (tenant,
+ * user, permissions, clearance) so tools that read tenant-scoped data —
+ * like the repo index — can scope their queries without the model ever
+ * supplying identity. Authorization itself stays in authorizeTool; this is
+ * just the authenticated identity plumbing.
+ */
+export interface ToolExecutionContext {
+  auth: AuthContext;
+  classification: Classification;
+}
 
 export interface ToolDefinition<T = unknown> {
   name: string;
@@ -22,7 +35,7 @@ export interface ToolDefinition<T = unknown> {
    */
   permission?: Permission;
   schema: z.ZodType<T>;
-  execute(input: T, signal: AbortSignal): Promise<unknown>;
+  execute(input: T, ctx: ToolExecutionContext, signal: AbortSignal): Promise<unknown>;
 }
 
 // Identifier shapes accepted by the SyteLine tools. Strict character
@@ -48,7 +61,7 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
       item: sytelineItemId(),
       site: sytelineSiteId(),
     }).strict(),
-    execute: (input, signal) => getSyteLineAdapter().getItem(input, signal),
+    execute: (input, _ctx, signal) => getSyteLineAdapter().getItem(input, signal),
   },
   {
     name: 'syteline.getSalesOrder',
@@ -67,7 +80,7 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
       site: sytelineSiteId().optional(),
       status: z.enum(['open', 'closed', 'all']).optional(),
     }).strict(),
-    execute: (input: { orderNumber?: string; customerNumber?: string; site?: string; status?: string }, signal) => {
+    execute: (input: { orderNumber?: string; customerNumber?: string; site?: string; status?: string }, _ctx, signal) => {
       if (!input.orderNumber && !input.customerNumber) {
         throw Errors.badRequest('MISSING_REQUIRED_PARAMETER', 'Provide orderNumber or customerNumber');
       }
@@ -89,7 +102,7 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
       item: sytelineItemId(),
       site: sytelineSiteId(),
     }).strict(),
-    execute: (input, signal) => getSyteLineAdapter().getItemAvailability(input, signal),
+    execute: (input, _ctx, signal) => getSyteLineAdapter().getItemAvailability(input, signal),
   },
   {
     name: 'syteline.getOpenPurchaseOrders',
@@ -105,7 +118,7 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
       item: sytelineItemId(),
       site: sytelineSiteId().optional(),
     }).strict(),
-    execute: (input, signal) => getSyteLineAdapter().getOpenPurchaseOrders(input, signal),
+    execute: (input, _ctx, signal) => getSyteLineAdapter().getOpenPurchaseOrders(input, signal),
   },
   {
     name: 'syteline.getWorkOrders',
@@ -124,7 +137,7 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
       site: sytelineSiteId().optional(),
       status: z.string().trim().min(1).max(40).optional(),
     }).strict(),
-    execute: (input: { workOrderNumber?: string; item?: string; site?: string; status?: string }, signal) => {
+    execute: (input: { workOrderNumber?: string; item?: string; site?: string; status?: string }, _ctx, signal) => {
       if (!input.workOrderNumber && !input.item) {
         throw Errors.badRequest('MISSING_REQUIRED_PARAMETER', 'Provide workOrderNumber or item');
       }
@@ -147,7 +160,7 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
       site: sytelineSiteId().optional(),
       levels: z.number().int().min(1).max(5).default(3),
     }).strict(),
-    execute: (input, signal) => getSyteLineAdapter().getBom(input, signal),
+    execute: (input, _ctx, signal) => getSyteLineAdapter().getBom(input, signal),
   },
   {
     name: 'syteline.getCustomer',
@@ -162,8 +175,11 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
     schema: z.object({
       customerNumber: sytelineCustomerId(),
     }).strict(),
-    execute: (input, signal) => getSyteLineAdapter().getCustomer(input, signal),
+    execute: (input, _ctx, signal) => getSyteLineAdapter().getCustomer(input, signal),
   },
+  // Repo tools (multi-repo code search/read). Registered after the SyteLine
+  // family; both families are permission-gated independently.
+  ...repoToolDefinitions,
 ];
 
 export function getTool(name: string): ToolDefinition<any> {
@@ -206,7 +222,7 @@ export async function executeTool(
   signal: AbortSignal
 ): Promise<{ definition: ToolDefinition<any>; input: unknown; output: unknown }> {
   const prepared = authorizeTool(auth, name, parameters, classification, confirmed);
-  return { ...prepared, output: await prepared.definition.execute(prepared.input, signal) };
+  return { ...prepared, output: await prepared.definition.execute(prepared.input, { auth, classification }, signal) };
 }
 
 export interface ToolCallResult {
@@ -323,7 +339,7 @@ export async function runToolCall(options: {
   });
   try {
     const output = await Promise.race([
-      prepared.definition.execute(prepared.input, toolSignal),
+      prepared.definition.execute(prepared.input, { auth, classification }, toolSignal),
       deadline,
     ]);
     await tenantQuery(auth.tenantId, "UPDATE tool_executions SET status = 'SUCCEEDED', completed_at = NOW() WHERE id = $1", [executionId]);
