@@ -200,7 +200,7 @@ Phase 6 added deterministic cases (each mock passes its own judge):
 - `tool-selection-006` — dependent value chaining (`calc.add` → `calc.double`)
   through a non-SyteLine family.
 
-Full corpus: 134 cases, **132/132 deterministic pass, 2 skipped**
+Full corpus: 142 cases, **132/132 deterministic pass, 10 skipped**
 (llm-judge, no judge model). All eight charter dimensions green. See
 `docs/eval.md`.
 

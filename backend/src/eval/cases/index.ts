@@ -24,6 +24,7 @@ import {
 } from './robustness.js';
 import { QUALITY_CASES } from './quality.js';
 import { SYTELINE_DIAG_CASES } from './syteline.js';
+import { SYTELINE_KNOWLEDGE_CASES } from './sytelineKnowledge.js';
 import { RELIABILITY_CASES } from './reliability.js';
 import { PHASE6_CASES } from './phase6.js';
 
@@ -53,6 +54,7 @@ export const EVAL_CORPUS: EvalCase[] = [
   ...SENSITIVE_DATA_CASES,
   ...QUALITY_CASES,
   ...SYTELINE_DIAG_CASES,
+  ...SYTELINE_KNOWLEDGE_CASES,
   ...RELIABILITY_CASES,
   ...PHASE6_CASES,
 ];
