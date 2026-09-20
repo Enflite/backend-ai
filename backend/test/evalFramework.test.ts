@@ -637,14 +637,14 @@ describe('eval routes', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.provider).toBe('mock');
-    // Default corpus is the full 134-case suite; the 2 llm-judge cases skip
+    // Default corpus is the full 142-case suite; the 10 llm-judge cases skip
     // without a judge model (reported in `skipped`, excluded from totals,
     // never gated). saveCaseResult still persists one row per case.
     expect(body.summary.total).toBe(132);
     expect(body.summary.passed).toBe(132);
-    expect(body.summary.skipped).toBe(2);
+    expect(body.summary.skipped).toBe(10);
     // One row per case, including skipped ones.
-    expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(134);
+    expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(142);
     expect(vi.mocked(finishRun)).toHaveBeenCalledWith('run-1', expect.objectContaining({ total: 132 }));
     await app.close();
   });

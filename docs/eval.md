@@ -9,7 +9,7 @@ machinery that measures it. Nothing here redefines quality.
 
 ```bash
 # Scripted mock suite: deterministic, no model, no GPU. This is what CI runs.
-# Default corpus is the full 134-case suite (backend/src/eval/cases/).
+# Default corpus is the full 142-case suite (backend/src/eval/cases/).
 npm run eval -- --model <model-id> --no-store
 
 # Fast smoke run: the 16-case representative seed corpus instead.

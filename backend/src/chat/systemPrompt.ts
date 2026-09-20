@@ -19,10 +19,15 @@
  * mechanism a security decision depends on, and it must never contain
  * secrets. Putting a secret here would be a data-exfiltration bug, not a
  * prompt bug.
+ *
+ * SyteLine turns also inject the domain-expertise knowledge pack
+ * (sytelineExpertKnowledge.ts) — generic product knowledge, no tenant data.
  */
 
+import { SYTELINE_EXPERT_KNOWLEDGE } from './sytelineExpertKnowledge.js';
+
 /** Version of the default system prompt; bump when the text changes. */
-export const SYSTEM_PROMPT_VERSION = '2.2.0';
+export const SYSTEM_PROMPT_VERSION = '2.3.0';
 
 export interface SystemPromptOptions {
   /**
@@ -41,9 +46,13 @@ export interface SystemPromptOptions {
   toolsAvailable?: boolean;
   /**
    * Whether the SyteLine ERP read tools are offered this turn. When true,
-   * the prompt adds the investigative pattern from docs/syteline-vision.md:
-   * plan briefly, chain dependent queries, cite real records. Defaults to
-   * false.
+   * the prompt adds the investigative pattern from docs/syteline-vision.md
+   * (plan briefly, chain dependent queries, cite real records) plus the
+   * SyteLine domain-expertise knowledge pack
+   * (backend/src/chat/sytelineExpertKnowledge.ts): generic product
+   * knowledge — data model, status lifecycle, workflows, diagnostic
+   * heuristics — so the model reasons like a veteran SyteLine practitioner.
+   * Defaults to false.
    */
   sytelineToolsAvailable?: boolean;
   /**
@@ -69,6 +78,14 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
         (options.modelVersion !== undefined && options.modelVersion !== '' ? ` (version ${options.modelVersion})` : '') +
         '.'
       : '';
+
+  const sytelineGuidance = options.sytelineToolsAvailable
+    ? [
+        '',
+        'SYTELINE DOMAIN EXPERTISE',
+        SYTELINE_EXPERT_KNOWLEDGE,
+      ].join('\n')
+    : '';
 
   const toolGuidance = toolsAvailable
     ? 'Prefer doing over describing: use a tool when a tool answers better than prose. ' +
@@ -105,6 +122,7 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
     '- Solve the underlying problem, not just the literal question. If there is a clearly better way, say so briefly.',
     '- Anticipate the obvious next step and offer it — one step, not five.',
     `- ${toolGuidance}`,
+    ...(sytelineGuidance ? [sytelineGuidance] : []),
     ...(codingGuidance ? [codingGuidance] : []),
     '',
     'HONESTY AND CALIBRATION',

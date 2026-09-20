@@ -1,0 +1,353 @@
+import type { EvalCase } from '../types.js';
+
+// ---------------------------------------------------------------------------
+// SyteLine domain-knowledge cases — pure knowledge Q&A, no tools required.
+//
+// These cases test that the model answers SyteLine product questions like a
+// veteran practitioner (data model, status lifecycle, workflows, diagnostic
+// heuristics), drawing on the domain-expertise knowledge pack injected on
+// SyteLine turns (backend/src/chat/sytelineExpertKnowledge.ts). Scoring is
+// via the llm-judge harness: each case carries a rubric describing a 5/3/1
+// answer, and each mockResponse is written to pass its own rubric (scripted
+// CI runs replay mockResponse through the judge).
+//
+// Category is 'syteline' so these roll up with the diagnostic cases in
+// reporting; they exercise helpfulness + honesty-calibration rather than
+// tool-competence.
+// ---------------------------------------------------------------------------
+
+export const SYTELINE_KNOWLEDGE_CASES: EvalCase[] = [
+  {
+    id: 'syteline-knowledge-atp-001',
+    category: 'syteline',
+    title: 'On-hand vs allocated vs available',
+    description:
+      'Knowledge check: the three quantity buckets on an item-warehouse ' +
+      'record and what a negative available quantity means.',
+    messages: [
+      {
+        role: 'user',
+        content:
+          "In SyteLine, what's the difference between on-hand, allocated, " +
+          'and available quantity for an item?',
+      },
+    ],
+    judge: {
+      kind: 'llm-judge',
+      dimension: 'helpfulness',
+      rubric:
+        'Score 1-5. Does the response correctly distinguish the three ' +
+        'buckets: on-hand is physical quantity, allocated is reserved by ' +
+        'open demand (order lines, job materials), available = on-hand ' +
+        'minus allocated? Does it state that available CAN go negative in ' +
+        'SyteLine and that a negative is itself a diagnostic signal (demand ' +
+        'exceeds physical supply), not a number to clamp or ignore? ' +
+        '5 = all three defined precisely plus the negative-available ' +
+        'interpretation; 3 = roughly right but vague on the formula or ' +
+        'silent on negatives; 1 = conflates the buckets or invents a ' +
+        'different formula.',
+    },
+    mockResponse:
+      'Three different buckets on the item-warehouse record. On-hand is ' +
+      'physical quantity in the warehouse. Allocated is quantity already ' +
+      'reserved by open demand — customer order lines and job material ' +
+      'requirements. Available (ATP) = on-hand minus allocated, i.e. what ' +
+      'you can still promise. And yes, available can go negative in ' +
+      'SyteLine — that is the signal, not a bug: it means open demand ' +
+      'exceeds physical supply for that item. Never clamp it; investigate ' +
+      'what is consuming it.',
+    severity: 'p2',
+    dimensions: ['helpfulness', 'honesty-calibration'],
+  },
+  {
+    id: 'syteline-knowledge-negative-002',
+    category: 'syteline',
+    title: 'Negative inventory: bug or feature',
+    description:
+      'Knowledge check: whether negative inventory is allowed, what controls ' +
+      'it, what causes it, and the serialized-inventory hard rule.',
+    messages: [
+      {
+        role: 'user',
+        content:
+          'An item is showing negative available quantity. Is our inventory ' +
+          'data corrupt?',
+      },
+    ],
+    judge: {
+      kind: 'llm-judge',
+      dimension: 'helpfulness',
+      rubric:
+        'Score 1-5. Does the response explain that SyteLine explicitly ' +
+        'allows negative on-hand via the On Hand Neg Flag on the Inventory ' +
+        'Parameters form, so a negative is not automatically corruption? ' +
+        'Does it list real reducers of on-hand (job material issues, ' +
+        'customer-order shipments, PO returns, adjustments, cycle counts, ' +
+        'physical-inventory postings) and point at the matltran audit trail ' +
+        'for diagnosis? Does it state the hard rule that on-hand serialized ' +
+        'inventory CANNOT go negative, so a negative on a serialized item ' +
+        'is a data-integrity red flag? 5 = all of the above; 3 = allows ' +
+        'negatives but misses the serialized rule or the Neg Flag; ' +
+        '1 = declares it corruption or invents a different mechanism.',
+    },
+    mockResponse:
+      'Not necessarily corrupt — SyteLine explicitly permits negative ' +
+      'on-hand when the On Hand Neg Flag is set on the Inventory Parameters ' +
+      'form. The usual causes are timing and over-reporting: ' +
+      'ship-before-receipt, backflush over-reporting from overstated ' +
+      'completed quantities, duplicate material issues, or adjustments and ' +
+      'cycle-count postings. Pull the item in Material Transactions ' +
+      '(matltran) — every one of those flows leaves a trail there. One ' +
+      'hard rule, though: on-hand serialized inventory cannot go negative ' +
+      'in SyteLine. If this item is serialized, treat the negative as a ' +
+      'data-integrity red flag, not normal flow.',
+    severity: 'p2',
+    dimensions: ['helpfulness', 'honesty-calibration'],
+  },
+  {
+    id: 'syteline-knowledge-firm-003',
+    category: 'syteline',
+    title: 'Firm planned order vs released job',
+    description:
+      'Knowledge check: the PLN -> Firm -> Released -> Scheduled -> Complete ' +
+      'lifecycle and what firming vs releasing actually do.',
+    messages: [
+      {
+        role: 'user',
+        content:
+          'What is the difference between a firm planned order and a ' +
+          'released job in SyteLine?',
+      },
+    ],
+    judge: {
+      kind: 'llm-judge',
+      dimension: 'helpfulness',
+      rubric:
+        'Score 1-5. Does the response place both in the lifecycle ' +
+        'PLN -> Firm ("Firm Planned", the default for a new job) -> ' +
+        'Released -> Scheduled -> Complete -> History? Does it explain ' +
+        'that MRP/APS creates PLN orders, the planner FIRMS a PLN into a ' +
+        'job or PO (converting a suggestion into a real planned order), ' +
+        'and releasing authorizes execution on the shop floor? Does it ' +
+        'mention that Complete is set manually (jobs never auto-close)? ' +
+        '5 = full lifecycle with the firm/release distinction precise; ' +
+        '3 = roughly right but muddles firm vs release; 1 = invents ' +
+        'statuses or reverses the order.',
+    },
+    mockResponse:
+      'They are two steps in the same lifecycle: PLN -> Firm -> Released ' +
+      '-> Scheduled -> Complete -> History. MRP or APS creates a PLN ' +
+      'planned order — a suggestion. The planner firms it, converting it ' +
+      'into a real job or PO ("Firm Planned" is also the default status ' +
+      'for a manually created job). Releasing is the next step: it ' +
+      'authorizes the job for shop-floor execution — material can be ' +
+      'issued, labor reported. After that come Scheduled, then Complete, ' +
+      'which is set manually — jobs never auto-close — and eventually ' +
+      'History at year-end purge. So: firming commits the plan, releasing ' +
+      'starts the work.',
+    severity: 'p2',
+    dimensions: ['helpfulness', 'honesty-calibration'],
+  },
+  {
+    id: 'syteline-knowledge-backflush-004',
+    category: 'syteline',
+    title: 'Backflushing mechanics',
+    description:
+      'Knowledge check: what backflushing is, when it fires, where the ' +
+      'default lives, and the audit trail.',
+    messages: [
+      { role: 'user', content: 'What is backflushing in SyteLine?' },
+    ],
+    judge: {
+      kind: 'llm-judge',
+      dimension: 'helpfulness',
+      rubric:
+        'Score 1-5. Does the response define backflushing as the automatic ' +
+        'issuing of job materials when an operation or job is completed, ' +
+        'based on completed quantity? Does it state the default is set at ' +
+        'the item level and can be overridden per Job Materials record ' +
+        '(backflush / bflush_loc fields)? Does it name matltran as the ' +
+        'audit trail for every material transaction? 5 = all three; ' +
+        '3 = definition right but misses the override level or the audit ' +
+        'trail; 1 = wrong definition (e.g. confuses with lot tracking) or ' +
+        'invented fields.',
+    },
+    mockResponse:
+      'Backflushing is automatic material issuing: when you complete an ' +
+      'operation or a job, SyteLine issues the operation\'s materials for ' +
+      'you based on the completed quantity, instead of someone manually ' +
+      'issuing each component. The default is set at the item level, and ' +
+      'you can override it per material on the Job Materials record ' +
+      '(the backflush flag and bflush_loc fields). Every backflush posts ' +
+      'a material transaction, so matltran is the audit trail if the ' +
+      'numbers ever look wrong — over-reported completions are the ' +
+      'classic cause of backflush-driven inventory surprises.',
+    severity: 'p2',
+    dimensions: ['helpfulness', 'honesty-calibration'],
+  },
+  {
+    id: 'syteline-knowledge-dates-005',
+    category: 'syteline',
+    title: 'Promise date vs due date on order lines',
+    description:
+      'Knowledge check: due_date, promise_date, release_date are distinct ' +
+      'fields with distinct meanings; blank promise falls back to due.',
+    messages: [
+      {
+        role: 'user',
+        content:
+          'A customer order line shows a due date of Monday and a promise ' +
+          'date of Friday. Which date did we commit to the customer?',
+      },
+    ],
+    judge: {
+      kind: 'llm-judge',
+      dimension: 'helpfulness',
+      rubric:
+        'Score 1-5. Does the response state that due_date, promise_date, ' +
+        'and release_date are three distinct fields on the order line and ' +
+        'must not be conflated? Does it identify promise_date as the ' +
+        'customer commitment (Friday) and note that when promise date is ' +
+        'blank, due date is used? 5 = precise field-level answer with the ' +
+        'fallback rule; 3 = picks promise date but vague on fields; ' +
+        '1 = picks the wrong date or invents semantics.',
+    },
+    mockResponse:
+      'Friday — the promise date. On a SyteLine order line, due_date, ' +
+      'promise_date, and release_date are three separate fields; the ' +
+      'promise date is the commitment to the customer. (If promise date ' +
+      'is blank, SyteLine falls back to the due date — but here it is ' +
+      'populated, so Friday is the committed date.) If the line cannot ' +
+      'make Friday, that is a promise-date problem to work with planning, ' +
+      'not a due-date technicality.',
+    severity: 'p2',
+    dimensions: ['helpfulness', 'honesty-calibration'],
+  },
+  {
+    id: 'syteline-knowledge-credit-006',
+    category: 'syteline',
+    title: 'Line saved as Planned instead of Ordered',
+    description:
+      'Knowledge check: the credit-check behavior on Planned -> Ordered ' +
+      'transition and its financial consequences.',
+    messages: [
+      {
+        role: 'user',
+        content:
+          'I entered a customer order line as Ordered but SyteLine saved ' +
+          'it as Planned. Why?',
+      },
+    ],
+    judge: {
+      kind: 'llm-judge',
+      dimension: 'helpfulness',
+      rubric:
+        'Score 1-5. Does the response explain that switching a line to ' +
+        'Ordered fires the credit check, and exceeding the credit limit ' +
+        'saves the line as Planned instead? Does it explain the ' +
+        'consequence (Planned does not update the customer\'s On Order ' +
+        'Balance) and the multi-site nuance (the originating site controls ' +
+        'the order\'s credit-hold status)? 5 = mechanism plus consequence ' +
+        'plus the multi-site note; 3 = credit check identified but ' +
+        'consequences vague; 1 = invents a different cause.',
+    },
+    mockResponse:
+      'That is the credit check doing its job. Moving a line from ' +
+      'Planned to Ordered fires the credit check, and when the customer ' +
+      'is over their limit SyteLine saves the line as Planned instead of ' +
+      'Ordered. It matters financially: Planned lines do not update the ' +
+      'customer\'s On Order Balance, and an order stuck in Planned never ' +
+      'ships. Check the customer\'s credit status — and in multi-site, ' +
+      'remember the originating site controls the order\'s credit-hold ' +
+      'status, so look there first.',
+    severity: 'p2',
+    dimensions: ['helpfulness', 'honesty-calibration'],
+  },
+  {
+    id: 'syteline-knowledge-jobclose-007',
+    category: 'syteline',
+    title: 'Job still open after completion',
+    description:
+      'Knowledge check: jobs never auto-close; Status must be set to ' +
+      'Complete manually; History at year-end.',
+    messages: [
+      {
+        role: 'user',
+        content:
+          'We finished all the work on job 1042 and received everything ' +
+          'into stock, but the job still shows as open. How do I close it?',
+      },
+    ],
+    judge: {
+      kind: 'llm-judge',
+      dimension: 'helpfulness',
+      rubric:
+        'Score 1-5. Does the response state plainly that SyteLine jobs ' +
+        'never auto-close and that someone must manually change the job ' +
+        'Status to Complete? Does it mention that old completed jobs move ' +
+        'to History status (year-end purge candidates)? 5 = both, stated ' +
+        'directly with the manual step; 3 = manual close mentioned but ' +
+        'History omitted; 1 = suggests the system closes it automatically ' +
+        'or invents a close wizard.',
+    },
+    mockResponse:
+      'Nothing is stuck — SyteLine jobs never auto-close. Open the job on ' +
+      'the Job Orders form and change its Status to Complete manually. ' +
+      'That is the close. Completed jobs accumulate until the year-end ' +
+      'utilities move them to History status, which is the purge ' +
+      'candidate — so "open but finished" is the normal state for a job ' +
+      'nobody has manually completed yet.',
+    severity: 'p2',
+    dimensions: ['helpfulness', 'honesty-calibration'],
+  },
+  {
+    id: 'syteline-knowledge-mrp-aps-008',
+    category: 'syteline',
+    title: 'MRP vs APS planning',
+    description:
+      'Knowledge check: the practical difference between MRP and APS in ' +
+      'SyteLine planning.',
+    messages: [
+      {
+        role: 'user',
+        content: 'Should we be planning with MRP or APS in SyteLine?',
+      },
+    ],
+    judge: {
+      kind: 'llm-judge',
+      dimension: 'helpfulness',
+      rubric:
+        'Score 1-5. Does the response explain MRP as net-requirements ' +
+        'planning (independent demand -> net against on-hand and scheduled ' +
+        'receipts -> planned orders -> BOM explosion into dependent ' +
+        'demand, planner firms PLN orders) and APS as priority-based ' +
+        'allocation of on-hand and planned supply to demands (with a ' +
+        'supply-usage tolerance, Move In/Move Out exception messages, and ' +
+        'APS-controlled PLN projected dates that may change)? Does it give ' +
+        'a practical framing (APS when you need prioritized allocation ' +
+        'across competing demands; MRP when straight net-requirements ' +
+        'planning suffices) without pretending the choice is one-size? ' +
+        '5 = both mechanisms precise plus practical framing; 3 = roughly ' +
+        'right but thin on the APS allocation behavior; 1 = conflates them ' +
+        'or invents planning modes.',
+    },
+    mockResponse:
+      'Depends on what your planning problem is. MRP is net-requirements ' +
+      'planning: take independent demand (forecasts, customer orders), ' +
+      'net it against on-hand and scheduled receipts, create planned ' +
+      'orders for the net requirements, and explode those through the BOM ' +
+      'into dependent component demand. The planner then firms PLN orders ' +
+      'into jobs or POs, guided by the Order Action Report. APS does all ' +
+      'of that and additionally allocates on-hand and planned supply to ' +
+      'demands by priority, with a supply-usage tolerance — it will switch ' +
+      'supply between demands and tell you via Move In/Move Out exception ' +
+      'messages. Note APS controls PLN projected dates; they can move and ' +
+      'are not user-editable like firm dates. Rule of thumb: APS when ' +
+      'you have competing demands fighting over the same supply and need ' +
+      'priority-based allocation; MRP when straightforward ' +
+      'net-requirements planning is enough. Either way, put the Net ' +
+      'Change flag on stable items to keep replanning scope sane.',
+    severity: 'p2',
+    dimensions: ['helpfulness', 'honesty-calibration'],
+  },
+];
