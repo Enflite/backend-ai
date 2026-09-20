@@ -39,12 +39,15 @@ export const SYTELINE_KNOWLEDGE_CASES: EvalCase[] = [
         'Score 1-5. Does the response correctly distinguish the three ' +
         'buckets: on-hand is physical quantity, allocated is reserved by ' +
         'open demand (order lines, job materials), available = on-hand ' +
-        'minus allocated? Does it state that available CAN go negative in ' +
-        'SyteLine and that a negative is itself a diagnostic signal (demand ' +
-        'exceeds physical supply), not a number to clamp or ignore? ' +
-        '5 = all three defined precisely plus the negative-available ' +
-        'interpretation; 3 = roughly right but vague on the formula or ' +
-        'silent on negatives; 1 = conflates the buckets or invents a ' +
+        'minus allocated? Does it state that available CAN go negative ' +
+        'and read it by cause: with non-negative on-hand, negative ' +
+        'available means allocated demand exceeds physical supply (the ' +
+        'diagnostic signal — report honestly, never clamp); with ' +
+        'negative on-hand and little allocation, the negative comes ' +
+        'from on-hand itself (the Neg Flag / serialized rules)? ' +
+        '5 = all three defined precisely plus the by-cause reading; ' +
+        '3 = roughly right but vague on the formula or silent on the ' +
+        'on-hand-negative case; 1 = conflates the buckets or invents a ' +
         'different formula.',
     },
     mockResponse:
@@ -52,10 +55,13 @@ export const SYTELINE_KNOWLEDGE_CASES: EvalCase[] = [
       'physical quantity in the warehouse. Allocated is quantity already ' +
       'reserved by open demand — customer order lines and job material ' +
       'requirements. Available (ATP) = on-hand minus allocated, i.e. what ' +
-      'you can still promise. And yes, available can go negative in ' +
-      'SyteLine — that is the signal, not a bug: it means open demand ' +
-      'exceeds physical supply for that item. Never clamp it; investigate ' +
-      'what is consuming it.',
+      'you can still promise. And yes, available can go negative — read ' +
+      'it by cause. With non-negative on-hand, negative available means ' +
+      'allocated demand exceeds physical supply: that is the signal, not ' +
+      'a bug — never clamp it, investigate what is consuming it. With ' +
+      'negative on-hand and little or no allocation, the negative comes ' +
+      'from on-hand itself (check the On Hand Neg Flag; serialized items ' +
+      'are the red-flag case).',
     severity: 'p2',
     dimensions: ['helpfulness', 'honesty-calibration'],
   },

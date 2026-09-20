@@ -102,9 +102,12 @@ are not cosmetic.
   allocated is reserved by open demand (order lines, job materials);
   the standard convention is available = on-hand − allocated (exact ATP
   bucket math varies by version/tenant — treat as the baseline, not the
-  tenant's formula). **Available can go negative** — that is
-  itself the diagnostic signal (demand exceeds physical supply), reported
-  honestly, never clamped.
+  tenant's formula). **Available can go negative** — read it by cause:
+  with non-negative on-hand, negative available means allocated demand
+  exceeds physical supply (that is the diagnostic signal, reported
+  honestly, never clamped); with negative on-hand and little or no
+  allocation, the negative comes from on-hand itself (see the negative
+  inventory rules below).
 - **Backflushing.** Completing an operation/job auto-issues its materials
   based on completed quantity. Default set at item level, overridable per
   Job Materials record (`backflush`, `bflush_loc`). Every material
