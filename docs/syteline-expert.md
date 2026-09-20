@@ -96,7 +96,9 @@ are not cosmetic.
 
 - **On-hand vs allocated vs available (ATP).** On-hand is physical qty;
   allocated is reserved by open demand (order lines, job materials);
-  available = on-hand − allocated. **Available can go negative** — that is
+  the standard convention is available = on-hand − allocated (exact ATP
+  bucket math varies by version/tenant — treat as the baseline, not the
+  tenant's formula). **Available can go negative** — that is
   itself the diagnostic signal (demand exceeds physical supply), reported
   honestly, never clamped.
 - **Backflushing.** Completing an operation/job auto-issues its materials

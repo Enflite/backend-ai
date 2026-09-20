@@ -44,7 +44,7 @@ STATUS LIFECYCLE - statuses are load-bearing; the Scheduler and APS interpret tr
 - Customer orders/lines: Planned (does NOT update the customer's On Order Balance) -> Ordered/Open (credit-checked, updates balances) -> Complete (header). Blanket lines: Planned / Ordered / Complete. DB codes P = Planned, O = Ordered (community-mapped, verify per tenant). Switching a line Planned -> Ordered fires the credit check.
 - Purchase orders: Planned (still planning, no firm order) -> Ordered (ready to process) -> Open -> History (purge).
 - Jobs/planned orders: PLN (created by APS/MRP planning) -> Firm ("Firm Planned", default for a new job) -> Released -> Scheduled -> Complete (set MANUALLY - jobs never auto-close) -> History (year-end purge candidate).
-- "Past Due" means: quantity ordered > quantity received, Status = 'O', due date < today.
+- "Past Due" pattern (community-reported, verify per tenant): quantity ordered > quantity received, Status = 'O', due date < today.
 
 WORKFLOWS
 - Order-to-cash: estimate/quote -> on win, the estimate can generate the sales order and work order together. Lines start Planned; Ordered fires credit check and updates On Order Balance. Pick/pack/ship (packing slip, BOL) reduces on-hand; invoicing follows shipment. EDI: inbound 850 (demand/PO), 856 (ASN), 810 (invoice), 860 (change), plus outbound mirrors.
@@ -54,7 +54,7 @@ WORKFLOWS
 - APS: like MRP but ALLOCATES on-hand and planned supply to demands by priority, with a supply-usage tolerance; it can switch supply between demands, generating "Move In/Move Out" exception messages. APS controls PLN projected dates - they may change and are not user-editable like firm dates.
 
 EXPERT CONCEPTS
-- On-hand vs allocated vs available (ATP): on-hand is physical qty; allocated is reserved by open demand (order lines, job materials); available = on-hand minus allocated. Available CAN go negative - that is itself the diagnostic signal (demand exceeds physical supply); report it honestly, never clamp it.
+- On-hand vs allocated vs available (ATP): on-hand is physical qty; allocated is reserved by open demand (order lines, job materials); the standard convention is available = on-hand minus allocated (exact ATP bucket math varies by version/tenant, so treat this as the baseline, not the tenant's formula). Available CAN go negative - that is itself the diagnostic signal (demand exceeds physical supply); report it honestly, never clamp it.
 - Backflushing: completing an operation/job auto-issues its materials based on completed quantity. Default set at item level, overridable per Job Materials record (backflush, bflush_loc fields). Every material transaction lands in matltran.
 - Negative inventory: SyteLine explicitly allows it via the On Hand Neg Flag on the Inventory Parameters form. Reducers of on-hand: job material issues, customer-order shipments, PO returns, stock adjustments, cycle counts, physical-inventory postings. Hard rule: on-hand SERIALIZED inventory cannot go negative - negatives always point at non-serialized flows or the Neg Flag.
 - Dates are distinct fields: due_date, promise_date, release_date on order lines are separate; when promised date is blank, due date is used. Never conflate them.
