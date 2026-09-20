@@ -62,45 +62,48 @@ export const SYTELINE_KNOWLEDGE_CASES: EvalCase[] = [
   {
     id: 'syteline-knowledge-negative-002',
     category: 'syteline',
-    title: 'Negative inventory: bug or feature',
+    title: 'Negative available quantity: bug or feature',
     description:
-      'Knowledge check: whether negative inventory is allowed, what controls ' +
-      'it, what causes it, and the serialized-inventory hard rule.',
+      'Knowledge check: negative AVAILABLE (allocated exceeding on-hand) ' +
+      'is a planning signal distinct from negative ON-HAND; the On Hand ' +
+      'Neg Flag and serialized rule govern on-hand, not available.',
     messages: [
       {
         role: 'user',
         content:
-          'An item is showing negative available quantity. Is our inventory ' +
-          'data corrupt?',
+          'An item is showing negative available quantity, but its on-hand ' +
+          'is still positive. Is our inventory data corrupt?',
       },
     ],
     judge: {
       kind: 'llm-judge',
       dimension: 'helpfulness',
       rubric:
-        'Score 1-5. Does the response explain that SyteLine explicitly ' +
-        'allows negative on-hand via the On Hand Neg Flag on the Inventory ' +
-        'Parameters form, so a negative is not automatically corruption? ' +
-        'Does it list real reducers of on-hand (job material issues, ' +
-        'customer-order shipments, PO returns, adjustments, cycle counts, ' +
-        'physical-inventory postings) and point at the matltran audit trail ' +
-        'for diagnosis? Does it state the hard rule that on-hand serialized ' +
-        'inventory CANNOT go negative, so a negative on a serialized item ' +
-        'is a data-integrity red flag? 5 = all of the above; 3 = allows ' +
-        'negatives but misses the serialized rule or the Neg Flag; ' +
-        '1 = declares it corruption or invents a different mechanism.',
+        'Score 1-5. Does the response keep negative AVAILABLE separate ' +
+        'from negative ON-HAND: available = on-hand minus allocated, so ' +
+        'available goes negative when allocated demand exceeds on-hand ' +
+        'even with positive on-hand? Does it explain that negative ' +
+        'available is a planning signal (demand over-promised against ' +
+        'supply), not corruption, and point at what is allocated (open ' +
+        'customer-order lines, job material requirements)? Does it note ' +
+        'that the On Hand Neg Flag and the serialized-inventory rule ' +
+        'govern on-hand quantity, and only become relevant if on-hand ' +
+        'itself goes negative? 5 = all of the above with the two ' +
+        'quantities cleanly separated; 3 = explains available correctly ' +
+        'but conflates the Neg Flag; 1 = declares it corruption or ' +
+        'treats negative available as a data-integrity red flag.',
     },
     mockResponse:
-      'Not necessarily corrupt — SyteLine explicitly permits negative ' +
-      'on-hand when the On Hand Neg Flag is set on the Inventory Parameters ' +
-      'form. The usual causes are timing and over-reporting: ' +
-      'ship-before-receipt, backflush over-reporting from overstated ' +
-      'completed quantities, duplicate material issues, or adjustments and ' +
-      'cycle-count postings. Pull the item in Material Transactions ' +
-      '(matltran) — every one of those flows leaves a trail there. One ' +
-      'hard rule, though: on-hand serialized inventory cannot go negative ' +
-      'in SyteLine. If this item is serialized, treat the negative as a ' +
-      'data-integrity red flag, not normal flow.',
+      'No — and the distinction matters. Available = on-hand minus ' +
+      'allocated, so available goes negative whenever allocated demand ' +
+      'exceeds on-hand, even with positive on-hand. That is a planning ' +
+      'signal, not corruption: you have promised (or reserved for jobs) ' +
+      'more than you physically hold. Look at what is allocated — open ' +
+      'customer-order lines and job material requirements — and work the ' +
+      'supply side (expedite POs, firm planned orders) or the demand ' +
+      'side. The On Hand Neg Flag and the "serialized inventory cannot ' +
+      'go negative" rule govern on-hand quantity, not available; they ' +
+      'only become relevant if on-hand itself goes negative.',
     severity: 'p2',
     dimensions: ['helpfulness', 'honesty-calibration'],
   },
@@ -109,8 +112,9 @@ export const SYTELINE_KNOWLEDGE_CASES: EvalCase[] = [
     category: 'syteline',
     title: 'Firm planned order vs released job',
     description:
-      'Knowledge check: the PLN -> Firm -> Released -> Scheduled -> Complete ' +
-      'lifecycle and what firming vs releasing actually do.',
+      'Knowledge check: PLN is a planned-order record (not a job status); ' +
+      'firming converts it into a job, releasing authorizes shop-floor ' +
+      'execution, close is explicit.',
     messages: [
       {
         role: 'user',
@@ -123,28 +127,31 @@ export const SYTELINE_KNOWLEDGE_CASES: EvalCase[] = [
       kind: 'llm-judge',
       dimension: 'helpfulness',
       rubric:
-        'Score 1-5. Does the response place both in the lifecycle ' +
-        'PLN -> Firm ("Firm Planned", the default for a new job) -> ' +
-        'Released -> Scheduled -> Complete -> History? Does it explain ' +
-        'that MRP/APS creates PLN orders, the planner FIRMS a PLN into a ' +
-        'job or PO (converting a suggestion into a real planned order), ' +
-        'and releasing authorizes execution on the shop floor? Does it ' +
-        'mention that Complete is set manually (jobs never auto-close)? ' +
-        '5 = full lifecycle with the firm/release distinction precise; ' +
-        '3 = roughly right but muddles firm vs release; 1 = invents ' +
-        'statuses or reverses the order.',
+        'Score 1-5. Does the response distinguish PLN planned orders ' +
+        '(records created by MRP/APS planning) from jobs, whose standard ' +
+        'statuses are Firm -> Released -> Complete -> History (with ' +
+        'Stopped available to halt a job)? Does it explain that firming a ' +
+        'PLN planned order converts it into a real job or PO, that ' +
+        'Released authorizes shop-floor execution (material issues, labor ' +
+        'reporting), and that close is explicit — set Status to Complete ' +
+        'or complete via a job transaction — never a side effect of ' +
+        'receiving everything? Does it avoid listing "Scheduled" as a job ' +
+        'status? 5 = full lifecycle correct with the firm/release ' +
+        'distinction precise; 3 = roughly right but muddles firm vs ' +
+        'release or omits Stopped; 1 = calls PLN a job status, lists ' +
+        'Scheduled as a job status, or claims jobs close themselves.',
     },
     mockResponse:
-      'They are two steps in the same lifecycle: PLN -> Firm -> Released ' +
-      '-> Scheduled -> Complete -> History. MRP or APS creates a PLN ' +
-      'planned order — a suggestion. The planner firms it, converting it ' +
-      'into a real job or PO ("Firm Planned" is also the default status ' +
-      'for a manually created job). Releasing is the next step: it ' +
-      'authorizes the job for shop-floor execution — material can be ' +
-      'issued, labor reported. After that come Scheduled, then Complete, ' +
-      'which is set manually — jobs never auto-close — and eventually ' +
-      'History at year-end purge. So: firming commits the plan, releasing ' +
-      'starts the work.',
+      'Different records, different steps. A PLN planned order is a ' +
+      'planning record created by MRP or APS — a suggestion, not a job. ' +
+      'The planner FIRMS it, converting it into a real job or PO. Jobs ' +
+      'then move through their own statuses: Firm (the default for a new ' +
+      'job) -> Released -> Complete -> History, with Stopped available ' +
+      'to halt a job. Releasing authorizes shop-floor execution — ' +
+      'material issues, labor reporting. And close is explicit: set ' +
+      'Status to Complete on the Job Orders form, or complete the job ' +
+      'through a job transaction. A job never closes itself as a side ' +
+      'effect of receiving everything into stock.',
     severity: 'p2',
     dimensions: ['helpfulness', 'honesty-calibration'],
   },
@@ -268,8 +275,8 @@ export const SYTELINE_KNOWLEDGE_CASES: EvalCase[] = [
     category: 'syteline',
     title: 'Job still open after completion',
     description:
-      'Knowledge check: jobs never auto-close; Status must be set to ' +
-      'Complete manually; History at year-end.',
+      'Knowledge check: close is an explicit act (status change or job ' +
+      'transaction); finishing work does not close a job by itself.',
     messages: [
       {
         role: 'user',
@@ -282,21 +289,23 @@ export const SYTELINE_KNOWLEDGE_CASES: EvalCase[] = [
       kind: 'llm-judge',
       dimension: 'helpfulness',
       rubric:
-        'Score 1-5. Does the response state plainly that SyteLine jobs ' +
-        'never auto-close and that someone must manually change the job ' +
-        'Status to Complete? Does it mention that old completed jobs move ' +
-        'to History status (year-end purge candidates)? 5 = both, stated ' +
-        'directly with the manual step; 3 = manual close mentioned but ' +
-        'History omitted; 1 = suggests the system closes it automatically ' +
-        'or invents a close wizard.',
+        'Score 1-5. Does the response state plainly that close is an ' +
+        'explicit act — set the job Status to Complete on the Job Orders ' +
+        'form, or complete the job through a job transaction — and that ' +
+        'finishing the work does not close the job by itself? Does it ' +
+        'mention that old completed jobs move to History status (year-end ' +
+        'purge candidates)? 5 = both, stated directly; 3 = explicit close ' +
+        'mentioned but History omitted; 1 = suggests the system closes ' +
+        'the job automatically on receipt or invents a close wizard.',
     },
     mockResponse:
-      'Nothing is stuck — SyteLine jobs never auto-close. Open the job on ' +
-      'the Job Orders form and change its Status to Complete manually. ' +
-      'That is the close. Completed jobs accumulate until the year-end ' +
-      'utilities move them to History status, which is the purge ' +
-      'candidate — so "open but finished" is the normal state for a job ' +
-      'nobody has manually completed yet.',
+      'Nothing is stuck — a SyteLine job does not close itself when the ' +
+      'work is done. Close is an explicit act: open the job on the Job ' +
+      'Orders form and set its Status to Complete (or complete the job ' +
+      'through a job transaction). That is the close. Completed jobs ' +
+      'accumulate until the year-end utilities move them to History ' +
+      'status, which is the purge candidate — so "open but finished" is ' +
+      'the normal state for a job nobody has explicitly completed yet.',
     severity: 'p2',
     dimensions: ['helpfulness', 'honesty-calibration'],
   },

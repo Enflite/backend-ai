@@ -26,7 +26,7 @@ const SYNC_ANCHORS = [
   'backflush',
   'On Order Balance',
   'FormSync',
-  'Firm Planned',
+  'Stopped',
   'IdoCollections',
 ];
 
@@ -69,6 +69,11 @@ describe('syteline expert knowledge pack', () => {
 
     const explicitFalse = buildSystemPrompt({ sytelineToolsAvailable: false });
     expect(explicitFalse).not.toContain('SYTELINE DOMAIN EXPERTISE');
+
+    // SyteLine guidance requires both flags: the pack references tool
+    // workflows, so it must not appear when no tools are offered.
+    const toolsOff = buildSystemPrompt({ toolsAvailable: false, sytelineToolsAvailable: true });
+    expect(toolsOff).not.toContain('SYTELINE DOMAIN EXPERTISE');
   });
 
   it('never leaks the pack when no tools are available', () => {

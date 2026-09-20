@@ -57,12 +57,16 @@ are not cosmetic.
   tenant. Switching a line from Planned to Ordered fires the credit check.
 - **Purchase orders:** `Planned` (still in planning, no firm order) →
   `Ordered` (ready to process) → `Open` → History (purge).
-- **Jobs / planned orders:** `PLN` (created by APS/MRP planning) → `Firm`
-  ("Firm Planned", the default for a new job) → `Released` → `Scheduled` →
-  `Complete` (set **manually** — jobs never auto-close) → `History`
-  (year-end purge candidate).
-- **"Past Due" definition:** quantity ordered > quantity received,
-  Status = 'O', due date < today.
+- **Jobs:** `Firm` (the default status for a new job) → `Released`
+  (authorized for shop-floor execution) → `Complete` → `History`
+  (year-end purge candidate). `Stopped` is available to halt a job.
+  `PLN` is **not** a job status — it is a planned-order record created by
+  MRP/APS; *firming* a PLN order converts it into a real job or PO.
+  Close is explicit: set Status to `Complete` on the Job Orders form (or
+  complete the job through a job transaction) — a job does not close
+  itself as a side effect of receiving everything.
+- **"Past Due"** (community-reported pattern, verify per tenant):
+  quantity ordered > quantity received, Status = 'O', due date < today.
 
 ## 4. Core workflows
 
@@ -145,11 +149,12 @@ are not cosmetic.
   for the item — ship-before-receipt timing, backflush over-reporting
   (completed qty overstated), duplicate issues, or adjustments. If the item
   is serialized, treat the negative as a data-integrity red flag.
-- **"Why won't this job release/close?"** Release blockers: status still
-  PLN (firm it first), missing BOM (system prompts to copy the current
-  BOM), configurable item with incomplete configuration (Status field stays
-  disabled). Close: nothing auto-closes — Status must be set to Complete
-  manually.
+- **"Why won't this job release/close?"** Release blockers: a planned
+  order still at PLN (firm it into a job first), missing BOM (system
+  prompts to copy the current BOM), configurable item with incomplete
+  configuration (Status field stays disabled). Close is an explicit act:
+  set Status to Complete, or complete via a job transaction — finishing
+  the work does not close the job by itself.
 - **New job, no BOM:** SyteLine prompts to copy the current BOM — normal,
   not an error.
 

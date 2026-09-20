@@ -79,7 +79,7 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
         '.'
       : '';
 
-  const sytelineGuidance = options.sytelineToolsAvailable
+  const sytelineGuidance = toolsAvailable && options.sytelineToolsAvailable
     ? [
         '',
         'SYTELINE DOMAIN EXPERTISE',
