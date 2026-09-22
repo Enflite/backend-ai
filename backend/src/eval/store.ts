@@ -129,10 +129,14 @@ export async function getLatestRunForVersion(
 }
 
 export async function getP0Failures(runId: string): Promise<string[]> {
+  // llm-judge verdicts (details.judge = 'llm-judge') never gate promotion on
+  // their own — they are measurement instruments with error bars — so they
+  // are excluded here even when they ran (mock or real judge mode).
   const rows = (
     await query<{ case_id: string }>(
       `SELECT case_id FROM eval_case_results
        WHERE run_id = $1 AND severity = 'p0' AND passed = false
+         AND (details ->> 'judge') IS DISTINCT FROM 'llm-judge'
        ORDER BY case_id ASC`,
       [runId]
     )

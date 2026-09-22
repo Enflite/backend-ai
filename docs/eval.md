@@ -24,6 +24,13 @@ npm run eval -- --model <id> --categories json-output,tool-selection --severitie
 # Live run against the real AI gateway (REQUIRES REAL INFRASTRUCTURE):
 EVAL_LIVE_PROVIDER=vllm EVAL_TENANT_ID=... EVAL_USER_ID=... EVAL_ROLE_ID=... \
   npm run eval -- --model <id> --live
+
+# Judge modes for the llm-judge cases (subjective charter dimensions):
+npm run eval -- --model <id> --no-store --judge-mode mock   # default: deterministic mock judge, CI-safe
+npm run eval -- --model <id> --no-store --judge-mode skip   # skip llm-judge cases (never fail them)
+# Real judge via the platform gateway pointed at a judge model (REQUIRES REAL INFRASTRUCTURE, NEVER IN CI):
+EVAL_LIVE_PROVIDER=vllm EVAL_TENANT_ID=... EVAL_USER_ID=... EVAL_ROLE_ID=... EVAL_JUDGE_MODEL=<judge-model-id> \
+  npm run eval -- --model <id> --judge-mode real
 ```
 
 The CLI prints a per-category table, a per-dimension table (charter §5),
@@ -114,15 +121,45 @@ engineering:
 - Rubrics are versioned (`2026-09-v1`, …). Changing a rubric bumps the
   version; old text stays in git history so historical scores are only ever
   compared against the rubric that produced them.
-- **REQUIRES A JUDGE MODEL — never run in CI.** When `EVAL_JUDGE_MODEL` is
-  unset, the runner **skips** llm-judge cases (logs why) instead of failing
-  them. Skipped cases are excluded from every aggregate — total, pass
-  rates, p0 failures, dimension breakdowns. Deterministic judges run in CI
-  and can gate promotion; llm-judge verdicts never gate CI on their own.
-- Configure with `EVAL_JUDGE_MODEL=<model-id>`. The judge model should
-  differ from the candidate under eval — self-judging inflates scores. In
-  live runs the framework wires the judge calls through the platform's own
-  gateway (`gatewayChatFn`) pointed at the judge model.
+- **llm-judge verdicts never gate promotion on their own.** They are
+  recorded and reported, but excluded from `p0Failed` and from the
+  per-dimension aggregates that feed the promotion gate (both in the runner
+  summary and in `getP0Failures`). Deterministic judges run in CI and can
+  gate promotion; judge verdicts cannot.
+
+### Judge modes
+
+`EVAL_JUDGE_MODE` (or the CLI `--judge-mode` flag, which wins) selects how
+llm-judge cases are scored. When neither is set, the mode is `real` iff
+`EVAL_JUDGE_MODEL` is configured, else `mock`. `skip` is never the default.
+
+| Mode | How it scores | When to use |
+|---|---|---|
+| `mock` (default) | `backend/src/eval/mockJudge.ts`: deterministic scripted rules, verdicts labeled `judgeModel: 'mock-judge'` | CI and local runs. Zero skips — all llm-judge cases execute. |
+| `real` | `backend/src/eval/llmJudge.ts` via the platform's own gateway (`gatewayChatFn`) pointed at `EVAL_JUDGE_MODEL` | Ad-hoc quality reads by a human. **REQUIRES REAL INFRASTRUCTURE. NEVER RUN IN CI** — the runner refuses real mode when `CI=true` unless `EVAL_JUDGE_ALLOW_CI=1` is set explicitly. |
+| `skip` | llm-judge cases are skipped (never failed), the pre-mock behavior | Only when you explicitly want the old behavior. |
+
+The judge model should differ from the candidate under eval — self-judging
+inflates scores. The runner logs a loud warning when they are the same (the
+verdict is still recorded with the judge model id, so the inflation stays
+traceable).
+
+### What the mock judge proves — and what it doesn't
+
+The mock judge (`mockJudge.ts`) implements the same judge interface as the
+real LLM judge (`LlmJudgeRequest` → `LlmJudgeResponse`) but scores with
+scripted, deterministic rules: the response must be non-empty, substantive
+(≥100 chars for full marks), free of placeholder text, and free of the
+scripted anti-patterns for its dimension (e.g. absolute-certainty language
+fails `honesty-calibration`, sycophantic apology markers fail `tone`).
+
+A mock verdict proves the **plumbing** runs end-to-end — runner → judge →
+versioned verdict → recorded result — and that the case's `mockResponse` is
+substantive. It proves **nothing about actual response quality**: a regex
+cannot tell whether an answer is genuinely helpful or well-toned. Mock
+verdicts are always labeled `judgeModel: 'mock-judge'` so they can never be
+mistaken for model judgments, and like all judge verdicts they never gate
+promotion.
 
 ## Mock vs live
 
@@ -130,18 +167,20 @@ engineering:
 |---|---|---|
 | Chat function | `mockChatFn`: scripted, returns each case's `mockResponse` | `gatewayChatFn`: the real `gatewayStream` path, non-streaming accumulation |
 | Needs | Nothing | `EVAL_LIVE_PROVIDER` set (else the runner **refuses** with a clear error), plus gateway auth |
-| Judge model | Always skipped | Used if `EVAL_JUDGE_MODEL` is set, else skipped |
+| Judge model | Mock judge (`judgeModel: 'mock-judge'`); use `--judge-mode real` + `EVAL_JUDGE_MODEL` for the real judge (REQUIRES REAL INFRASTRUCTURE, never in CI) | Real judge if `EVAL_JUDGE_MODEL` is set, else the mock judge; `--judge-mode skip` skips judge cases |
 | Recorded as | `provider: 'mock'` on the run row | `provider: '<EVAL_LIVE_PROVIDER>'` on the run row |
 
 The provider on the run row is the source of truth for what a run
 proves. A mock run is labeled `mock` and can never be mistaken for live
 validation — **live results are never faked**: if the provider is
-unreachable the case fails loudly, and `runLlmJudge` skips rather than
-invents a verdict.
+unreachable the case fails loudly, and judge verdicts are always labeled
+with their judge model (`mock-judge` or the real model id).
 
 **CI vs REQUIRES REAL INFRASTRUCTURE.** Everything the mock suite covers is
 VALIDATED IN CI: judges, runner, store, routes, promotion gate, CLI exit
-codes. Live gateway runs and llm-judge verdicts are labeled
+codes — including the llm-judge plumbing, which runs against the
+deterministic mock judge with zero skips. Live gateway runs and real
+llm-judge verdicts are labeled
 **REQUIRES REAL GPU / PRODUCTION INFRASTRUCTURE** and do not run in CI.
 
 ## Adding a case
@@ -194,7 +233,10 @@ hold:
    auto-promoted.
 
 Phase 3's lifecycle transitions call this gate before moving a model to
-APPROVED. Skipped llm-judge cases never block promotion.
+APPROVED. llm-judge verdicts (mock or real) never block promotion — they are
+excluded from `p0Failed` and from the per-dimension aggregates the
+regression check reads. Skipped cases (judge mode `skip`) never block
+promotion either.
 
 ## API
 

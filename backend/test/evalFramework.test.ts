@@ -3,8 +3,8 @@
  *
  * Covers: deterministic judges (every kind, including adversarial
  * judge-bypass attempts), the runner with mockChatFn (full pass + injected
- * failures), the llm-judge skip contract, per-dimension breakdowns,
- * promotion-gate logic, and route authorization.
+ * failures), the llm-judge mode contract (mock/real/skip), per-dimension
+ * breakdowns, promotion-gate logic, and route authorization.
  */
 import { beforeEach, describe, expect, it, vi, afterEach } from 'vitest';
 import Fastify from 'fastify';
@@ -253,26 +253,30 @@ describe('judges', () => {
 // ---------------------------------------------------------------------------
 
 describe('runner with mockChatFn', () => {
-  it('full pass: seed corpus passes its own judges; llm-judge cases skip', async () => {
+  it('full pass: seed corpus passes its own judges; llm-judge cases run under the mock judge', async () => {
     const { results, summary } = await runEval(EVAL_SEED_CORPUS, mockChatFn(EVAL_SEED_CORPUS), {
       modelId: 'model-1',
       modelVersion: '1.0',
     });
     expect(results).toHaveLength(16);
-    // 14 deterministic cases ran and passed; 2 llm-judge cases skipped.
-    expect(summary.total).toBe(14);
-    expect(summary.passed).toBe(14);
+    // All 16 cases ran — zero skips: the 2 llm-judge cases are scored by the
+    // deterministic mock judge (judge mode default), not skipped.
+    expect(summary.total).toBe(16);
+    expect(summary.passed).toBe(16);
     expect(summary.failed).toBe(0);
-    expect(summary.skipped).toBe(2);
+    expect(summary.skipped).toBe(0);
     expect(summary.p0Failed).toEqual([]);
-    // Skipped cases are reported, not failed.
-    const skipped = results.filter((r) => r.skipped);
-    expect(skipped.map((r) => r.caseId).sort()).toEqual(['seed-helpfulness-llm-016', 'seed-tone-llm-015']);
-    // Dimension breakdown excludes skipped cases.
+    // Judge verdicts are recorded with the mock judge model id and rubric version...
+    const judged = results.filter((r) => (r.details as { judge?: unknown }).judge === 'llm-judge');
+    expect(judged.map((r) => r.caseId).sort()).toEqual(['seed-helpfulness-llm-016', 'seed-tone-llm-015']);
+    for (const r of judged) {
+      expect(r.details).toMatchObject({ judgeModel: 'mock-judge', rubricVersion: '2026-09-v1' });
+    }
+    // ...but never feed the promotion-gate dimension breakdown.
     expect(summary.byDimension['grounding-citations']).toEqual({ passed: 2, total: 2 });
-    expect(summary.byDimension['helpfulness']).toEqual({ passed: 2, total: 2 }); // 016 skipped, excluded
-    expect(summary.byDimension['tone']).toEqual({ passed: 1, total: 1 }); // 015 skipped, excluded
-    expect(summary.byDimension['multi-turn-coherence']).toBeUndefined(); // only case skipped
+    expect(summary.byDimension['helpfulness']).toEqual({ passed: 2, total: 2 }); // 016 judged, excluded
+    expect(summary.byDimension['tone']).toEqual({ passed: 1, total: 1 }); // 015 judged, excluded
+    expect(summary.byDimension['multi-turn-coherence']).toBeUndefined(); // only case judged
   });
 
   it('injected failures: counts failures and p0Failed', async () => {
@@ -331,23 +335,40 @@ describe('runner with mockChatFn', () => {
 describe('runLlmJudge', () => {
   const llmCase = EVAL_SEED_CORPUS.find((c) => c.id === 'seed-tone-llm-015')!;
   const response = { content: 'a response' };
-  const saved = process.env.EVAL_JUDGE_MODEL;
+  // These tests exercise the real-judge path with a stubbed transport, so
+  // they run outside CI: CI=true would (correctly) refuse real-judge mode.
+  const savedModel = process.env.EVAL_JUDGE_MODEL;
+  const savedCI = process.env.CI;
+  const savedAllow = process.env.EVAL_JUDGE_ALLOW_CI;
 
   beforeEach(() => {
     delete process.env.EVAL_JUDGE_MODEL;
+    delete process.env.CI;
+    delete process.env.EVAL_JUDGE_ALLOW_CI;
     vi.restoreAllMocks();
   });
   afterEach(() => {
-    if (saved === undefined) delete process.env.EVAL_JUDGE_MODEL;
-    else process.env.EVAL_JUDGE_MODEL = saved;
+    if (savedModel === undefined) delete process.env.EVAL_JUDGE_MODEL;
+    else process.env.EVAL_JUDGE_MODEL = savedModel;
+    if (savedCI === undefined) delete process.env.CI;
+    else process.env.CI = savedCI;
+    if (savedAllow === undefined) delete process.env.EVAL_JUDGE_ALLOW_CI;
+    else process.env.EVAL_JUDGE_ALLOW_CI = savedAllow;
   });
 
-  it('SKIPS (never fails) when no judge model is configured, and logs why', async () => {
+  it('SKIPS (never fails) in explicit skip mode, and logs why', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const outcome = await runLlmJudge(llmCase, response);
+    const outcome = await runLlmJudge(llmCase, response, undefined, { mode: 'skip' });
     expect(outcome.skipped).toBe(true);
-    expect(outcome.reason).toMatch(/EVAL_JUDGE_MODEL is not configured/);
+    expect(outcome.reason).toMatch(/EVAL_JUDGE_MODE=skip/);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('seed-tone-llm-015'));
+  });
+
+  it('runs the mock judge (not a skip) when no judge model is configured', async () => {
+    const outcome = await runLlmJudge(llmCase, response);
+    expect(outcome.skipped).toBe(false);
+    expect(outcome.judgeModel).toBe('mock-judge');
+    expect(outcome.rubricVersion).toBe('2026-09-v1');
   });
 
   it('skips when configured but no judge chat transport is provided', async () => {
@@ -638,15 +659,15 @@ describe('eval routes', () => {
     const body = res.json();
     expect(body.provider).toBe('mock');
     // Default corpus is the full 146-case suite (142 base + 4 repo-index
-    // coding cases); the 10 llm-judge cases skip without a judge model
-    // (reported in `skipped`, excluded from totals, never gated).
-    // saveCaseResult still persists one row per case.
-    expect(body.summary.total).toBe(136);
-    expect(body.summary.passed).toBe(136);
-    expect(body.summary.skipped).toBe(10);
-    // One row per case, including skipped ones.
+    // coding cases); the 10 llm-judge cases run under the deterministic mock
+    // judge (judge mode default) — zero skips. saveCaseResult still persists
+    // one row per case.
+    expect(body.summary.total).toBe(146);
+    expect(body.summary.passed).toBe(146);
+    expect(body.summary.skipped).toBe(0);
+    // One row per case, including judged ones.
     expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(146);
-    expect(vi.mocked(finishRun)).toHaveBeenCalledWith('run-1', expect.objectContaining({ total: 136 }));
+    expect(vi.mocked(finishRun)).toHaveBeenCalledWith('run-1', expect.objectContaining({ total: 146 }));
     await app.close();
   });
 
@@ -663,9 +684,9 @@ describe('eval routes', () => {
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.summary.total).toBe(14);
-    expect(body.summary.passed).toBe(14);
-    expect(body.summary.skipped).toBe(2);
+    expect(body.summary.total).toBe(16);
+    expect(body.summary.passed).toBe(16);
+    expect(body.summary.skipped).toBe(0);
     expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(16);
     await app.close();
   });

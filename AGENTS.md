@@ -40,7 +40,7 @@ Backend (`backend/`):
 - `npm run lint` / `npm run typecheck` — `tsc --noEmit`
 - `npm run build` — compile + copy migrations into `dist/`
 - `npm run migrate` — run pending migrations (dev, via tsx)
-- `npm run eval` — run the eval corpus (deterministic cases; LLM-judge cases skip without a judge model)
+- `npm run eval` — run the eval corpus (deterministic cases; llm-judge cases run under the deterministic mock judge by default — zero skips in CI; real judge via `EVAL_JUDGE_MODEL` + `--judge-mode real`, never in CI)
 - `npm run create-user` — bootstrap a user (password via TTY prompt or `BACKEND_CREATE_USER_PASSWORD` env — never a CLI arg)
 
 Frontend (`frontend/`):
