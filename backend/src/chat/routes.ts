@@ -12,7 +12,8 @@ import { resolveCapabilityModel, type CapabilityResolution } from '../ai/gateway
 import { retrieveAuthorizedContext } from '../rag/retrieval.js';
 import { recordAudit } from '../audit/audit.js';
 import { toolRegistry, zodToJsonSchema } from '../tools/gateway.js';
-import { buildSystemPrompt, wrapRetrievedContext, buildNoEvidenceNotice } from './systemPrompt.js';
+import { wrapRetrievedContext, buildNoEvidenceNotice } from './systemPrompt.js';
+import { buildCacheableSystemPrompt } from '../ai/gateway/prefixCache.js';
 import { detectCapability } from './capabilityDetect.js';
 import { runAgenticLoop, type AgenticLoopSink } from './agenticLoop.js';
 import { assembleCodeContext, normalizeCodeFiles } from './codeContext.js';
@@ -416,15 +417,20 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       // Coding turns get the CODING WORK section: ground claims in shown files,
       // never invent paths or APIs, deliver changes as unified diffs.
       const codingMode = requestedCapability === 'coding' || codeFileInputs.length > 0;
+      // Assembled through the deterministic prefix-cache contract
+      // (prefixCache.ts): byte-stable static head first, per-turn dynamic
+      // sections after, so vLLM's automatic prefix caching can reuse the
+      // head's KV blocks across turns. Same model-visible content as the
+      // plain builder — only the ordering guarantee differs.
       const buildTurnSystemPrompt = (modelName: string, modelVersion?: string) =>
-        buildSystemPrompt({
+        buildCacheableSystemPrompt({
           modelName,
           modelVersion,
           toolsAvailable: providerTools.length > 0,
           sytelineToolsAvailable,
           codingMode,
           repoToolsAvailable,
-        });
+        }).text;
       const chatSystemPrompt = buildTurnSystemPrompt(model.name, model.version);
 
       // Context-window management: sliding window that always keeps the system

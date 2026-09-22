@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildSystemPrompt,
+  buildStaticPromptHead,
   buildNoEvidenceNotice,
   wrapRetrievedContext,
   wrapToolResult,
@@ -301,6 +302,21 @@ describe('chat route system-prompt wiring', () => {
     const input = gatewayStream.mock.calls[0]![0] as { systemPrompt: string };
     expect(input.systemPrompt).not.toContain('22222222-2222-4222-8222-222222222222');
     expect(input.systemPrompt).not.toContain('11111111-1111-4111-8111-111111111111');
+  });
+
+  it('assembles the turn prompt through the prefix-cache contract (static head first)', async () => {
+    gatewayStream.mockImplementationOnce(async (input: any) => ({
+      events: textOnly('hello'),
+      model: testModel,
+      telemetry: {},
+    }));
+    await postChat({ content: 'hi' });
+    const input = gatewayStream.mock.calls[0]![0] as { systemPrompt: string };
+    // The route builds via buildCacheableSystemPrompt: the prompt starts with
+    // the byte-stable static head so vLLM reuses its prefix blocks, and the
+    // per-turn model identity comes after it.
+    expect(input.systemPrompt.startsWith(buildStaticPromptHead())).toBe(true);
+    expect(input.systemPrompt.indexOf('Test Model')).toBeGreaterThan(buildStaticPromptHead().length);
   });
 
   it('wraps retrieved context in the zone-3 boundary', async () => {

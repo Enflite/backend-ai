@@ -8,6 +8,7 @@ import { Classification } from '../../authz/permissions.js';
 import { canModelProcess } from '../../policy/engine.js';
 import { config } from '../../config.js';
 import { buildSystemPrompt } from '../../chat/systemPrompt.js';
+import { hashPromptPrefix } from './prefixCache.js';
 
 /**
  * The default system prompt, pinned at index 0 of every provider call.
@@ -49,6 +50,20 @@ export interface GatewayTelemetry {
   fallbackUsed?: boolean;
   fallbackModelId?: string;
   fallbackModelName?: string;
+  /**
+   * SHA-256 hex of the system prompt sent with this request. Identifies the
+   * vLLM prefix-cache block set so operators can group requests by prefix
+   * when reading the server's `/metrics`. Present only when
+   * `PROMPT_CACHE_ENABLED` is true.
+   */
+  prefixHash?: string;
+  /**
+   * Heuristic estimate (chars/4 + framing) of the prompt tokens sent with
+   * this request. Lets operators correlate prefix identity with request
+   * size; the authoritative counts arrive later in `usage`. Present only
+   * when `PROMPT_CACHE_ENABLED` is true.
+   */
+  promptTokens?: number;
 }
 
 /** Gateway-level events (provider events plus failover notices). */
@@ -251,6 +266,8 @@ async function auditModelUse(
       ...(telemetry.timeToFirstTokenMs !== undefined ? { timeToFirstTokenMs: telemetry.timeToFirstTokenMs } : {}),
       ...(telemetry.tokensPerSecond !== undefined ? { tokensPerSecond: telemetry.tokensPerSecond } : {}),
       ...(telemetry.usage ? { usage: telemetry.usage } : {}),
+      ...(telemetry.prefixHash ? { prefixHash: telemetry.prefixHash } : {}),
+      ...(telemetry.promptTokens !== undefined ? { promptTokens: telemetry.promptTokens } : {}),
       ...(telemetry.fallbackUsed ? { fallbackUsed: true, fallbackModelId: telemetry.fallbackModelId } : {}),
     },
   });
@@ -285,6 +302,18 @@ export async function gatewayStream(input: GatewayStreamInput): Promise<GatewayS
     { role: 'system', content: systemPrompt },
     ...input.messages.filter((message) => message.role !== 'system'),
   ];
+
+  // Prompt prefix-cache telemetry (vLLM automatic prefix caching): the hash
+  // of the system prompt identifies the cacheable prefix, and the heuristic
+  // prompt-token estimate lets operators correlate prefix identity with
+  // request size. Actual hit/miss rates come from the vLLM server's
+  // `/metrics` — these fields only say which prefix was sent, never whether
+  // it hit. Recorded before streaming so the fields exist even when the
+  // provider fails before emitting usage.
+  if (config.PROMPT_CACHE_ENABLED) {
+    telemetry.prefixHash = hashPromptPrefix(systemPrompt);
+    telemetry.promptTokens = estimateMessagesTokens(messages);
+  }
 
   async function* events(): AsyncGenerator<GatewayEvent, void, unknown> {
     let primaryProducedOutput = false;

@@ -54,6 +54,17 @@ const envSchema = z.object({
   VLLM_API_KEY: z.string().optional().default(''),
   AI_PROVIDER_ALLOWED_ORIGINS: z.string().default('http://localhost:8000,http://vllm:8000'),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(120000),
+  // Prompt prefix caching (vLLM automatic prefix caching): when true, chat
+  // turns assemble the system prompt through the deterministic prefix-cache
+  // contract (backend/src/ai/gateway/prefixCache.ts — byte-stable static
+  // head first, per-turn dynamic sections after) and the gateway records the
+  // prefix hash + estimated prompt tokens in per-request telemetry. The flag
+  // only governs client-side assembly stability and observability; vLLM's
+  // server-side caching itself is automatic. Safe to leave on: it changes
+  // prompt ordering, never prompt content.
+  PROMPT_CACHE_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(true),
   // Upper bound on streamed model output per chat turn. A compromised or
   // misbehaving provider could otherwise stream unbounded content, exhausting
   // server memory (the stream is accumulated for persistence) and database storage.
