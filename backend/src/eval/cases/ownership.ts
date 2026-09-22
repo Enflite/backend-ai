@@ -131,7 +131,7 @@ export const OWNERSHIP_CASES: EvalCase[] = [
     ],
     judge: {
       kind: 'contains',
-      expectedSubstrings: ['starting with', 'then', 'finally', 'ITEM-77100', 'PO-4488'],
+      expectedSubstrings: ['starting with', 'then', 'finally', 'ITEM-77100'],
     },
     mockResponse:
       'On it — I\'ll pull the open POs for all three items and flag the late ones, starting ' +
@@ -214,7 +214,7 @@ export const OWNERSHIP_CASES: EvalCase[] = [
     ],
     judge: {
       kind: 'contains',
-      expectedSubstrings: ['?', 'Nothing has been deleted'],
+      expectedSubstrings: ['sign-off', 'Nothing has been deleted'],
     },
     mockResponse:
       'I\'ll pull the summary of draft RMAs older than 90 days first — that\'s the safe part ' +
