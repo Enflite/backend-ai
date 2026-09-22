@@ -85,6 +85,54 @@ user → frontend → backend AI Gateway → private vLLM cluster (OpenAI-compat
   tokens/second (from first token to usage frame) into the `MODEL_USED`
   audit event — the raw material for latency SLOs in Phase 4.
 
+### Prompt prefix caching
+
+vLLM's automatic prefix caching reuses KV-cache blocks server-side whenever
+a request's token prefix is byte-identical to a previously seen one. The V1
+engine enables it by default — no server flag needed — so the platform's job
+is to *send byte-stable prefixes* and to make them observable. (ADR-011.)
+
+- **What's cached.** Every chat turn sends the system prompt as message
+  index 0. The prompt is assembled static-head-first
+  (`backend/src/chat/systemPrompt.ts` → `buildStaticPromptHead`: assistant
+  identity + charter behavioral spec, invariant across models, turns, and
+  capabilities), then the per-turn dynamic tail (serving-model identity, tool
+  guidance, the SyteLine knowledge pack on SyteLine turns, coding guidance).
+  Anything dynamic goes *after* the static head, never inside it — a
+  timestamp or request ID in the head would fragment the cache into one
+  block set per turn. History after the system message extends the cached
+  prefix naturally across multi-turn conversations.
+- **Contract.** The chat route builds turn prompts via
+  `buildCacheableSystemPrompt` (`backend/src/ai/gateway/prefixCache.ts`),
+  which asserts the assembled text starts with the static head and exposes
+  the prompt's SHA-256 hash. A layout bug fails fast instead of silently
+  degrading the hit rate. The Ollama dev path receives byte-identical
+  messages — the contract is provider-agnostic.
+- **Operator config.** `PROMPT_CACHE_ENABLED` (default `true`) governs the
+  client-side contract and telemetry only; vLLM's server-side caching is
+  automatic and unaffected by it. Set it to `false` to fall back to legacy
+  prompt assembly with no assertion and no prefix telemetry. It changes
+  prompt ordering, never prompt content.
+- **Observing the hit rate.** The gateway records `prefixHash` (SHA-256 of
+  the sent system prompt) and heuristic `promptTokens` in the per-request
+  telemetry and the `MODEL_USED` audit event metadata, so operators can group
+  requests by prefix. The authoritative hit/miss numbers live on the vLLM
+  server — query its Prometheus endpoint:
+
+  ```bash
+  curl http://localhost:8000/metrics | grep -i prefix_cache
+  # vllm:prefix_cache_hit_rate            — current hit-rate gauge, and/or
+  # vllm:prefix_cache_hits_total /
+  #   vllm:prefix_cache_queries_total     — counters (newer V1 builds)
+  ```
+
+  If the hit rate is near zero while traffic shares system prompts, check
+  that request prefixes are actually stable: compare the `prefixHash` values
+  across recent `MODEL_USED` audit events — distinct hashes per turn mean
+  something dynamic leaked into the prefix. We deliberately do not compute
+  or report cache statistics client-side; the server's metrics are the
+  source of truth.
+
 ### Embedding boundary
 
 All embeddings — document ingestion and RAG retrieval — resolve through
@@ -194,6 +242,7 @@ REGISTERED → DOWNLOADING → VALIDATING → EVALUATING → PENDING_APPROVAL
 | `VLLM_API_KEY` | Bearer token for vLLM (if required) | empty |
 | `AI_PROVIDER_ALLOWED_ORIGINS` | Egress allowlist for model endpoints | `http://localhost:8000,http://vllm:8000` |
 | `AI_REQUEST_TIMEOUT_MS` | Default per-request inference timeout | `120000` |
+| `PROMPT_CACHE_ENABLED` | Deterministic prompt-prefix contract + prefix telemetry (vLLM automatic prefix caching) | `true` |
 | `EMBEDDING_PROVIDER` | `openai-compatible` \| `ollama` (dev only) | `openai-compatible` |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | Embedding endpoint wiring | unset |
 | `EMBEDDING_TIMEOUT_MS` | Embedding request timeout | `30000` |
@@ -208,10 +257,12 @@ REGISTERED → DOWNLOADING → VALIDATING → EVALUATING → PENDING_APPROVAL
   assembly bounds, retry/backoff, timeouts, abort handling), factory gates
   (dev-only refusal, unknown providers, unconfigured embeddings), the
   lifecycle state machine, the promotion gate block, serving-default
-  auditing, endpoint/source allowlists, and TTFT/tokens-sec telemetry —
+  auditing, endpoint/source allowlists, TTFT/tokens-sec telemetry, and the
+  prompt prefix-cache contract (byte-stable static head, no dynamic content
+  in the cached region, `prefixHash`/`promptTokens` telemetry) —
   all covered by mocked-HTTP unit tests.
 - `REQUIRES REAL GPU/PRODUCTION INFRASTRUCTURE`: actual streaming against a
   real vLLM cluster (GPU scheduling, tensor-parallel behavior, real TTFT
-  numbers), real Ollama model pulls, and end-to-end canary promotion
-  against production traffic. The eval harness (§5 gate) is the mechanism
+  numbers, prefix-cache hit rates via the server's `/metrics`), real Ollama
+  model pulls, and end-to-end canary promotion against production traffic. The eval harness (§5 gate) is the mechanism
   that qualifies a model for promotion; CI cannot substitute for it.
