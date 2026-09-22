@@ -28,6 +28,36 @@ Queries are normalized before embedding (trimmed, internal whitespace collapsed,
 
 An MMR-lite diversity pass (`RAG_DIVERSITY_LAMBDA`, default `0.3`, `0` disables) runs between hybrid scoring and the reranker: a chunk from an already-represented document is discounted by the lambda factor, so when the top hybrid hits all come from one long document, the best chunk from a second document is blended in instead of a near-duplicate sibling. Selection is greedy and deterministic (ties break by chunk ID), and the reranker still has the final say on order before the threshold.
 
+### Cross-encoder reranker (optional, off by default)
+
+`backend/src/rag/crossEncoderReranker.ts` implements the `Reranker` hook as an
+HTTP cross-encoder client. Set `RERANKER_ENABLED=true` to replace the
+passthrough with it; it installs through the existing `setReranker()` hook, so
+the untrusted-output reconstruction in `retrieval.ts` applies unchanged — the
+endpoint can only reorder already-authorized chunks and propose `[0,1]` scores,
+never widen access. Permission filtering stays before reranking.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `RERANKER_ENABLED` | `false` | Enable the cross-encoder reranker. |
+| `RERANKER_URL` | _(empty)_ | Scoring endpoint URL. Required when enabled. |
+| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Model name sent in the request payload. |
+| `RERANKER_TIMEOUT_MS` | `5000` | Per-request timeout; exceeding it falls back to hybrid order. |
+| `RERANKER_TOP_N` | `10` | Max documents sent to the endpoint per query (cost control); remaining candidates keep hybrid order. |
+
+Endpoint contract: `POST` `{ "model", "query", "documents": [text, ...] }` and
+expect `{ "results": [{ "index", "relevance_score" }] }` (Cohere-rerank
+compatible; a `score` field is accepted as an alias). Only the query text and
+the already permission-filtered chunk texts are sent — no credentials, tenant
+ids, user ids, or `Authorization` header. The endpoint origin must be listed in
+`AI_PROVIDER_ALLOWED_ORIGINS`, the same egress allowlist the AI gateway
+enforces.
+
+Fail-open: a timeout, HTTP error, malformed response, allowlist denial, or
+missing URL never fails retrieval — the hybrid order is returned unchanged, a
+`reranker_fallbacks_total{reason}` metric is recorded, and a warning is logged
+(reason only, no query or chunk content). See ADR-011 for the rationale.
+
 Both the query embedding and stored chunk vectors are validated as finite numbers with the expected dimensions before use; a provider returning `NaN`, infinities, or wrong-dimension vectors fails the request instead of poisoning the index or the query.
 
 ## Chunking, provenance, and UNKNOWN fail-closed

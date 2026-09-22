@@ -2,6 +2,7 @@ import { config } from '../config.js';
 import { AuthContext, CLASSIFICATIONS, Classification, canAccessClassification } from '../authz/permissions.js';
 import { tenantQuery, withTenant } from '../db/pool.js';
 import { internalEmbeddingProvider } from '../documents/ingestion.js';
+import { createCrossEncoderReranker } from './crossEncoderReranker.js';
 
 export interface Citation {
   documentId: string;
@@ -111,10 +112,17 @@ export interface Reranker {
   rerank(queryText: string, chunks: AuthorizedChunk[]): Promise<AuthorizedChunk[]> | AuthorizedChunk[];
 }
 
-let activeReranker: Reranker = {
-  name: 'hybrid-score',
-  rerank: (_queryText, chunks) => chunks,
-};
+let activeReranker: Reranker = config.RERANKER_ENABLED
+  ? // The cross-encoder reranker is installed through the same setReranker()
+    // hook point, so the untrusted-output reconstruction below (after
+    // authorization filtering) applies unchanged: reranking can only reorder
+    // authorized chunks and propose scores, never widen access. Default is
+    // the passthrough preserving hybrid order (RERANKER_ENABLED=false).
+    createCrossEncoderReranker()
+  : {
+      name: 'hybrid-score',
+      rerank: (_queryText, chunks) => chunks,
+    };
 
 export function setReranker(reranker: Reranker): void {
   activeReranker = reranker;
