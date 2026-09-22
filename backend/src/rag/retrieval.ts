@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { AuthContext, CLASSIFICATIONS, Classification, canAccessClassification } from '../authz/permissions.js';
-import { tenantQuery, withTenant } from '../db/pool.js';
+import { Db, Document } from 'mongodb';
+import { getDb } from '../db/mongo.js';
 import { internalEmbeddingProvider } from '../documents/ingestion.js';
 import { createCrossEncoderReranker } from './crossEncoderReranker.js';
 
@@ -28,6 +29,24 @@ export interface RetrievalResult {
   results: AuthorizedChunk[];
 }
 
+/**
+ * Name of the Atlas Vector Search index on `document_chunks.embedding`
+ * (1536 dims, cosine). IMPORTANT: Atlas Search / Vector Search indexes
+ * CANNOT be created through the ordinary MongoDB driver index operations —
+ * the driver has no API for them. This index must be provisioned via the
+ * Atlas UI or the Atlas Admin API; see `backend/src/db/createVectorIndexes.ts`
+ * and migration 003 for the exact definition.
+ */
+const VECTOR_SEARCH_INDEX = 'idx_document_chunks_embedding_vector';
+
+/**
+ * Bound for the application-side brute-force fallback (see below): the
+ * maximum number of chunk documents pulled into memory when $vectorSearch
+ * is unavailable. 2000 chunks x 1536 dims is ~25MB of vectors — large but
+ * bounded, and this path only runs when Atlas Vector Search is missing.
+ */
+const VECTOR_FALLBACK_MAX_CANDIDATES = 2000;
+
 function terms(text: string): Set<string> {
   return new Set(text.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []);
 }
@@ -39,6 +58,21 @@ function lexicalScore(query: string, content: string): number {
   let matches = 0;
   for (const term of wanted) if (found.has(term)) matches += 1;
   return matches / wanted.size;
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i]!;
+    const y = b[i]!;
+    dot += x * y;
+    normA += x * x;
+    normB += y * y;
+  }
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  return denominator === 0 ? 0 : dot / denominator;
 }
 
 function escapeUntrusted(value: string): string {
@@ -132,6 +166,211 @@ export function getReranker(): Reranker {
   return activeReranker;
 }
 
+interface VectorCandidate {
+  chunkId: string;
+  content: string;
+  documentId: string;
+  classification: string;
+  page: number | null;
+  section: string | null;
+  sourceLocation: string | null;
+  /** Cosine similarity in [0,1]; pgvector's `1 - (embedding <=> query)` equivalent. */
+  vectorScore: number;
+}
+
+interface AuthorizedDocument {
+  _id: string;
+  filename: string;
+  classification: string;
+}
+
+/**
+ * Owner-or-grant principal conditions for `document_permissions` (same
+ * predicate as the documents routes: exactly one principal field per grant —
+ * absent fields are omitted, never null — so the role/department/group
+ * clauses are only added when the caller actually has that principal).
+ */
+async function grantPrincipalOr(db: Db, auth: AuthContext): Promise<Record<string, unknown>[]> {
+  const [deptRows, groupRows] = await Promise.all([
+    db.collection<{ departmentId: string }>('department_memberships')
+      .find({ userId: auth.userId }, { projection: { departmentId: 1 } }).toArray(),
+    db.collection<{ groupId: string }>('security_group_memberships')
+      .find({ userId: auth.userId }, { projection: { groupId: 1 } }).toArray(),
+  ]);
+  const or: Record<string, unknown>[] = [{ userId: auth.userId }];
+  if (auth.roleId) or.push({ roleId: auth.roleId });
+  const departmentIds = deptRows.map((row) => row.departmentId);
+  const groupIds = groupRows.map((row) => row.groupId);
+  if (departmentIds.length > 0) or.push({ departmentId: { $in: departmentIds } });
+  if (groupIds.length > 0) or.push({ groupId: { $in: groupIds } });
+  return or;
+}
+
+/**
+ * Resolve the documents the caller may read BEFORE any vector work runs:
+ * tenant-scoped, READY, not deleted, classification within clearance, and
+ * owner-or-grant authorized. Both the $vectorSearch path and the brute-force
+ * fallback only ever see chunks of these documents, so neither path can widen
+ * access.
+ */
+async function resolveAuthorizedDocuments(
+  db: Db,
+  auth: AuthContext,
+  allowed: Classification[],
+  documentIds?: string[]
+): Promise<AuthorizedDocument[]> {
+  const grants = await db.collection<{ documentId: string }>('document_permissions')
+    .find(
+      { tenantId: auth.tenantId, canRead: true, $or: await grantPrincipalOr(db, auth) },
+      { projection: { documentId: 1 } }
+    ).toArray();
+  const grantedIds = [...new Set(grants.map((grant) => grant.documentId))];
+  const or: Record<string, unknown>[] = [{ ownerId: auth.userId }];
+  if (grantedIds.length > 0) or.push({ _id: { $in: grantedIds } });
+  return db.collection<AuthorizedDocument>('documents').find(
+    {
+      tenantId: auth.tenantId,
+      status: 'READY',
+      deletedAt: null,
+      classification: { $in: allowed },
+      ...(documentIds?.length ? { _id: { $in: documentIds } } : {}),
+      $or: or,
+    },
+    { projection: { filename: 1, classification: 1 } }
+  ).toArray();
+}
+
+/**
+ * Primary path: Atlas $vectorSearch over `document_chunks.embedding`. The
+ * tenant / classification / embedding-provenance / ACL predicates that the old
+ * pgvector query applied around the `<=>` ordering move into
+ * `$vectorSearch.filter`; the ACL is enforced inside the vector search via
+ * the pre-resolved authorized document IDs, so no post-filter can widen
+ * access. Oversampling (limit topK*4) is preserved for the diversity pass.
+ */
+async function vectorSearchCandidates(
+  db: Db,
+  tenantId: string,
+  embedding: number[],
+  authorizedDocIds: string[],
+  allowed: Classification[],
+  model: string,
+  version: string,
+  dimensions: number,
+  limit: number
+): Promise<VectorCandidate[]> {
+  const pipeline: Document[] = [
+    {
+      $vectorSearch: {
+        index: VECTOR_SEARCH_INDEX,
+        path: 'embedding',
+        queryVector: embedding,
+        numCandidates: limit,
+        limit,
+        filter: {
+          tenantId,
+          documentId: { $in: authorizedDocIds },
+          classification: { $in: allowed },
+          embeddingModel: model,
+          embeddingVersion: version,
+          embeddingDimensions: dimensions,
+        },
+      },
+    },
+    {
+      $project: {
+        content: 1,
+        documentId: 1,
+        classification: 1,
+        page: 1,
+        section: 1,
+        sourceLocation: 1,
+        vectorScore: { $meta: 'vectorSearchScore' },
+      },
+    },
+  ];
+  const rows = await db.collection('document_chunks').aggregate(pipeline).toArray();
+  return rows.map((row) => ({
+    chunkId: String(row._id),
+    content: String(row.content ?? ''),
+    documentId: String(row.documentId),
+    classification: String(row.classification),
+    page: typeof row.page === 'number' ? row.page : null,
+    section: typeof row.section === 'string' ? row.section : null,
+    sourceLocation: typeof row.sourceLocation === 'string' ? row.sourceLocation : null,
+    vectorScore: typeof row.vectorScore === 'number' ? row.vectorScore : 0,
+  }));
+}
+
+/**
+ * Bounded fallback when Atlas Vector Search is unavailable (index not
+ * provisioned, or running against a mongod without Atlas Search): fetch a
+ * capped, tenant-scoped candidate set — already restricted to authorized
+ * documents — validate each vector, and compute cosine similarity in
+ * JavaScript. The candidate cap bounds memory/CPU; only finite scores flow
+ * through, sorted deterministically with chunkId tie-breaks.
+ */
+async function bruteForceCandidates(
+  db: Db,
+  tenantId: string,
+  embedding: number[],
+  authorizedDocIds: string[],
+  allowed: Classification[],
+  model: string,
+  version: string,
+  dimensions: number,
+  limit: number
+): Promise<VectorCandidate[]> {
+  const rows = await db.collection<{
+    _id: string; content: string; documentId: string; classification: string;
+    embedding: unknown; page: number | null; section: string | null; sourceLocation: string | null;
+  }>('document_chunks').find(
+    {
+      tenantId,
+      documentId: { $in: authorizedDocIds },
+      classification: { $in: allowed },
+      embeddingModel: model,
+      embeddingVersion: version,
+      embeddingDimensions: dimensions,
+    },
+    {
+      projection: {
+        content: 1, documentId: 1, classification: 1, embedding: 1,
+        page: 1, section: 1, sourceLocation: 1,
+      },
+      sort: { createdAt: -1 },
+      limit: VECTOR_FALLBACK_MAX_CANDIDATES,
+    }
+  ).toArray();
+  const scored: VectorCandidate[] = [];
+  for (const row of rows) {
+    const vector = row.embedding;
+    if (!Array.isArray(vector) || vector.length !== embedding.length) continue;
+    if (!vector.every((value) => typeof value === 'number' && Number.isFinite(value))) continue;
+    const similarity = cosineSimilarity(embedding, vector as number[]);
+    if (!Number.isFinite(similarity)) continue;
+    scored.push({
+      chunkId: row._id,
+      content: row.content,
+      documentId: row.documentId,
+      classification: row.classification,
+      page: row.page,
+      section: row.section,
+      sourceLocation: row.sourceLocation,
+      vectorScore: similarity,
+    });
+  }
+  scored.sort((a, b) => b.vectorScore - a.vectorScore || (a.chunkId < b.chunkId ? -1 : a.chunkId > b.chunkId ? 1 : 0));
+  return scored.slice(0, limit);
+}
+
+/** True when the error signals $vectorSearch itself is unavailable (as opposed to a query bug). */
+function isVectorSearchUnavailable(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const message = (error as { message?: unknown }).message;
+  return typeof message === 'string' && /\$vectorSearch/i.test(message);
+}
+
 export async function retrieveAuthorizedContext(
   auth: AuthContext,
   queryText: string,
@@ -151,68 +390,57 @@ export async function retrieveAuthorizedContext(
   const allowed = CLASSIFICATIONS.filter(
     (classification) => classification !== 'UNKNOWN' && canAccessClassification(auth.clearance, classification)
   ) as Classification[];
-  const rows = await withTenant(auth.tenantId, async (client) => {
-    // The ANN traversal runs under selective tenant/ACL filters, so the
-    // default ef_search (40) under-recalls. Raise it for this retrieval
-    // transaction only (SET LOCAL dies with the transaction).
-    await client.query('SET LOCAL hnsw.ef_search = 200');
-    return (
-      await client.query<{
-        chunk_id: string; content: string; page: number | null; section: string | null;
-        source_location: string | null; document_id: string; filename: string; vector_score: string;
-      }>(
-      `SELECT dc.id AS chunk_id, dc.content, dc.page, dc.section, dc.source_location,
-              d.id AS document_id, d.filename, (1 - (dc.embedding <=> $6::vector)) AS vector_score
-       FROM document_chunks dc
-       JOIN documents d ON d.id = dc.document_id AND d.tenant_id = dc.tenant_id
-       WHERE dc.tenant_id = $1 AND d.status = 'READY' AND d.deleted_at IS NULL
-         AND d.classification = ANY($2::text[]) AND dc.classification = d.classification
-         AND dc.classification <> 'UNKNOWN' AND d.classification <> 'UNKNOWN'
-         AND dc.embedding_model = $7 AND dc.embedding_version = $8 AND dc.embedding_dimensions = $9
-         AND ($3::uuid[] IS NULL OR d.id = ANY($3::uuid[]))
-         AND (
-           d.owner_id = $4 OR EXISTS (
-             SELECT 1 FROM document_permissions dp
-             WHERE dp.document_id = d.id AND dp.tenant_id = $1 AND dp.can_read
-               AND (
-                 dp.user_id = $4 OR dp.role_id = $5
-                 OR (dp.department_id IS NOT NULL AND EXISTS (
-                   SELECT 1 FROM department_memberships dm
-                   WHERE dm.tenant_id = $1 AND dm.department_id = dp.department_id AND dm.user_id = $4
-                 ))
-                 OR (dp.group_id IS NOT NULL AND EXISTS (
-                   SELECT 1 FROM security_group_memberships gm
-                   WHERE gm.tenant_id = $1 AND gm.group_id = dp.group_id AND gm.user_id = $4
-                 ))
-               )
-           )
-         )
-       ORDER BY dc.embedding <=> $6::vector
-       LIMIT $10`,
-      [auth.tenantId, allowed, documentIds?.length ? documentIds : null, auth.userId, auth.roleId,
-        `[${embedding!.join(',')}]`, embeddingProvider.model, embeddingProvider.version,
-        embeddingProvider.dimensions, topK * 4]
-      )
-    ).rows;
-  });
+  const db = await getDb();
+  // Authorization first: resolve the readable documents before any vector
+  // work, so both the $vectorSearch path and the brute-force fallback only
+  // ever score chunks of documents this caller may read.
+  const authorizedDocs = await resolveAuthorizedDocuments(db, auth, allowed, documentIds);
+  if (authorizedDocs.length === 0) return { context: '', citations: [], results: [] };
+  const docById = new Map(authorizedDocs.map((doc) => [doc._id, doc]));
+  const authorizedDocIds = authorizedDocs.map((doc) => doc._id);
+  const candidateLimit = topK * 4;
 
-  const scored = rows.map((row) => {
-    const vectorScore = Math.max(0, Math.min(1, Number(row.vector_score)));
-    const score = (vectorScore * 0.85) + (lexicalScore(query, row.content) * 0.15);
-    // Citations are populated exclusively from the DB row — never synthesized.
-    // Every citation field (documentId/documentName/chunkId/page/section)
-    // must trace back to an authorized row returned by the SQL above.
-    const citation: Citation = {
-      documentId: row.document_id,
-      documentName: row.filename,
-      chunkId: row.chunk_id,
-      ...(row.page ? { page: row.page } : {}),
-      ...(row.section ? { section: row.section } : {}),
-      ...(row.source_location ? { sourceLocation: row.source_location } : {}),
-    };
-    return { documentId: row.document_id, documentName: row.filename, chunkId: row.chunk_id,
-      text: row.content, score, citation };
-  }).sort((a, b) => b.score - a.score);
+  let candidates: VectorCandidate[];
+  try {
+    candidates = await vectorSearchCandidates(
+      db, auth.tenantId, embedding, authorizedDocIds, allowed,
+      embeddingProvider.model, embeddingProvider.version, embeddingProvider.dimensions, candidateLimit
+    );
+  } catch (error) {
+    if (!isVectorSearchUnavailable(error)) throw error;
+    // Atlas Vector Search is not provisioned here (or this mongod has no
+    // Atlas Search): degrade to bounded application-side cosine scoring
+    // over the same authorized document set — never a wider one.
+    console.warn(`retrieveAuthorizedContext: $vectorSearch unavailable, using bounded brute-force fallback (${VECTOR_FALLBACK_MAX_CANDIDATES} candidates max)`);
+    candidates = await bruteForceCandidates(
+      db, auth.tenantId, embedding, authorizedDocIds, allowed,
+      embeddingProvider.model, embeddingProvider.version, embeddingProvider.dimensions, candidateLimit
+    );
+  }
+
+  const scored = candidates
+    // The old query required dc.classification = d.classification with both
+    // non-UNKNOWN: enforce the equality here for both vector paths, since
+    // $vectorSearch.filter can only carry the $in predicate.
+    .filter((candidate) => docById.get(candidate.documentId)?.classification === candidate.classification)
+    .map((candidate) => {
+      const doc = docById.get(candidate.documentId)!;
+      const vectorScore = Math.max(0, Math.min(1, candidate.vectorScore));
+      const score = (vectorScore * 0.85) + (lexicalScore(query, candidate.content) * 0.15);
+      // Citations are populated exclusively from authorized data — never synthesized.
+      // Every citation field (documentId/documentName/chunkId/page/section)
+      // must trace back to an authorized document and candidate chunk.
+      const citation: Citation = {
+        documentId: candidate.documentId,
+        documentName: doc.filename,
+        chunkId: candidate.chunkId,
+        ...(candidate.page ? { page: candidate.page } : {}),
+        ...(candidate.section ? { section: candidate.section } : {}),
+        ...(candidate.sourceLocation ? { sourceLocation: candidate.sourceLocation } : {}),
+      };
+      return { documentId: candidate.documentId, documentName: doc.filename, chunkId: candidate.chunkId,
+        text: candidate.content, score, citation };
+    }).sort((a, b) => b.score - a.score);
 
   // MMR-lite diversity pass: when the top hybrid hits all come from one
   // document, blend in the best chunk from another document so a single long
@@ -229,7 +457,7 @@ export async function retrieveAuthorizedContext(
   // validated score — text, document, and citation fields are rebuilt from the
   // canonical candidate, so mutated content injected alongside a known chunkId
   // is discarded. Unknown or duplicated chunk IDs are dropped so only the
-  // SQL-authorized set can flow through, in the reranker's order.
+  // authorized set can flow through, in the reranker's order.
   const canonical = new Map(selected.map((result) => [result.chunkId, result]));
   const seen = new Set<string>();
   const sanitized: AuthorizedChunk[] = [];

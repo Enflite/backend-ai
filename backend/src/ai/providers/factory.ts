@@ -21,9 +21,9 @@ import { OllamaProvider } from './ollama.js';
 export interface ProviderModelRef {
   provider: string;
   endpoint: string;
-  model_identifier: string;
-  request_timeout_ms: number | null;
-  max_tokens: number | null;
+  modelIdentifier: string;
+  requestTimeoutMs: number | null;
+  maxTokens: number | null;
   temperature: number | null;
 }
 

@@ -6,9 +6,9 @@
  * falling back to the global RETENTION_*_DAYS config). NULL/0 disables
  * purging for that table.
  *
- * Legal holds exempt records: conversations with legal_hold (and all of
- * their messages, via the join) and audit events with legal_hold are
- * never deleted.
+ * Legal holds exempt records: conversations with legalHold (and all of
+ * their messages, via the conversation lookup) and audit events with
+ * legalHold are never deleted.
  *
  * Audit reconciliation: audit is append-only by convention, but legal
  * retention requires old audit rows to be deletable. Every purge writes a
@@ -19,8 +19,9 @@
  */
 
 import { config } from '../config.js';
-import { query, tenantQuery } from '../db/pool.js';
-import { purgeGlobalAuditEvents, recordAudit } from '../audit/audit.js';
+import { getDb, withTenantTx } from '../db/mongo.js';
+import { Filter } from 'mongodb';
+import { purgeGlobalAuditEvents, recordAudit, type AuditEventDoc } from '../audit/audit.js';
 
 export interface RetentionPolicy {
   conversationsDays: number | null;
@@ -41,51 +42,93 @@ function purgeEnabled(days: number | null | undefined): days is number {
   return typeof days === 'number' && days > 0;
 }
 
-/** Test seam: row type returned from retention_policies. */
+/** Test seam: policy document shape in the retention_policies collection. */
 export interface RetentionPolicyRow {
-  conversations_days: number | null;
-  messages_days: number | null;
-  audit_events_days: number | null;
+  conversationsDays: number | null;
+  messagesDays: number | null;
+  auditEventsDays: number | null;
+}
+
+/** Document shape for the `retention_policies` collection. `_id` IS the tenantId (migration 005). */
+interface RetentionPolicyDoc {
+  _id: string;
+  conversationsDays: number | null;
+  messagesDays: number | null;
+  auditEventsDays: number | null;
+  updatedAt?: Date;
+}
+
+/** Document shape for the `messages` collection (only the fields this module reads). */
+interface MessageDoc {
+  _id: string;
+  tenantId: string;
+  conversationId: string;
+  createdAt: Date;
+}
+
+/** Document shape for the `conversations` collection (only the fields this module reads). */
+interface ConversationDoc {
+  _id: string;
+  tenantId: string;
+  legalHold: boolean;
+  updatedAt: Date;
+}
+
+/** Document shape for the `tenants` collection (only the fields this module reads). */
+interface TenantDoc {
+  _id: string;
 }
 
 export function effectivePolicy(row: RetentionPolicyRow | undefined): RetentionPolicy {
   return {
-    conversationsDays: row?.conversations_days ?? config.RETENTION_CONVERSATIONS_DAYS,
-    messagesDays: row?.messages_days ?? config.RETENTION_MESSAGES_DAYS,
-    auditEventsDays: row?.audit_events_days ?? config.RETENTION_AUDIT_EVENTS_DAYS,
+    conversationsDays: row?.conversationsDays ?? config.RETENTION_CONVERSATIONS_DAYS,
+    messagesDays: row?.messagesDays ?? config.RETENTION_MESSAGES_DAYS,
+    auditEventsDays: row?.auditEventsDays ?? config.RETENTION_AUDIT_EVENTS_DAYS,
   };
 }
 
 export async function resolvePolicy(tenantId: string): Promise<RetentionPolicy> {
-  const row = (
-    await tenantQuery<RetentionPolicyRow>(
-      tenantId,
-      'SELECT conversations_days, messages_days, audit_events_days FROM retention_policies WHERE tenant_id = $1',
-      [tenantId]
-    )
-  ).rows[0];
-  return effectivePolicy(row);
+  // retention_policies._id IS the tenantId (migration 005).
+  const db = await getDb();
+  const doc = await db.collection<RetentionPolicyDoc>('retention_policies').findOne({ _id: tenantId });
+  const row = doc as unknown as RetentionPolicyRow | null;
+  return effectivePolicy(row ?? undefined);
 }
 
 async function purgeMessages(tenantId: string, days: number): Promise<number> {
+  const db = await getDb();
+  const messages = db.collection<MessageDoc>('messages');
+  const conversations = db.collection<ConversationDoc>('conversations');
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   let total = 0;
+  // _id-ordered pagination (UUID strings order lexicographically): every
+  // batch advances, so legal-hold-skipped messages can never pin the loop.
+  let lastId: string | null = null;
   for (;;) {
-    const result = await tenantQuery(
-      tenantId,
-      `DELETE FROM messages
-       WHERE id IN (
-         SELECT m.id FROM messages m
-         JOIN conversations c ON c.id = m.conversation_id
-         WHERE m.tenant_id = $1
-           AND c.legal_hold = false
-           AND m.created_at < NOW() - ($2 || ' days')::interval
-         LIMIT ${PURGE_BATCH_SIZE}
-       )`,
-      [tenantId, String(days)]
-    );
-    const deleted = result.rowCount ?? 0;
-    total += deleted;
-    if (deleted < PURGE_BATCH_SIZE) break;
+    const filter: Filter<MessageDoc> = { tenantId, createdAt: { $lt: cutoff } };
+    if (lastId !== null) filter._id = { $gt: lastId };
+    const batch = await messages
+      .find(filter)
+      .sort({ _id: 1 })
+      .project({ _id: 1, conversationId: 1 })
+      .limit(PURGE_BATCH_SIZE)
+      .toArray();
+    if (batch.length === 0) break;
+    lastId = String(batch[batch.length - 1]!._id);
+    // Legal-hold join: messages in held conversations are never deleted.
+    const conversationIds = [...new Set(batch.map((message) => message.conversationId))];
+    const holdFree = await conversations
+      .find({ tenantId, _id: { $in: conversationIds }, legalHold: false })
+      .project({ _id: 1 })
+      .toArray();
+    const holdFreeIds = new Set(holdFree.map((conversation) => String(conversation._id)));
+    const deletableIds = batch
+      .filter((message) => holdFreeIds.has(String(message.conversationId)))
+      .map((message) => message._id);
+    if (deletableIds.length > 0) {
+      const result = await messages.deleteMany({ tenantId, _id: { $in: deletableIds } });
+      total += result.deletedCount ?? 0;
+    }
   }
   return total;
 }
@@ -94,64 +137,62 @@ async function purgeConversations(
   tenantId: string,
   days: number
 ): Promise<{ conversations: number; messages: number }> {
+  const db = await getDb();
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   let conversations = 0;
   let messages = 0;
   for (;;) {
-    // Messages are deleted explicitly (not left to the FK cascade) so the
-    // audit summary counts every deleted record.
-    const result = await tenantQuery<{ conversations: string; messages: string }>(
-      tenantId,
-      `WITH conv AS (
-         SELECT id FROM conversations
-         WHERE tenant_id = $1
-           AND legal_hold = false
-           AND updated_at < NOW() - ($2 || ' days')::interval
-         LIMIT ${PURGE_BATCH_SIZE}
-       ),
-       msg AS (
-         DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conv)
-         RETURNING id
-       ),
-       del AS (
-         DELETE FROM conversations WHERE id IN (SELECT id FROM conv)
-         RETURNING id
-       )
-       SELECT (SELECT COUNT(*) FROM del) AS conversations,
-              (SELECT COUNT(*) FROM msg) AS messages`,
-      [tenantId, String(days)]
-    );
-    const row = result.rows[0];
-    const deletedConvs = Number(row?.conversations ?? 0);
-    conversations += deletedConvs;
-    messages += Number(row?.messages ?? 0);
-    if (deletedConvs < PURGE_BATCH_SIZE) break;
+    const batch = await db
+      .collection<ConversationDoc>('conversations')
+      .find({ tenantId, legalHold: false, updatedAt: { $lt: cutoff } })
+      .project({ _id: 1 })
+      .limit(PURGE_BATCH_SIZE)
+      .toArray();
+    if (batch.length === 0) break;
+    const ids = batch.map((doc) => doc._id);
+    // Messages are deleted explicitly (not left to a cascade) so the
+    // audit summary counts every deleted record. Both deletes run in one
+    // multi-document transaction.
+    const deleted = await withTenantTx(tenantId, async (session, txDb) => {
+      const messagesResult = await txDb
+        .collection<MessageDoc>('messages')
+        .deleteMany({ tenantId, conversationId: { $in: ids } }, { session });
+      const conversationsResult = await txDb
+        .collection<ConversationDoc>('conversations')
+        .deleteMany({ tenantId, _id: { $in: ids } }, { session });
+      return {
+        messages: messagesResult.deletedCount ?? 0,
+        conversations: conversationsResult.deletedCount ?? 0,
+      };
+    });
+    conversations += deleted.conversations;
+    messages += deleted.messages;
+    if (batch.length < PURGE_BATCH_SIZE) break;
   }
   return { conversations, messages };
 }
 
 async function purgeAuditEvents(tenantId: string | null, days: number): Promise<number> {
   // NULL-tenant (platform-global) audit rows are purged via audit.ts: there
-  // is no tenant context for them, and the audit_events RLS policy
-  // explicitly permits NULL-tenant rows without one. Tenant rows go through
-  // tenantQuery so RLS applies.
+  // is no tenant context for them, and the filter there pins tenantId null
+  // explicitly. Tenant rows always filter by the tenant's tenantId.
   if (tenantId === null) return purgeGlobalAuditEvents(days, PURGE_BATCH_SIZE);
+  const db = await getDb();
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   let total = 0;
   for (;;) {
-    const result = await tenantQuery(
-      tenantId,
-      `DELETE FROM audit_events
-       WHERE id IN (
-         SELECT id FROM audit_events
-         WHERE tenant_id = $1
-           AND legal_hold = false
-           AND created_at < NOW() - ($2 || ' days')::interval
-         LIMIT ${PURGE_BATCH_SIZE}
-       )`,
-      [tenantId, String(days)]
-    );
-    const deleted = result.rowCount ?? 0;
-    total += deleted;
-    if (deleted < PURGE_BATCH_SIZE) break;
+    const batch = await db
+      .collection<AuditEventDoc>('audit_events')
+      .find({ tenantId, legalHold: false, createdAt: { $lt: cutoff } })
+      .project({ _id: 1 })
+      .limit(PURGE_BATCH_SIZE)
+      .toArray();
+    if (batch.length === 0) break;
+    const result = await db
+      .collection<AuditEventDoc>('audit_events')
+      .deleteMany({ tenantId, _id: { $in: batch.map((doc) => doc._id) } });
+    total += result.deletedCount ?? 0;
+    if (batch.length < PURGE_BATCH_SIZE) break;
   }
   return total;
 }
@@ -164,7 +205,7 @@ export async function purgeTenant(tenantId: string): Promise<PurgeCounts> {
   const policy = await resolvePolicy(tenantId);
   const counts: PurgeCounts = { conversations: 0, messages: 0, auditEvents: 0 };
   // Messages before conversations: old messages in still-active
-  // conversations go first; deleting a conversation cascades its rest.
+  // conversations go first; deleting a conversation removes its rest.
   if (purgeEnabled(policy.messagesDays)) {
     counts.messages = await purgeMessages(tenantId, policy.messagesDays);
   }
@@ -215,17 +256,19 @@ export async function purgeAllTenants(): Promise<PurgeAllResult> {
     failed: [],
     globalAuditPurgeError: null,
   };
-  const tenants = (await query<{ id: string }>('SELECT id FROM tenants')).rows;
+  const db = await getDb();
+  const tenants = await db.collection<TenantDoc>('tenants').find({}).project({ _id: 1 }).toArray();
   for (const tenant of tenants) {
+    const tenantId = String(tenant._id);
     try {
-      const counts = await purgeTenant(tenant.id);
+      const counts = await purgeTenant(tenantId);
       result.tenants += 1;
       result.counts.conversations += counts.conversations;
       result.counts.messages += counts.messages;
       result.counts.auditEvents += counts.auditEvents;
     } catch (error) {
-      result.failed.push(tenant.id);
-      console.error(`Retention purge failed for tenant ${tenant.id}`, error);
+      result.failed.push(tenantId);
+      console.error(`Retention purge failed for tenant ${tenantId}`, error);
     }
   }
   // Platform-global audit rows belong to no tenant; purge them against the

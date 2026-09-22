@@ -33,9 +33,10 @@ const GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 const GIT_FETCH_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
- * Embedding dimension pinned by migration 026 (`repo_code_chunks.embedding
- * VECTOR(1536)`), matching `document_chunks`. HNSW requires a declared
- * dimension; the indexer refuses any other provider dimension at sync time.
+ * Embedding dimension pinned by the Atlas Vector Search index on
+ * `repo_code_chunks.embedding` (1536 dims, cosine — see migration 005),
+ * matching `document_chunks`. The indexer refuses any other provider
+ * dimension at sync time.
  */
 export const REPO_EMBEDDING_DIMENSIONS = 1536;
 
@@ -310,10 +311,11 @@ async function runSyncRepo(tenantId: string, repoId: string): Promise<SyncStats>
     }
 
     const embeddings = internalEmbeddingProvider();
-    // The repo_code_chunks.embedding column is VECTOR(1536) (migration 026,
-    // matching document_chunks): HNSW requires a declared dimension, so a
+    // The repo_code_chunks.embedding field is a plain 1536-dimensional
+    // number array (migration 005, matching document_chunks): the Atlas
+    // Vector Search index requires a declared dimension, so a
     // non-1536-dimensional embedding provider fails fast here with a clear
-    // error instead of a PostgreSQL insert failure mid-sync.
+    // error instead of a document insert failure mid-sync.
     if (embeddings.dimensions !== REPO_EMBEDDING_DIMENSIONS) {
       throw Errors.internal(
         `Repo indexing requires a ${REPO_EMBEDDING_DIMENSIONS}-dimensional embedding provider ` +

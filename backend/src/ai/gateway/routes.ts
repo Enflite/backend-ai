@@ -4,7 +4,7 @@ import { requireAuth } from '../../auth/middleware.js';
 import { requirePermission } from '../../authz/middleware.js';
 import { CLASSIFICATIONS } from '../../authz/permissions.js';
 import { listApprovedModelsForUser } from './modelRegistry.js';
-import { query, withTx } from '../../db/pool.js';
+import { getDb, withTx } from '../../db/mongo.js';
 import { Errors } from '../../errors.js';
 import { recordAuditInTx } from '../../audit/audit.js';
 import { assertEndpointAllowed } from './gateway.js';
@@ -72,9 +72,9 @@ export async function modelRoutes(fastify: FastifyInstance): Promise<void> {
         id: m.id,
         name: m.name,
         version: m.version,
-        contextWindow: m.context_window,
+        contextWindow: m.contextWindow,
         capabilities: m.capabilities,
-        allowedClassifications: m.allowed_classifications,
+        allowedClassifications: m.allowedClassifications,
         provider: m.provider,
       }));
 
@@ -83,65 +83,60 @@ export async function modelRoutes(fastify: FastifyInstance): Promise<void> {
   );
 }
 
-const ADMIN_MODEL_FIELDS = `id, name, version, provider, endpoint, model_identifier,
-  status, license, source, sha256, context_window, capabilities,
-  allowed_classifications, deployment, request_timeout_ms, max_tokens,
-  temperature, fallback_model_id, enabled, created_at,
-  lifecycle_updated_at, approved_by, approved_at, last_eval_run_id`;
-
-interface AdminModelRow {
-  id: string;
+/** MongoDB document shape for the `models` collection (ADR-014): camelCase, `_id` is the UUID string. */
+interface AdminModelDoc {
+  _id: string;
   name: string;
   version: string;
   provider: string;
   endpoint: string;
-  model_identifier: string;
+  modelIdentifier: string;
   status: string;
   license: string | null;
   source: string | null;
   sha256: string | null;
-  context_window: number;
+  contextWindow: number;
   capabilities: Record<string, unknown>;
-  allowed_classifications: string[];
+  allowedClassifications: string[];
   deployment: Record<string, unknown>;
-  request_timeout_ms: number | null;
-  max_tokens: number | null;
+  requestTimeoutMs: number | null;
+  maxTokens: number | null;
   temperature: number | null;
-  fallback_model_id: string | null;
+  fallbackModelId: string | null;
   enabled: boolean;
-  created_at: Date;
-  lifecycle_updated_at: Date;
-  approved_by: string | null;
-  approved_at: Date | null;
-  last_eval_run_id: string | null;
+  createdAt: Date;
+  lifecycleUpdatedAt: Date;
+  approvedBy: string | null;
+  approvedAt: Date | null;
+  lastEvalRunId: string | null;
 }
 
-function toAdminModel(m: AdminModelRow) {
+function toAdminModel(m: AdminModelDoc) {
   return {
-    id: m.id,
+    id: m._id,
     name: m.name,
     version: m.version,
     provider: m.provider,
     endpoint: m.endpoint,
-    modelIdentifier: m.model_identifier,
+    modelIdentifier: m.modelIdentifier,
     status: m.status,
     license: m.license,
     source: m.source,
     sha256: m.sha256,
-    contextWindow: m.context_window,
+    contextWindow: m.contextWindow,
     capabilities: m.capabilities,
-    allowedClassifications: m.allowed_classifications,
+    allowedClassifications: m.allowedClassifications,
     deployment: m.deployment,
-    requestTimeoutMs: m.request_timeout_ms,
-    maxTokens: m.max_tokens,
+    requestTimeoutMs: m.requestTimeoutMs,
+    maxTokens: m.maxTokens,
     temperature: m.temperature,
-    fallbackModelId: m.fallback_model_id,
+    fallbackModelId: m.fallbackModelId,
     enabled: m.enabled,
-    createdAt: m.created_at,
-    lifecycleUpdatedAt: m.lifecycle_updated_at,
-    approvedBy: m.approved_by,
-    approvedAt: m.approved_at,
-    lastEvalRunId: m.last_eval_run_id,
+    createdAt: m.createdAt,
+    lifecycleUpdatedAt: m.lifecycleUpdatedAt,
+    approvedBy: m.approvedBy,
+    approvedAt: m.approvedAt,
+    lastEvalRunId: m.lastEvalRunId,
   };
 }
 
@@ -156,10 +151,12 @@ export async function modelAdminRoutes(fastify: FastifyInstance): Promise<void> 
   fastify.get('/admin/models', {
     preHandler: [requireAuth, requirePermission('model:manage')],
   }, async (_req, reply) => {
-    const rows = (await query<AdminModelRow>(
-      `SELECT ${ADMIN_MODEL_FIELDS} FROM models ORDER BY name ASC`
-    )).rows;
-    return reply.send({ models: rows.map(toAdminModel) });
+    const docs = await (await getDb())
+      .collection<AdminModelDoc>('models')
+      .find({})
+      .sort({ name: 1 })
+      .toArray();
+    return reply.send({ models: docs.map(toAdminModel) });
   });
 
   fastify.patch('/admin/models/:id', {
@@ -169,25 +166,27 @@ export async function modelAdminRoutes(fastify: FastifyInstance): Promise<void> 
     const parsedId = modelIdSchema.safeParse(req.params);
     const parsedBody = modelPatchSchema.safeParse(req.body);
     if (!parsedId.success || !parsedBody.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid model update request');
-    const current = (
-      await query<Pick<AdminModelRow, 'id' | 'enabled'>>('SELECT id, enabled FROM models WHERE id = $1', [parsedId.data.id])
-    ).rows[0];
+    const db = await getDb();
+    const current = await db
+      .collection<AdminModelDoc>('models')
+      .findOne({ _id: parsedId.data.id }, { projection: { enabled: 1 } });
     if (!current) throw Errors.notFound('MODEL_NOT_FOUND', 'Model not found');
     // The model update and its audit event commit in ONE transaction: under
     // AUDIT_FAIL_CLOSED a failed audit insert rolls the enabled change back
     // instead of leaving it committed but unaudited.
-    const updated = await withTx(async (client) => {
-      // Single-statement UPDATE: atomic; the pre-read only feeds the audit event.
-      const row = (
-        await client.query<AdminModelRow>(
-          `UPDATE models SET enabled = $2 WHERE id = $1 RETURNING ${ADMIN_MODEL_FIELDS}`,
-          [parsedId.data.id, parsedBody.data.enabled]
-        )
-      ).rows[0];
+    const updated = await withTx(async (session, db) => {
+      // Atomic find-and-modify: the pre-read only feeds the audit event.
+      const row = await db
+        .collection<AdminModelDoc>('models')
+        .findOneAndUpdate(
+          { _id: parsedId.data.id },
+          { $set: { enabled: parsedBody.data.enabled } },
+          { session, returnDocument: 'after' }
+        );
       // The pre-read guaranteed existence, but the guard keeps the type honest
       // (and covers a delete raced between the two statements).
       if (!row) throw Errors.notFound('MODEL_NOT_FOUND', 'Model not found');
-      await recordAuditInTx(client, { tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip,
+      await recordAuditInTx(session, { tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip,
         action: 'MODEL_ENABLED_CHANGED', resource: 'model', resourceId: parsedId.data.id,
         metadata: { previousEnabled: current.enabled, newEnabled: parsedBody.data.enabled } });
       return row;
@@ -212,31 +211,45 @@ export async function modelAdminRoutes(fastify: FastifyInstance): Promise<void> 
     assertEndpointAllowed(body.endpoint);
     assertAllowedModelSource(body.source ?? null);
     try {
-      const created = await withTx(async (client) => {
-        const row = (
-          await client.query<AdminModelRow>(
-            `INSERT INTO models (name, version, provider, endpoint, model_identifier, status,
-                                 license, source, sha256, context_window, capabilities,
-                                 allowed_classifications, deployment)
-             VALUES ($1,$2,$3,$4,$5,'REGISTERED',$6,$7,$8,$9,$10,$11,$12)
-             RETURNING ${ADMIN_MODEL_FIELDS}`,
-            [
-              body.name, body.version, body.provider, body.endpoint, body.modelIdentifier,
-              body.license ?? null, body.source ?? null, body.sha256 ?? null,
-              body.contextWindow, JSON.stringify(body.capabilities),
-              body.allowedClassifications, JSON.stringify(body.deployment),
-            ]
-          )
-        ).rows[0]!;
-        await recordAuditInTx(client, { tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip,
-          action: 'MODEL_REGISTERED', resource: 'model', resourceId: row.id,
+      const created = await withTx(async (session, db) => {
+        const now = new Date();
+        const doc: AdminModelDoc = {
+          _id: crypto.randomUUID(),
+          name: body.name,
+          version: body.version,
+          provider: body.provider,
+          endpoint: body.endpoint,
+          modelIdentifier: body.modelIdentifier,
+          status: 'REGISTERED',
+          license: body.license ?? null,
+          source: body.source ?? null,
+          sha256: body.sha256 ?? null,
+          contextWindow: body.contextWindow,
+          // Native nested documents in MongoDB — no JSON.stringify (ADR-014).
+          capabilities: body.capabilities,
+          allowedClassifications: body.allowedClassifications,
+          deployment: body.deployment,
+          requestTimeoutMs: null,
+          maxTokens: null,
+          temperature: null,
+          fallbackModelId: null,
+          enabled: true,
+          createdAt: now,
+          lifecycleUpdatedAt: now,
+          approvedBy: null,
+          approvedAt: null,
+          lastEvalRunId: null,
+        };
+        await db.collection<AdminModelDoc>('models').insertOne(doc, { session });
+        await recordAuditInTx(session, { tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip,
+          action: 'MODEL_REGISTERED', resource: 'model', resourceId: doc._id,
           metadata: { name: body.name, version: body.version, provider: body.provider } });
-        return row;
+        return doc;
       });
       return reply.code(201).send({ model: toAdminModel(created) });
     } catch (err) {
-      // Unique violation on models.name -> 409, not 500.
-      if (err instanceof Error && 'code' in err && (err as { code: string }).code === '23505') {
+      // Duplicate key on the unique models.name index -> 409, not 500.
+      if (err instanceof Error && 'code' in err && (err as { code: unknown }).code === 11000) {
         throw Errors.badRequest('MODEL_NAME_EXISTS', 'A model with this name is already registered');
       }
       throw err;

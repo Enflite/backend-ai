@@ -1,6 +1,7 @@
 import { parseArgs } from 'node:util';
+import { randomUUID } from 'node:crypto';
 import { hashPassword } from '../src/auth/password.js';
-import { pool, withTx } from '../src/db/pool.js';
+import { getDb, closeDb } from '../src/db/mongo.js';
 import { CLASSIFICATIONS, Classification } from '../src/authz/permissions.js';
 
 /**
@@ -95,93 +96,122 @@ async function main(): Promise<void> {
   const tenantName = tenant ?? 'Default Tenant';
   const userClearance = clearance as Classification;
 
+  const db = await getDb();
   try {
-    await withTx(async (client) => {
-      // 1. Org
-      let orgRes = await client.query<{ id: string }>(
-        'SELECT id FROM organizations WHERE name = $1',
-        [orgName]
-      );
-      let orgId: string;
-      if (orgRes.rows.length > 0 && orgRes.rows[0]) {
-        orgId = orgRes.rows[0].id;
-      } else {
-        const inserted = await client.query<{ id: string }>(
-          'INSERT INTO organizations (name) VALUES ($1) RETURNING id',
-          [orgName]
-        );
-        orgId = inserted.rows[0]!.id;
-      }
+    // 1. Org (upsert by name)
+    interface OrgDoc { _id: string; name: string; createdAt: Date }
+    interface TenantDoc { _id: string; organizationId: string; name: string; createdAt: Date }
+    let orgDoc = await db.collection<OrgDoc>('organizations').findOne({ name: orgName });
+    let orgId: string;
+    if (orgDoc) {
+      orgId = orgDoc._id;
+    } else {
+      orgId = randomUUID();
+      await db.collection<OrgDoc>('organizations').insertOne({
+        _id: orgId,
+        name: orgName,
+        createdAt: new Date(),
+      });
+    }
 
-      // 2. Tenant
-      let tenantRes = await client.query<{ id: string }>(
-        'SELECT id FROM tenants WHERE organization_id = $1 AND name = $2',
-        [orgId, tenantName]
-      );
-      let tenantId: string;
-      if (tenantRes.rows.length > 0 && tenantRes.rows[0]) {
-        tenantId = tenantRes.rows[0].id;
-      } else {
-        const inserted = await client.query<{ id: string }>(
-          'INSERT INTO tenants (organization_id, name) VALUES ($1, $2) RETURNING id',
-          [orgId, tenantName]
-        );
-        tenantId = inserted.rows[0]!.id;
-      }
-
-      // 3. Role
-      const roleRes = await client.query<{ id: string }>(
-        'SELECT id FROM roles WHERE name = $1',
-        [roleName]
-      );
-      if (roleRes.rows.length === 0 || !roleRes.rows[0]) {
-        throw new Error(`Role '${roleName}' does not exist in database.`);
-      }
-      const roleId = roleRes.rows[0].id;
-
-      // 4. User
-      const passwordHash = await hashPassword(password);
-      const displayName = email.split('@')[0] ?? 'User';
-
-      const userRes = await client.query<{ id: string; email: string }>(
-        `INSERT INTO users (email, password_hash, display_name, clearance, is_active)
-         VALUES ($1, $2, $3, $4, true)
-         ON CONFLICT (email) DO UPDATE SET
-           password_hash = EXCLUDED.password_hash,
-           clearance = EXCLUDED.clearance,
-           is_active = true
-         RETURNING id, email`,
-        [email, passwordHash, displayName, userClearance]
-      );
-      const user = userRes.rows[0]!;
-
-      // 5. Membership
-      await client.query(
-        `INSERT INTO memberships (user_id, tenant_id, role_id)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (user_id, tenant_id) DO UPDATE SET
-           role_id = EXCLUDED.role_id`,
-        [user.id, tenantId, roleId]
-      );
-
-      // Provision this role's approved models for newly-created tenants.
-      await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
-      await client.query(
-        `INSERT INTO model_access (tenant_id, model_id, role_id)
-         SELECT $1, id, $2 FROM models WHERE status = 'APPROVED' AND enabled
-         ON CONFLICT DO NOTHING`,
-        [tenantId, roleId]
-      );
-
-      console.log('--- User created/updated successfully ---');
-      console.log(`Email:      ${user.email}`);
-      console.log(`Role:       ${roleName}`);
-      console.log(`Clearance:  ${userClearance}`);
-      console.log(`Tenant:     ${tenantName} (${tenantId})`);
-      console.log(`Org:        ${orgName} (${orgId})`);
+    // 2. Tenant (upsert by organizationId + name)
+    let tenantDoc = await db.collection<TenantDoc>('tenants').findOne({
+      organizationId: orgId,
+      name: tenantName,
     });
+    let tenantId: string;
+    if (tenantDoc) {
+      tenantId = tenantDoc._id;
+    } else {
+      tenantId = randomUUID();
+      await db.collection<TenantDoc>('tenants').insertOne({
+        _id: tenantId,
+        organizationId: orgId,
+        name: tenantName,
+        createdAt: new Date(),
+      });
+    }
+
+    // 3. Role (must exist)
+    const roleDoc = await db.collection('roles').findOne({ name: roleName });
+    if (!roleDoc) {
+      throw new Error(`Role '${roleName}' does not exist in database.`);
+    }
+    const roleId = String(roleDoc._id);
+
+    // 4. User (upsert by email)
+    const passwordHash = await hashPassword(password);
+    const displayName = email.split('@')[0] ?? 'User';
+    const now = new Date();
+
+    const userResult = await db.collection('users').findOneAndUpdate(
+      { email },
+      {
+        $set: {
+          passwordHash,
+          displayName,
+          clearance: userClearance,
+          isActive: true,
+          updatedAt: now,
+        },
+        $setOnInsert: {
+          _id: randomUUID(),
+          email,
+          createdAt: now,
+        },
+      },
+      { upsert: true, returnDocument: 'after' }
+    );
+    const user = userResult!;
+    const userId = String(user._id);
+
+    // 5. Membership (upsert by userId + tenantId)
+    await db.collection('memberships').updateOne(
+      { userId, tenantId },
+      {
+        $set: { roleId, updatedAt: now },
+        $setOnInsert: {
+          _id: randomUUID(),
+          userId,
+          tenantId,
+          createdAt: now,
+        },
+      },
+      { upsert: true }
+    );
+
+    // 6. Provision this role's approved models for the tenant.
+    // Find ACTIVE/APPROVED models and grant access to the role.
+    const models = await db.collection('models').find({
+      status: { $in: ['ACTIVE', 'APPROVED'] },
+      enabled: true,
+    }).project({ _id: 1 }).toArray();
+
+    for (const model of models) {
+      const modelId = String(model._id);
+      await db.collection('model_access').updateOne(
+        { tenantId, modelId, roleId },
+        {
+          $setOnInsert: {
+            _id: randomUUID(),
+            tenantId,
+            modelId,
+            roleId,
+            createdAt: now,
+          },
+        },
+        { upsert: true }
+      );
+    }
+
+    console.log('--- User created/updated successfully ---');
+    console.log(`Email:      ${email}`);
+    console.log(`Role:       ${roleName}`);
+    console.log(`Clearance:  ${userClearance}`);
+    console.log(`Tenant:     ${tenantName} (${tenantId})`);
+    console.log(`Org:        ${orgName} (${orgId})`);
   } finally {
-    await pool.end();
+    await closeDb();
   }
 }
 

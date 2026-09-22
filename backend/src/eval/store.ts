@@ -1,13 +1,17 @@
 /**
  * store.ts — persistence for eval runs and case results.
  *
- * Platform-level tables (eval_runs, eval_case_results): no tenant_id, like
- * `models`. All access goes through the raw query() helper, which is why
- * this file is on the RAW_QUERY_ALLOWLIST in
- * backend/test/rlsEnforcement.test.ts (with justification). It never touches
- * tenant tables.
+ * Platform-level collections (eval_runs, eval_case_results): no tenantId,
+ * like `models`. All access goes through getDb() directly — never through
+ * tenant-scoped helpers. It never touches tenant collections.
+ *
+ * Storage note: MongoDB documents use camelCase fields with the UUID in
+ * `_id` (ADR-014). The public EvalRunRow/EvalCaseResultRow interfaces keep
+ * their original snake_case shape so existing consumers (compare.ts) are
+ * unaffected; the to* mappers convert between the two.
  */
-import { query } from '../db/pool.js';
+import { randomUUID } from 'node:crypto';
+import { getDb } from '../db/mongo.js';
 import type { EvalCaseResult, EvalRunSummary } from './types.js';
 
 export interface EvalRunRow {
@@ -24,6 +28,37 @@ export interface EvalRunRow {
   created_by: string | null;
 }
 
+/** MongoDB document shape for the `eval_runs` collection (ADR-014). */
+interface EvalRunRowDoc {
+  _id: string;
+  modelId: string;
+  modelVersion: string;
+  provider: string;
+  status: string;
+  total: number;
+  passed: number;
+  failed: number;
+  summary: EvalRunSummary;
+  createdAt: Date;
+  createdBy: string | null;
+}
+
+function toEvalRunRow(doc: EvalRunRowDoc): EvalRunRow {
+  return {
+    id: doc._id,
+    model_id: doc.modelId,
+    model_version: doc.modelVersion,
+    provider: doc.provider,
+    status: doc.status,
+    total: doc.total,
+    passed: doc.passed,
+    failed: doc.failed,
+    summary: doc.summary,
+    created_at: doc.createdAt,
+    created_by: doc.createdBy,
+  };
+}
+
 export interface EvalCaseResultRow {
   id: string;
   run_id: string;
@@ -36,112 +71,189 @@ export interface EvalCaseResultRow {
   latency_ms: number;
 }
 
+/** MongoDB document shape for the `eval_case_results` collection. */
+interface EvalCaseResultRowDoc {
+  _id: string;
+  runId: string;
+  caseId: string;
+  category: string;
+  severity: string;
+  passed: boolean;
+  score: number;
+  details: unknown;
+  latencyMs: number;
+}
+
+function toEvalCaseResultRow(doc: EvalCaseResultRowDoc): EvalCaseResultRow {
+  return {
+    id: doc._id,
+    run_id: doc.runId,
+    case_id: doc.caseId,
+    category: doc.category,
+    severity: doc.severity,
+    passed: doc.passed,
+    score: doc.score,
+    details: doc.details,
+    latency_ms: doc.latencyMs,
+  };
+}
+
+/** Initial summary for a run that has not executed any cases yet. */
+function emptySummary(runId: string, modelId: string, modelVersion: string): EvalRunSummary {
+  return {
+    runId,
+    modelId,
+    modelVersion,
+    total: 0,
+    passed: 0,
+    failed: 0,
+    byCategory: {},
+    p0Failed: [],
+    byDimension: {},
+    skipped: 0,
+  };
+}
+
 export async function createRun(input: {
   modelId: string;
   modelVersion: string;
   provider: string;
   createdBy: string | null;
 }): Promise<string> {
-  const rows = (
-    await query<{ id: string }>(
-      `INSERT INTO eval_runs (model_id, model_version, provider, status, created_by)
-       VALUES ($1, $2, $3, 'running', $4) RETURNING id`,
-      [input.modelId, input.modelVersion, input.provider, input.createdBy]
-    )
-  ).rows;
-  return rows[0]!.id;
+  const db = await getDb();
+  const id = randomUUID();
+  const doc: EvalRunRowDoc = {
+    _id: id,
+    modelId: input.modelId,
+    modelVersion: input.modelVersion,
+    provider: input.provider,
+    status: 'running',
+    total: 0,
+    passed: 0,
+    failed: 0,
+    summary: emptySummary(id, input.modelId, input.modelVersion),
+    createdAt: new Date(),
+    createdBy: input.createdBy,
+  };
+  await db.collection<EvalRunRowDoc>('eval_runs').insertOne(doc);
+  return id;
 }
 
 export async function saveCaseResult(runId: string, result: EvalCaseResult): Promise<void> {
-  await query(
-    `INSERT INTO eval_case_results
-       (run_id, case_id, category, severity, passed, score, details, latency_ms)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
-    [
-      runId,
-      result.caseId,
-      result.category,
-      result.severity,
-      result.passed,
-      result.score,
-      JSON.stringify(result.details ?? {}),
-      result.latencyMs,
-    ]
-  );
+  const db = await getDb();
+  await db.collection<EvalCaseResultRowDoc>('eval_case_results').insertOne({
+    _id: randomUUID(),
+    runId,
+    caseId: result.caseId,
+    category: result.category,
+    severity: result.severity,
+    passed: result.passed,
+    score: result.score,
+    details: result.details ?? {},
+    latencyMs: result.latencyMs,
+  });
 }
 
 export async function finishRun(runId: string, summary: EvalRunSummary): Promise<void> {
-  await query(
-    `UPDATE eval_runs
-     SET status = 'completed', total = $2, passed = $3, failed = $4, summary = $5::jsonb
-     WHERE id = $1`,
-    [runId, summary.total, summary.passed, summary.failed, JSON.stringify(summary)]
+  const db = await getDb();
+  await db.collection<EvalRunRowDoc>('eval_runs').updateOne(
+    { _id: runId },
+    {
+      $set: {
+        status: 'completed',
+        total: summary.total,
+        passed: summary.passed,
+        failed: summary.failed,
+        summary,
+      },
+    }
   );
 }
 
 export async function failRun(runId: string, reason: string): Promise<void> {
-  await query(`UPDATE eval_runs SET status = 'failed', summary = $2::jsonb WHERE id = $1`, [
-    runId,
-    JSON.stringify({ reason }),
-  ]);
+  const db = await getDb();
+  await db.collection<EvalRunRowDoc>('eval_runs').updateOne(
+    { _id: runId },
+    {
+      $set: {
+        status: 'failed',
+        // The failure reason is not part of EvalRunSummary; it is stored as
+        // an extra property (tolerated by compare.ts's Partial cast),
+        // preserving the PostgreSQL behavior of summary = '{"reason": ...}'.
+        summary: { reason } as unknown as EvalRunSummary,
+      },
+    }
+  );
 }
 
 export async function getRun(runId: string): Promise<{ run: EvalRunRow; results: EvalCaseResultRow[] } | null> {
-  const runRows = (await query<EvalRunRow>(`SELECT * FROM eval_runs WHERE id = $1`, [runId])).rows;
-  const run = runRows[0];
-  if (!run) return null;
-  const results = (
-    await query<EvalCaseResultRow>(
-      `SELECT * FROM eval_case_results WHERE run_id = $1 ORDER BY case_id ASC`,
-      [runId]
-    )
-  ).rows;
-  return { run, results };
+  const db = await getDb();
+  const runDoc = await db.collection<EvalRunRowDoc>('eval_runs').findOne({ _id: runId });
+  if (!runDoc) return null;
+  const resultDocs = await db
+    .collection<EvalCaseResultRowDoc>('eval_case_results')
+    .find({ runId })
+    .sort({ caseId: 1 })
+    .toArray();
+  return { run: toEvalRunRow(runDoc), results: resultDocs.map(toEvalCaseResultRow) };
 }
 
 export async function listRuns(modelId: string, limit = 50): Promise<EvalRunRow[]> {
-  return (
-    await query<EvalRunRow>(
-      `SELECT * FROM eval_runs WHERE model_id = $1 ORDER BY created_at DESC LIMIT $2`,
-      [modelId, limit]
-    )
-  ).rows;
+  const db = await getDb();
+  const docs = await db
+    .collection<EvalRunRowDoc>('eval_runs')
+    .find({ modelId })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .toArray();
+  return docs.map(toEvalRunRow);
 }
 
 export async function getModelVersion(modelId: string): Promise<string | null> {
-  const rows = (await query<{ version: string }>(`SELECT version FROM models WHERE id = $1`, [modelId])).rows;
-  return rows[0]?.version ?? null;
+  const db = await getDb();
+  const model = await db
+    .collection<{ _id: string; version: string }>('models')
+    .findOne({ _id: modelId }, { projection: { version: 1 } });
+  return model?.version ?? null;
 }
 
 export async function getLatestRunForVersion(
   modelId: string,
   modelVersion: string
 ): Promise<EvalRunRow | null> {
-  const rows = (
-    await query<EvalRunRow>(
-      `SELECT * FROM eval_runs
-       WHERE model_id = $1 AND model_version = $2
-       ORDER BY created_at DESC LIMIT 1`,
-      [modelId, modelVersion]
-    )
-  ).rows;
-  return rows[0] ?? null;
+  const db = await getDb();
+  const doc = await db
+    .collection<EvalRunRowDoc>('eval_runs')
+    .find({ modelId, modelVersion })
+    .sort({ createdAt: -1 })
+    .limit(1)
+    .next();
+  return doc ? toEvalRunRow(doc) : null;
 }
 
 export async function getP0Failures(runId: string): Promise<string[]> {
   // llm-judge verdicts (details.judge = 'llm-judge') never gate promotion on
   // their own — they are measurement instruments with error bars — so they
   // are excluded here even when they ran (mock or real judge mode).
-  const rows = (
-    await query<{ case_id: string }>(
-      `SELECT case_id FROM eval_case_results
-       WHERE run_id = $1 AND severity = 'p0' AND passed = false
-         AND (details ->> 'judge') IS DISTINCT FROM 'llm-judge'
-       ORDER BY case_id ASC`,
-      [runId]
+  //
+  // MongoDB $ne matches documents where the field is missing entirely,
+  // which is exactly the PostgreSQL `IS DISTINCT FROM` semantics being
+  // replaced (a missing details.judge is distinct from 'llm-judge').
+  const db = await getDb();
+  const rows = await db
+    .collection<EvalCaseResultRowDoc>('eval_case_results')
+    .find(
+      {
+        runId,
+        severity: 'p0',
+        passed: false,
+        'details.judge': { $ne: 'llm-judge' },
+      },
+      { projection: { caseId: 1 } }
     )
-  ).rows;
-  return rows.map((r) => r.case_id);
+    .sort({ caseId: 1 })
+    .toArray();
+  return rows.map((r) => r.caseId);
 }
 
 export interface RunComparison {

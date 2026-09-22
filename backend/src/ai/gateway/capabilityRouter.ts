@@ -35,7 +35,7 @@
  * serves, never WHETHER an unauthorized one may.
  */
 import { Errors, AppError } from '../../errors.js';
-import { tenantQuery, withTenantTx } from '../../db/pool.js';
+import { tenantOp, withTenantTx } from '../../db/mongo.js';
 import { recordAudit, recordAuditInTx } from '../../audit/audit.js';
 import { KNOWN_CAPABILITIES, resolveServingModel } from './modelLifecycle.js';
 import { getApprovedModelForUser, listApprovedModelsForUser, type ApprovedModel } from './modelRegistry.js';
@@ -52,6 +52,28 @@ export interface RoutingPolicy {
   fallbackToChat: boolean;
   updatedBy: string | null;
   updatedAt: Date;
+}
+
+/** MongoDB document shape for the `model_routing_policies` collection (ADR-014). */
+interface RoutingPolicyDoc {
+  _id: string;
+  tenantId: string;
+  capability: string;
+  strategy: RoutingStrategy;
+  fallbackToChat: boolean;
+  updatedBy: string | null;
+  updatedAt: Date;
+}
+
+function toRoutingPolicy(doc: RoutingPolicyDoc): RoutingPolicy {
+  return {
+    tenantId: doc.tenantId,
+    capability: doc.capability,
+    strategy: doc.strategy,
+    fallbackToChat: doc.fallbackToChat,
+    updatedBy: doc.updatedBy,
+    updatedAt: doc.updatedAt,
+  };
 }
 
 /** Platform default policy: used when the tenant never configured one. */
@@ -75,17 +97,10 @@ export function normalizeCapability(capability: string): Capability {
  */
 export async function getRoutingPolicy(tenantId: string, capability: string): Promise<RoutingPolicy> {
   const normalized = normalizeCapability(capability);
-  const row = (
-    await tenantQuery<RoutingPolicy>(
-      tenantId,
-      `SELECT tenant_id AS "tenantId", capability, strategy,
-              fallback_to_chat AS "fallbackToChat",
-              updated_by AS "updatedBy", updated_at AS "updatedAt"
-       FROM model_routing_policies WHERE tenant_id = $1 AND capability = $2`,
-      [tenantId, normalized]
-    )
-  ).rows[0];
-  if (row) return row;
+  const doc = await tenantOp(tenantId, async (db) =>
+    db.collection<RoutingPolicyDoc>('model_routing_policies').findOne({ tenantId, capability: normalized })
+  );
+  if (doc) return toRoutingPolicy(doc);
   return {
     tenantId,
     capability: normalized,
@@ -97,16 +112,14 @@ export async function getRoutingPolicy(tenantId: string, capability: string): Pr
 }
 
 export async function listRoutingPolicies(tenantId: string): Promise<RoutingPolicy[]> {
-  return (
-    await tenantQuery<RoutingPolicy>(
-      tenantId,
-      `SELECT tenant_id AS "tenantId", capability, strategy,
-              fallback_to_chat AS "fallbackToChat",
-              updated_by AS "updatedBy", updated_at AS "updatedAt"
-       FROM model_routing_policies WHERE tenant_id = $1 ORDER BY capability ASC`,
-      [tenantId]
-    )
-  ).rows;
+  const docs = await tenantOp(tenantId, async (db) =>
+    db
+      .collection<RoutingPolicyDoc>('model_routing_policies')
+      .find({ tenantId })
+      .sort({ capability: 1 })
+      .toArray()
+  );
+  return docs.map(toRoutingPolicy);
 }
 
 /**
@@ -126,25 +139,27 @@ export async function setRoutingPolicy(
   if (!ROUTING_STRATEGIES.includes(policy.strategy)) {
     throw Errors.badRequest('INVALID_STRATEGY', `Strategy must be one of: ${ROUTING_STRATEGIES.join(', ')}`);
   }
-  // Tenant-scoped transaction: model_routing_policies is under forced RLS,
-  // so the tenant context must be established before the upsert.
-  return withTenantTx(tenantId, async (client) => {
-    const row = (
-      await client.query<RoutingPolicy>(
-        `INSERT INTO model_routing_policies (tenant_id, capability, strategy, fallback_to_chat, updated_by, updated_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())
-         ON CONFLICT (tenant_id, capability)
-         DO UPDATE SET strategy = EXCLUDED.strategy,
-                       fallback_to_chat = EXCLUDED.fallback_to_chat,
-                       updated_by = EXCLUDED.updated_by,
-                       updated_at = NOW()
-         RETURNING tenant_id AS "tenantId", capability, strategy,
-                   fallback_to_chat AS "fallbackToChat",
-                   updated_by AS "updatedBy", updated_at AS "updatedAt"`,
-        [tenantId, normalized, policy.strategy, policy.fallbackToChat, actorUserId]
-      )
-    ).rows[0]!;
-    await recordAuditInTx(client, {
+  // Tenant-scoped transaction: the policy upsert and its audit event commit
+  // together, so a policy can never change unaudited.
+  return withTenantTx(tenantId, async (session, db) => {
+    const coll = db.collection<RoutingPolicyDoc>('model_routing_policies');
+    await coll.updateOne(
+      { tenantId, capability: normalized },
+      {
+        $set: {
+          strategy: policy.strategy,
+          fallbackToChat: policy.fallbackToChat,
+          updatedBy: actorUserId,
+          updatedAt: new Date(),
+        },
+      },
+      { upsert: true, session }
+    );
+    const doc = await coll.findOne({ tenantId, capability: normalized }, { session });
+    if (!doc) {
+      throw Errors.internal('Routing policy upsert did not return a document', undefined, 'MODEL_ROUTING_POLICY_UPSERT_FAILED');
+    }
+    await recordAuditInTx(session, {
       tenantId,
       userId: actorUserId,
       requestId,
@@ -155,7 +170,7 @@ export async function setRoutingPolicy(
       success: true,
       metadata: { capability: normalized, strategy: policy.strategy, fallbackToChat: policy.fallbackToChat },
     });
-    return row;
+    return toRoutingPolicy(doc);
   });
 }
 

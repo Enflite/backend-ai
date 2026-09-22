@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
-import { tenantQuery } from '../db/pool.js';
+import { tenantOp } from '../db/mongo.js';
 import { Errors } from '../errors.js';
 import { ObjectStorage, s3Storage } from '../storage/storage.js';
 import { ExtractedSection, extractDocument } from './extraction.js';
@@ -36,6 +37,39 @@ export interface DocumentChunk {
   sourceLocation?: string;
 }
 
+/** Minimal document shape for ingestion state transitions. */
+interface IngestionDocumentState {
+  _id: string;
+  tenantId: string;
+  objectKey: string;
+  mimeType: string;
+  classification: string;
+  status: string;
+  errorCode: string | null;
+  updatedAt: Date;
+  deletedAt?: Date | null;
+}
+
+/** Shape of the `document_chunks` MongoDB documents (ADR-014). */
+interface ChunkDoc {
+  _id: string;
+  documentId: string;
+  tenantId: string;
+  chunkIndex: number;
+  content: string;
+  /** Plain number array (not a pgvector type); 1536 dims per the embedding contract. */
+  embedding: number[];
+  classification: string;
+  embeddingModel: string;
+  embeddingVersion: string;
+  embeddingDimensions: number;
+  page: number | null;
+  section: string | null;
+  sourceLocation: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export function chunkText(
   text: string,
   maxCharacters = config.RAG_CHUNK_MAX_CHARS,
@@ -58,7 +92,7 @@ export function chunkText(
       if (boundary > start + maxCharacters / 2) end = boundary;
     }
     // Never split a UTF-16 surrogate pair: a lone surrogate is invalid UTF-8
-    // and PostgreSQL would reject the chunk insert.
+    // and the MongoDB driver would reject the chunk insert.
     if (end > start && end < normalized.length) {
       const prev = normalized.charCodeAt(end - 1);
       const next = normalized.charCodeAt(end);
@@ -143,18 +177,21 @@ export async function ingestDocument(
   dependencies: IngestionDependencies = defaultDependencies,
   hooks: IngestionHooks = {}
 ): Promise<'READY' | 'QUARANTINED'> {
-  const document = (
-    await tenantQuery<{ object_key: string; mime_type: string; classification: string }>(
-      tenantId,
-      `UPDATE documents SET status = 'PROCESSING', error_code = NULL, updated_at = NOW()
-       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-       RETURNING object_key, mime_type, classification`,
-      [documentId, tenantId]
+  const document = await tenantOp(tenantId, (db) =>
+    db.collection<IngestionDocumentState>('documents').findOneAndUpdate(
+      { _id: documentId, tenantId, deletedAt: null },
+      { $set: { status: 'PROCESSING', errorCode: null, updatedAt: new Date() } },
+      { returnDocument: 'after', projection: { objectKey: 1, mimeType: 1, classification: 1 } }
     )
-  ).rows[0];
+  );
   if (!document) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
   if (document.classification === 'UNKNOWN') {
-    await tenantQuery(tenantId, "UPDATE documents SET status = 'FAILED', error_code = 'CLASSIFICATION_REQUIRED', updated_at = NOW() WHERE id = $1", [documentId]);
+    await tenantOp(tenantId, (db) =>
+      db.collection<IngestionDocumentState>('documents').updateOne(
+        { _id: documentId, tenantId },
+        { $set: { status: 'FAILED', errorCode: 'CLASSIFICATION_REQUIRED', updatedAt: new Date() } }
+      )
+    );
     throw Errors.badRequest('CLASSIFICATION_REQUIRED', 'Document classification is required before ingestion');
   }
 
@@ -166,17 +203,22 @@ export async function ingestDocument(
   };
 
   try {
-    const bytes = await dependencies.storage.get(document.object_key);
+    const bytes = await dependencies.storage.get(document.objectKey);
     await throwIfCanceled();
     const scan = await dependencies.scanner.scan(bytes, AbortSignal.timeout(30000));
     if (!scanMayProceed(scan, document.classification)) {
       const code = scan.verdict === 'INFECTED' ? 'MALWARE_DETECTED' : 'SCANNER_UNAVAILABLE';
-      await tenantQuery(tenantId, "UPDATE documents SET status = 'QUARANTINED', error_code = $2, updated_at = NOW() WHERE id = $1", [documentId, code]);
+      await tenantOp(tenantId, (db) =>
+        db.collection<IngestionDocumentState>('documents').updateOne(
+          { _id: documentId, tenantId },
+          { $set: { status: 'QUARANTINED', errorCode: code, updatedAt: new Date() } }
+        )
+      );
       return 'QUARANTINED';
     }
     await throwIfCanceled();
 
-    const chunks = chunkSections(await dependencies.extractor(bytes, document.mime_type));
+    const chunks = chunkSections(await dependencies.extractor(bytes, document.mimeType));
     if (chunks.length === 0) throw Errors.badRequest('EMPTY_DOCUMENT', 'No extractable document text found');
     await throwIfCanceled();
     // Warn well before the hard cap so operators see oversized documents
@@ -206,51 +248,69 @@ export async function ingestDocument(
     assertValidVectors(vectors, dependencies.embeddings.dimensions);
     await throwIfCanceled();
 
-    await tenantQuery(tenantId, 'DELETE FROM document_chunks WHERE document_id = $1', [documentId]);
-    // Multi-row inserts keep large documents from issuing one transaction per
-    // chunk (2000 chunks x BEGIN/COMMIT round-trips previously).
-    const INSERT_BATCH_ROWS = 200;
-    const INSERT_COLUMNS = 12;
-    for (let offset = 0; offset < chunks.length; offset += INSERT_BATCH_ROWS) {
-      const slice = chunks.slice(offset, offset + INSERT_BATCH_ROWS);
-      const placeholders: string[] = [];
-      const params: unknown[] = [];
-      slice.forEach((chunk, sliceIndex) => {
-        const index = offset + sliceIndex;
-        const base = sliceIndex * INSERT_COLUMNS;
-        placeholders.push(
-          `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5}::vector,$${base + 6},$${base + 7},$${base + 8},$${base + 9},$${base + 10},$${base + 11},$${base + 12})`
-        );
-        params.push(
-          documentId, tenantId, index, chunk.text, `[${vectors[index]!.join(',')}]`, document.classification,
-          dependencies.embeddings.model, dependencies.embeddings.version, dependencies.embeddings.dimensions,
-          chunk.page ?? null, chunk.section ?? null, chunk.sourceLocation ?? null
-        );
-      });
-      await tenantQuery(
-        tenantId,
-        // Provenance: chunk_index is the document-global chunk offset; page,
-        // section, and source_location come from the extractor when available;
-        // embedding_model/version/dimensions pin the vector to the provider
-        // configuration that produced it (retrieval filters on all three).
-        `INSERT INTO document_chunks (
-          document_id, tenant_id, chunk_index, content, embedding, classification,
-          embedding_model, embedding_version, embedding_dimensions, page, section, source_location
-        ) VALUES ${placeholders.join(',')}`,
-        params
+    await tenantOp(tenantId, async (db) => {
+      // Re-ingestion replaces prior chunks for this document; the previous
+      // chunks are removed before the new ones are written.
+      await db.collection<ChunkDoc>('document_chunks').deleteMany({ tenantId, documentId });
+      const now = new Date();
+      // insertMany replaces the old multi-row INSERT batches: a single
+      // round-trip per batch instead of one transaction per chunk (2000
+      // chunks previously issued BEGIN/COMMIT per row).
+      const INSERT_BATCH_ROWS = 200;
+      for (let offset = 0; offset < chunks.length; offset += INSERT_BATCH_ROWS) {
+        const slice = chunks.slice(offset, offset + INSERT_BATCH_ROWS);
+        const docs: ChunkDoc[] = slice.map((chunk, sliceIndex) => {
+          const index = offset + sliceIndex;
+          return {
+            _id: randomUUID(),
+            documentId,
+            tenantId,
+            chunkIndex: index,
+            content: chunk.text,
+            // Provenance: chunkIndex is the document-global chunk offset; page,
+            // section, and sourceLocation come from the extractor when
+            // available; embeddingModel/version/dimensions pin the vector to
+            // the provider configuration that produced it (retrieval filters
+            // on all three).
+            embedding: vectors[index]!,
+            classification: document.classification,
+            embeddingModel: dependencies.embeddings.model,
+            embeddingVersion: dependencies.embeddings.version,
+            embeddingDimensions: dependencies.embeddings.dimensions,
+            page: chunk.page ?? null,
+            section: chunk.section ?? null,
+            sourceLocation: chunk.sourceLocation ?? null,
+            createdAt: now,
+            updatedAt: now,
+          };
+        });
+        await db.collection<ChunkDoc>('document_chunks').insertMany(docs);
+      }
+      await db.collection<IngestionDocumentState>('documents').updateOne(
+        { _id: documentId, tenantId },
+        { $set: { status: 'READY', updatedAt: new Date() } }
       );
-    }
-    await tenantQuery(tenantId, "UPDATE documents SET status = 'READY', updated_at = NOW() WHERE id = $1", [documentId]);
+    });
     return 'READY';
   } catch (error) {
     if (error instanceof IngestionCanceledError) {
       // A canceled job must not strand the document in PROCESSING and must
       // not look like a failure: FAILED + INGESTION_CANCELED keeps it visible
       // and retryable via POST /documents/:id/retry.
-      await tenantQuery(tenantId, "UPDATE documents SET status = 'FAILED', error_code = 'INGESTION_CANCELED', updated_at = NOW() WHERE id = $1", [documentId]);
+      await tenantOp(tenantId, (db) =>
+        db.collection<IngestionDocumentState>('documents').updateOne(
+          { _id: documentId, tenantId },
+          { $set: { status: 'FAILED', errorCode: 'INGESTION_CANCELED', updatedAt: new Date() } }
+        )
+      );
       throw error;
     }
-    await tenantQuery(tenantId, "UPDATE documents SET status = 'FAILED', error_code = $2, updated_at = NOW() WHERE id = $1 AND status <> 'QUARANTINED'", [documentId, errorCode(error)]);
+    await tenantOp(tenantId, (db) =>
+      db.collection<IngestionDocumentState>('documents').updateOne(
+        { _id: documentId, tenantId, status: { $ne: 'QUARANTINED' } },
+        { $set: { status: 'FAILED', errorCode: errorCode(error), updatedAt: new Date() } }
+      )
+    );
     throw error;
   }
 }

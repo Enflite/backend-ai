@@ -1,12 +1,21 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-const { queryMock } = vi.hoisted(() => ({ queryMock: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ query: queryMock, tenantQuery: vi.fn() }));
+const { getDbMock } = vi.hoisted(() => ({ getDbMock: vi.fn() }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock }));
 
 import { purgeGlobalAuditEvents, sanitizeReason } from '../src/audit/audit.js';
 
+// Helper: mock cursor chain for find().project().limit().toArray()
+function mockBatch(docs: Array<{ _id: string }>) {
+  return {
+    project: vi.fn().mockReturnThis(),
+    limit: vi.fn().mockReturnThis(),
+    toArray: vi.fn().mockResolvedValue(docs),
+  };
+}
+
 beforeEach(() => {
-  queryMock.mockReset();
+  vi.clearAllMocks();
 });
 
 describe('audit reason sanitization', () => {
@@ -45,26 +54,60 @@ describe('audit reason sanitization', () => {
 
 describe('purgeGlobalAuditEvents', () => {
   it('deletes only NULL-tenant rows past the cutoff, honoring legal hold, in batches', async () => {
-    queryMock
-      .mockResolvedValueOnce({ rowCount: 3 })
-      .mockResolvedValueOnce({ rowCount: 1 });
+    const findMock = vi.fn();
+    const deleteManyMock = vi.fn();
+    // First batch: 3 docs, second batch: 1 doc (short batch stops the loop)
+    findMock
+      .mockReturnValueOnce(mockBatch([{ _id: 'a1' }, { _id: 'a2' }, { _id: 'a3' }]))
+      .mockReturnValueOnce(mockBatch([{ _id: 'a4' }]));
+    deleteManyMock
+      .mockResolvedValueOnce({ deletedCount: 3 })
+      .mockResolvedValueOnce({ deletedCount: 1 });
+    getDbMock.mockResolvedValue({
+      collection: vi.fn().mockReturnValue({ find: findMock, deleteMany: deleteManyMock }),
+    });
+
     const total = await purgeGlobalAuditEvents(90, 3);
     expect(total).toBe(4);
-    expect(queryMock).toHaveBeenCalledTimes(2);
-    for (const [sql, params] of queryMock.mock.calls as Array<[string, unknown[]]>) {
-      expect(sql).toContain('DELETE FROM audit_events');
-      expect(sql).toContain('tenant_id IS NULL');
-      expect(sql).toContain('legal_hold = false');
-      // Tenant-scoped rows are never touched by the global purge.
-      expect(sql).not.toMatch(/tenant_id = \$\d/);
-      expect(params).toEqual(['90']);
+    expect(findMock).toHaveBeenCalledTimes(2);
+    expect(deleteManyMock).toHaveBeenCalledTimes(2);
+    for (const call of findMock.mock.calls) {
+      const filter = call[0] as Record<string, unknown>;
+      // Only NULL-tenant rows, never tenant-scoped rows
+      expect(filter.tenantId).toBeNull();
+      expect(filter.legalHold).toBe(false);
+      expect(filter.createdAt).toMatchObject({ $lt: expect.any(Date) });
+    }
+    for (const call of deleteManyMock.mock.calls) {
+      const filter = call[0] as Record<string, unknown>;
+      expect(filter.tenantId).toBeNull();
+      expect(filter._id).toMatchObject({ $in: expect.any(Array) });
     }
   });
 
   it('stops when a batch comes back short', async () => {
-    queryMock.mockResolvedValueOnce({ rowCount: 2 });
+    const findMock = vi.fn().mockReturnValueOnce(mockBatch([{ _id: 'a1' }, { _id: 'a2' }]));
+    const deleteManyMock = vi.fn().mockResolvedValueOnce({ deletedCount: 2 });
+    getDbMock.mockResolvedValue({
+      collection: vi.fn().mockReturnValue({ find: findMock, deleteMany: deleteManyMock }),
+    });
+
     const total = await purgeGlobalAuditEvents(30, 1000);
     expect(total).toBe(2);
-    expect(queryMock).toHaveBeenCalledTimes(1);
+    expect(findMock).toHaveBeenCalledTimes(1);
+    expect(deleteManyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops when a batch comes back empty', async () => {
+    const findMock = vi.fn().mockReturnValueOnce(mockBatch([]));
+    const deleteManyMock = vi.fn();
+    getDbMock.mockResolvedValue({
+      collection: vi.fn().mockReturnValue({ find: findMock, deleteMany: deleteManyMock }),
+    });
+
+    const total = await purgeGlobalAuditEvents(30, 1000);
+    expect(total).toBe(0);
+    expect(findMock).toHaveBeenCalledTimes(1);
+    expect(deleteManyMock).not.toHaveBeenCalled();
   });
 });

@@ -1,8 +1,24 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { verifyToken } from './jwt.js';
 import { Errors } from '../errors.js';
-import { tenantQuery } from '../db/pool.js';
+import { tenantOp } from '../db/mongo.js';
 import { recordAudit } from '../audit/audit.js';
+
+interface SessionDoc {
+  _id: string;
+  userId: string;
+  tenantId: string;
+  refreshTokenHash: string;
+  expiresAt: Date;
+  revokedAt: Date | null;
+}
+
+interface MembershipDoc {
+  _id: string;
+  userId: string;
+  tenantId: string;
+  roleId: string;
+}
 
 export async function requireAuth(req: FastifyRequest, _reply: FastifyReply): Promise<void> {
   const authHeader = req.headers.authorization;
@@ -17,28 +33,54 @@ export async function requireAuth(req: FastifyRequest, _reply: FastifyReply): Pr
 
   try {
     const auth = await verifyToken(token);
-    const session = await tenantQuery<{ role_id: string; role_name: string; permissions: string[] }>(
-      auth.tenantId,
-      `SELECT r.id AS role_id, r.name AS role_name, array_agg(p.name ORDER BY p.name) AS permissions
-       FROM sessions s
-       JOIN users u ON u.id = s.user_id AND u.is_active
-       JOIN memberships m ON m.user_id = s.user_id AND m.tenant_id = s.tenant_id
-       JOIN roles r ON r.id = m.role_id
-       JOIN role_permissions rp ON rp.role_id = r.id
-       JOIN permissions p ON p.id = rp.permission_id
-       WHERE s.id = $1 AND s.user_id = $2 AND s.tenant_id = $3
-         AND s.revoked_at IS NULL AND s.expires_at > NOW()
-       GROUP BY r.id, r.name`,
-      [auth.sessionId, auth.userId, auth.tenantId]
-    );
-    if (session.rowCount !== 1) {
+    // Replaces the PostgreSQL join + GROUP BY permission aggregation:
+    // resolve the live session, the active user, their tenant membership,
+    // and the role's permission names with sequential tenant-scoped
+    // queries. Every query filters by tenantId — the primary enforcement
+    // (no RLS in MongoDB, ADR-014).
+    const resolved = await tenantOp(auth.tenantId, async (db) => {
+      const now = new Date();
+      const session = await db.collection<SessionDoc>('sessions').findOne({
+        _id: auth.sessionId,
+        userId: auth.userId,
+        tenantId: auth.tenantId,
+        revokedAt: null,
+        expiresAt: { $gt: now },
+      });
+      if (!session) return null;
+      const user = await db.collection<{ _id: string; isActive: boolean }>('users').findOne(
+        { _id: auth.userId, isActive: true },
+        { projection: { isActive: 1 } }
+      );
+      if (!user) return null;
+      const membership = await db.collection<MembershipDoc>('memberships').findOne({
+        userId: auth.userId,
+        tenantId: auth.tenantId,
+      });
+      if (!membership) return null;
+      const role = await db.collection<{ _id: string; name: string }>('roles').findOne(
+        { _id: membership.roleId },
+        { projection: { name: 1 } }
+      );
+      if (!role) return null;
+      const rolePermissions = await db.collection<{ _id: string; permissionId: string }>('role_permissions')
+        .find({ roleId: role._id }, { projection: { permissionId: 1 } })
+        .toArray();
+      const permissionIds = rolePermissions.map((rp) => rp.permissionId);
+      const permissions = await db.collection<{ _id: string; name: string }>('permissions')
+        .find({ _id: { $in: permissionIds } }, { projection: { name: 1 } })
+        .toArray();
+      const names = permissions.map((p) => p.name).sort();
+      return { roleId: role._id, roleName: role.name, permissions: names };
+    });
+    if (!resolved) {
       throw new Error('Session is invalid');
     }
     req.auth = {
       ...auth,
-      roleId: session.rows[0]!.role_id,
-      roleName: session.rows[0]!.role_name,
-      permissions: session.rows[0]!.permissions as typeof auth.permissions,
+      roleId: resolved.roleId,
+      roleName: resolved.roleName,
+      permissions: resolved.permissions as typeof auth.permissions,
     };
   } catch {
     await recordAudit({

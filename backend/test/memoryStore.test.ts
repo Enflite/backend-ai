@@ -1,25 +1,29 @@
 /**
  * memoryStore.test.ts — tenant-scoped user memory store.
  *
- * WHAT THIS FILE PROVES (mocks, deterministic, no live Postgres):
- *  - Every CRUD statement binds BOTH tenant_id and user_id from the
+ * WHAT THIS FILE PROVES (mocks, deterministic, no live MongoDB):
+ *  - Every CRUD operation binds BOTH tenantId and userId from the
  *    caller's auth context — never from request input — so tenant A's
- *    context cannot produce a query that touches tenant B's rows.
+ *    context cannot produce a query that touches tenant B's documents.
  *  - Write-side classification is asserted against the caller's clearance
  *    (UNKNOWN fails closed via canAccessClassification).
- *  - A simulated isolated-database check: with tenantQuery faked to filter
- *    by the bound (tenant_id, user_id) params, a tenant-A caller never sees
- *    tenant-B rows.
+ *  - A simulated isolated-database check: with the collection faked to
+ *    filter by the bound (tenantId, userId) params, a tenant-A caller never
+ *    sees tenant-B documents.
  *
- * WHAT THIS FILE CANNOT PROVE — REQUIRES REAL POSTGRESQL:
- *  - That the RLS tenant_isolation policy actually blocks a query issued
- *    with a missing/mismatched app.tenant_id (migration 027), or that the
- *    migration chain applies cleanly. Those need a live-database CI job.
+ * WHAT THIS FILE CANNOT PROVE — REQUIRES REAL MONGODB ATLAS:
+ *  - That the mandatory tenantId filter on every query actually blocks a
+ *    query issued with a missing/mismatched tenantId, or that the migration
+ *    chain applies cleanly. Those need a live-database CI job.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+const { getDbMock, tenantOpMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  return { getDbMock, tenantOpMock };
+});
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock }));
 
 import {
   createMemory,
@@ -37,45 +41,119 @@ const USER_B1 = 'b1111111-1111-4111-8111-111111111111';
 
 const CTX_A: MemoryContext = { tenantId: TENANT_A, userId: USER_A1, clearance: 'CONFIDENTIAL' };
 
-function lastCall() {
-  const calls = tenantQuery.mock.calls;
-  return { tenant: calls[calls.length - 1]![0] as string, sql: calls[calls.length - 1]![1] as string, params: calls[calls.length - 1]![2] as unknown[] };
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    const findChain = () => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    });
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => findChain()),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      deleteOne: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    for (const m of ['findOne', 'findOneAndUpdate', 'updateOne', 'updateMany', 'insertOne', 'deleteOne', 'deleteMany']) {
+      coll[m].mockReset();
+      if (m === 'findOne') coll[m].mockResolvedValue(null);
+      else if (m === 'findOneAndUpdate') coll[m].mockResolvedValue(null);
+      else if (m === 'updateOne' || m === 'updateMany') coll[m].mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+      else if (m === 'insertOne') coll[m].mockResolvedValue({ acknowledged: true });
+      else if (m === 'deleteOne' || m === 'deleteMany') coll[m].mockResolvedValue({ deletedCount: 1 });
+    }
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+}
+
+function lastInsertOne() {
+  const coll = getMockCollection('memory_facts');
+  const calls = coll.insertOne.mock.calls;
+  return calls[calls.length - 1]![0];
+}
+
+function lastFindOne() {
+  const coll = getMockCollection('memory_facts');
+  const calls = coll.findOne.mock.calls;
+  return calls[calls.length - 1]![0];
+}
+
+function lastFind() {
+  const coll = getMockCollection('memory_facts');
+  const calls = coll.find.mock.calls;
+  return calls[calls.length - 1]![0];
+}
+
+function lastFindOneAndUpdate() {
+  const coll = getMockCollection('memory_facts');
+  const calls = coll.findOneAndUpdate.mock.calls;
+  return { filter: calls[calls.length - 1]![0], update: calls[calls.length - 1]![1] };
+}
+
+function lastDeleteOne() {
+  const coll = getMockCollection('memory_facts');
+  const calls = coll.deleteOne.mock.calls;
+  return calls[calls.length - 1]![0];
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetMocks();
 });
 
 describe('createMemory', () => {
   it('scopes the INSERT to the caller tenant and user', async () => {
-    tenantQuery.mockResolvedValue({ rows: [{ id: 'm1' }] });
     await createMemory(CTX_A, { fact: 'prefers concise summaries' });
-    const { tenant, sql, params } = lastCall();
-    expect(tenant).toBe(TENANT_A);
-    expect(sql).toContain('INSERT INTO memory_facts');
-    expect(sql).toMatch(/tenant_id[\s\S]*user_id/);
-    expect(params[0]).toBe(TENANT_A);
-    expect(params[1]).toBe(USER_A1);
-    expect(params[2]).toBe('prefers concise summaries');
+    const doc = lastInsertOne();
+    expect(doc.tenantId).toBe(TENANT_A);
+    expect(doc.userId).toBe(USER_A1);
+    expect(doc.fact).toBe('prefers concise summaries');
+    expect(doc._id).toBeDefined();
+    // tenantOp was called with the caller's tenant
+    expect(tenantOpMock).toHaveBeenCalledWith(TENANT_A, expect.any(Function));
   });
 
   it('defaults classification to INTERNAL for non-PUBLIC clearances', async () => {
-    tenantQuery.mockResolvedValue({ rows: [{ id: 'm1' }] });
     await createMemory(CTX_A, { fact: 'x' });
-    expect(lastCall().params[4]).toBe('INTERNAL');
+    expect(lastInsertOne().classification).toBe('INTERNAL');
   });
 
   it('defaults classification to PUBLIC for PUBLIC-cleared callers', async () => {
-    tenantQuery.mockResolvedValue({ rows: [{ id: 'm1' }] });
     await createMemory({ ...CTX_A, clearance: 'PUBLIC' }, { fact: 'x' });
-    expect(lastCall().params[4]).toBe('PUBLIC');
+    expect(lastInsertOne().classification).toBe('PUBLIC');
   });
 
   it('rejects a classification above the caller clearance', async () => {
     await expect(
       createMemory({ ...CTX_A, clearance: 'PUBLIC' }, { fact: 'x', classification: 'CONFIDENTIAL' })
     ).rejects.toMatchObject({ code: 'CLASSIFICATION_DENIED' });
-    expect(tenantQuery).not.toHaveBeenCalled();
+    expect(getMockCollection('memory_facts').insertOne).not.toHaveBeenCalled();
   });
 
   it('rejects UNKNOWN classification (fails closed)', async () => {
@@ -86,52 +164,60 @@ describe('createMemory', () => {
 });
 
 describe('getMemory / listMemories', () => {
-  it('getMemory predicates id, tenant_id, AND user_id', async () => {
-    tenantQuery.mockResolvedValue({ rows: [{ id: 'm1', fact: 'x' }] });
+  it('getMemory predicates _id, tenantId, AND userId', async () => {
+    const doc = {
+      _id: 'm1', tenantId: TENANT_A, userId: USER_A1, fact: 'x',
+      category: 'fact', classification: 'INTERNAL', source: 'user-stated',
+      createdAt: new Date(), updatedAt: new Date(),
+    };
+    getMockCollection('memory_facts').findOne.mockResolvedValue(doc);
     const row = await getMemory(CTX_A, 'm1-id-uuid');
     expect(row.id).toBe('m1');
-    const { sql, params } = lastCall();
-    expect(sql).toMatch(/id = \$1[\s\S]*tenant_id = \$2[\s\S]*user_id = \$3/);
-    expect(params).toEqual(['m1-id-uuid', TENANT_A, USER_A1]);
+    const filter = lastFindOne();
+    expect(filter).toEqual({ _id: 'm1-id-uuid', tenantId: TENANT_A, userId: USER_A1 });
   });
 
   it('getMemory throws MEMORY_NOT_FOUND when another tenant owns the row', async () => {
-    tenantQuery.mockResolvedValue({ rows: [] });
+    getMockCollection('memory_facts').findOne.mockResolvedValue(null);
     await expect(getMemory(CTX_A, 'someone-elses-id')).rejects.toMatchObject({
       code: 'MEMORY_NOT_FOUND',
     });
     // The module asked for the caller's tenant+user — it cannot reach
-    // another tenant's row even if the id is known.
-    expect(lastCall().params).toEqual(['someone-elses-id', TENANT_A, USER_A1]);
+    // another tenant's document even if the id is known.
+    expect(lastFindOne()).toEqual({ _id: 'someone-elses-id', tenantId: TENANT_A, userId: USER_A1 });
   });
 
   it('listMemories scopes to tenant+user and orders most-recent-first', async () => {
-    tenantQuery.mockResolvedValue({ rows: [] });
     await listMemories(CTX_A, { limit: 10, offset: 5 });
-    const { sql, params } = lastCall();
-    expect(sql).toContain('FROM memory_facts');
-    expect(sql).toMatch(/tenant_id = \$1[\s\S]*user_id = \$2/);
-    expect(sql).toContain('ORDER BY updated_at DESC');
-    expect(params).toEqual([TENANT_A, USER_A1, 10, 5]);
+    const filter = lastFind();
+    expect(filter).toEqual({ tenantId: TENANT_A, userId: USER_A1 });
+    // Verify sort/limit/skip were chained
+    const findResult = getMockCollection('memory_facts').find.mock.results[0]!.value;
+    expect(findResult.sort).toHaveBeenCalledWith({ updatedAt: -1 });
+    expect(findResult.skip).toHaveBeenCalledWith(5);
+    expect(findResult.limit).toHaveBeenCalledWith(10);
   });
 
   it('listMemories supports a category filter', async () => {
-    tenantQuery.mockResolvedValue({ rows: [] });
     await listMemories(CTX_A, { category: 'preference' });
-    const { sql, params } = lastCall();
-    expect(sql).toContain('category = $3');
-    expect(params[2]).toBe('preference');
+    const filter = lastFind();
+    expect(filter).toEqual({ tenantId: TENANT_A, userId: USER_A1, category: 'preference' });
   });
 });
 
 describe('updateMemory / deleteMemory', () => {
   it('updateMemory predicates tenant+user and rejects over-clearance classification', async () => {
-    tenantQuery.mockResolvedValue({ rows: [{ id: 'm1' }] });
+    const doc = {
+      _id: 'm1', tenantId: TENANT_A, userId: USER_A1, fact: 'new text',
+      category: 'fact', classification: 'INTERNAL', source: 'user-stated',
+      createdAt: new Date(), updatedAt: new Date(),
+    };
+    getMockCollection('memory_facts').findOneAndUpdate.mockResolvedValue(doc);
     await updateMemory(CTX_A, 'm1', { fact: 'new text' });
-    const { sql, params } = lastCall();
-    expect(sql).toContain('UPDATE memory_facts');
-    expect(sql).toMatch(/tenant_id = \$[\d]+[\s\S]*user_id = \$/);
-    expect(params.slice(-3)).toEqual(['m1', TENANT_A, USER_A1]);
+    const { filter, update } = lastFindOneAndUpdate();
+    expect(filter).toEqual({ _id: 'm1', tenantId: TENANT_A, userId: USER_A1 });
+    expect(update.$set.fact).toBe('new text');
+    expect(update.$set.updatedAt).toBeInstanceOf(Date);
 
     await expect(
       updateMemory({ ...CTX_A, clearance: 'INTERNAL' }, 'm1', { classification: 'CUI' })
@@ -143,37 +229,41 @@ describe('updateMemory / deleteMemory', () => {
   });
 
   it('updateMemory throws MEMORY_NOT_FOUND for another user’s row', async () => {
-    tenantQuery.mockResolvedValue({ rows: [] });
+    getMockCollection('memory_facts').findOneAndUpdate.mockResolvedValue(null);
     await expect(updateMemory(CTX_A, 'm1', { fact: 'x' })).rejects.toMatchObject({
       code: 'MEMORY_NOT_FOUND',
     });
   });
 
   it('deleteMemory predicates tenant+user and throws when nothing was deleted', async () => {
-    tenantQuery.mockResolvedValue({ rowCount: 1 });
+    getMockCollection('memory_facts').deleteOne.mockResolvedValue({ deletedCount: 1 });
     await deleteMemory(CTX_A, 'm1');
-    const { sql, params } = lastCall();
-    expect(sql).toMatch(/DELETE FROM memory_facts[\s\S]*tenant_id = \$2[\s\S]*user_id = \$3/);
-    expect(params).toEqual(['m1', TENANT_A, USER_A1]);
+    expect(lastDeleteOne()).toEqual({ _id: 'm1', tenantId: TENANT_A, userId: USER_A1 });
 
-    tenantQuery.mockResolvedValue({ rowCount: 0 });
+    getMockCollection('memory_facts').deleteOne.mockResolvedValue({ deletedCount: 0 });
     await expect(deleteMemory(CTX_A, 'm1')).rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
   });
 });
 
 describe('cross-tenant isolation (simulated database)', () => {
-  it('a tenant-A caller never sees tenant-B rows through this module', async () => {
-    const rows = [
-      { id: 'a1', tenant_id: TENANT_A, user_id: USER_A1, fact: 'A fact' },
-      { id: 'b1', tenant_id: TENANT_B, user_id: USER_B1, fact: 'B fact' },
+  it('a tenant-A caller never sees tenant-B documents through this module', async () => {
+    const docs = [
+      { _id: 'a1', tenantId: TENANT_A, userId: USER_A1, fact: 'A fact', category: 'fact', classification: 'INTERNAL', source: 'user-stated', createdAt: new Date(), updatedAt: new Date() },
+      { _id: 'b1', tenantId: TENANT_B, userId: USER_B1, fact: 'B fact', category: 'fact', classification: 'INTERNAL', source: 'user-stated', createdAt: new Date(), updatedAt: new Date() },
     ];
-    tenantQuery.mockImplementation(async (tenant: string, _sql: string, params: unknown[]) => {
-      // Behave like the real database: rows are returned only for the bound
-      // (tenant_id, user_id) pair.
-      const filtered = rows.filter(
-        (r) => r.tenant_id === params[0] && r.user_id === params[1]
+    getMockCollection('memory_facts').find.mockImplementation((filter: any) => {
+      // Behave like the real database: documents are returned only for the
+      // bound (tenantId, userId) pair.
+      const filtered = docs.filter(
+        (d) => d.tenantId === filter.tenantId && d.userId === filter.userId
       );
-      return { rows: filtered, rowCount: filtered.length } as never;
+      return {
+        toArray: vi.fn().mockResolvedValue(filtered),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        skip: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      };
     });
     const seen = await listMemories(CTX_A, {});
     expect(seen.map((r) => r.id)).toEqual(['a1']);

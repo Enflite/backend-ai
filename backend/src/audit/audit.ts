@@ -1,5 +1,6 @@
-import pg from 'pg';
-import { query, tenantQuery } from '../db/pool.js';
+import { randomUUID } from 'node:crypto';
+import { ClientSession } from 'mongodb';
+import { getDb } from '../db/mongo.js';
 import { config } from '../config.js';
 import { AppError } from '../errors.js';
 
@@ -82,27 +83,49 @@ export function sanitizeReason(reason?: string | null): string | null {
     .slice(0, MAX_REASON_LENGTH);
 }
 
-const INSERT_AUDIT_SQL = `INSERT INTO audit_events (
-    tenant_id, user_id, request_id, ip, action, resource,
-    resource_id, classification, model, tool, success, reason, metadata
-  ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`;
+function auditDocument(input: AuditInput): AuditEventDoc {
+  return {
+    _id: randomUUID(),
+    // tenantId is nullable by design: platform-global events are stored with
+    // tenantId null (the old custom RLS policy allowed NULL-tenant rows).
+    // There is no RLS in MongoDB — readers filter { tenantId } or
+    // { tenantId: null } explicitly.
+    tenantId: input.tenantId ?? null,
+    userId: input.userId ?? null,
+    requestId: input.requestId ?? null,
+    ip: input.ip ?? null,
+    action: input.action,
+    resource: input.resource ?? null,
+    resourceId: input.resourceId ?? null,
+    classification: input.classification ?? null,
+    model: input.model ?? null,
+    tool: input.tool ?? null,
+    success: input.success ?? true,
+    reason: sanitizeReason(input.reason),
+    metadata: sanitizeMetadata(input.metadata),
+    legalHold: false,
+    createdAt: new Date(),
+  };
+}
 
-function auditParams(input: AuditInput): unknown[] {
-  return [
-    input.tenantId ?? null,
-    input.userId ?? null,
-    input.requestId ?? null,
-    input.ip ?? null,
-    input.action,
-    input.resource ?? null,
-    input.resourceId ?? null,
-    input.classification ?? null,
-    input.model ?? null,
-    input.tool ?? null,
-    input.success ?? true,
-    sanitizeReason(input.reason),
-    JSON.stringify(sanitizeMetadata(input.metadata)),
-  ];
+/** Document shape for the `audit_events` collection. `_id` is an app-generated UUID string (ADR-014). */
+export interface AuditEventDoc {
+  _id: string;
+  tenantId: string | null;
+  userId: string | null;
+  requestId: string | null;
+  ip: string | null;
+  action: string;
+  resource: string | null;
+  resourceId: string | null;
+  classification: string | null;
+  model: string | null;
+  tool: string | null;
+  success: boolean;
+  reason: string | null;
+  metadata: Record<string, unknown>;
+  legalHold: boolean;
+  createdAt: Date;
 }
 
 function handleAuditWriteError(input: AuditInput, err: unknown): void {
@@ -121,12 +144,8 @@ function handleAuditWriteError(input: AuditInput, err: unknown): void {
 
 export async function recordAudit(input: AuditInput): Promise<void> {
   try {
-    const params = auditParams(input);
-    if (input.tenantId) {
-      await tenantQuery(input.tenantId, INSERT_AUDIT_SQL, params);
-    } else {
-      await query(INSERT_AUDIT_SQL, params);
-    }
+    const db = await getDb();
+    await db.collection<AuditEventDoc>('audit_events').insertOne(auditDocument(input));
   } catch (err) {
     handleAuditWriteError(input, err);
   }
@@ -134,31 +153,33 @@ export async function recordAudit(input: AuditInput): Promise<void> {
 
 /**
  * Delete platform-global (NULL-tenant) audit rows older than `days`,
- * honoring legal hold. Runs in bounded batches via the raw pool query:
- * there is no tenant context for global rows, and the audit_events RLS
- * policy explicitly permits NULL-tenant rows when no context is set, so
- * only global rows can ever match. Returns the total rows deleted.
+ * honoring legal hold. Runs in bounded batches: there is no tenant context
+ * for global rows, so the filter pins `tenantId: null` explicitly — only
+ * global rows can ever match. Returns the total rows deleted.
  *
- * Tenant-scoped audit purging lives in retention/purge.ts and goes through
- * tenantQuery so RLS applies there.
+ * Tenant-scoped audit purging lives in retention/purge.ts and always
+ * filters by the tenant's tenantId.
  */
 export async function purgeGlobalAuditEvents(days: number, batchSize: number): Promise<number> {
+  const db = await getDb();
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   let total = 0;
   for (;;) {
-    const result = await query(
-      `DELETE FROM audit_events
-       WHERE id IN (
-         SELECT id FROM audit_events
-         WHERE tenant_id IS NULL
-           AND legal_hold = false
-           AND created_at < NOW() - ($1 || ' days')::interval
-         LIMIT ${Math.floor(batchSize)}
-       )`,
-      [String(days)]
-    );
-    const deleted = result.rowCount ?? 0;
-    total += deleted;
-    if (deleted < batchSize) break;
+    const batch = await db
+      .collection<AuditEventDoc>('audit_events')
+      .find({ tenantId: null, legalHold: false, createdAt: { $lt: cutoff } })
+      .project({ _id: 1 })
+      .limit(batchSize)
+      .toArray();
+    if (batch.length === 0) break;
+    const result = await db
+      .collection<AuditEventDoc>('audit_events')
+      // The _id batch came from the tenantId-null query above; the
+      // tenantId: null pin here is defense-in-depth so this delete can
+      // never touch a tenant-scoped row even if a batch were corrupted.
+      .deleteMany({ tenantId: null, _id: { $in: batch.map((doc) => doc._id) } });
+    total += result.deletedCount ?? 0;
+    if (batch.length < batchSize) break;
   }
   return total;
 }
@@ -167,15 +188,14 @@ export async function purgeGlobalAuditEvents(days: number, batchSize: number): P
  * Insert an audit row inside an existing transaction. Use this when the audit
  * event must commit atomically with the state change it describes (e.g. the
  * model enabled-toggle): a fail-closed audit failure then rolls the change
- * back instead of leaving it committed but unaudited. Preserves recordAudit's
- * RLS semantics by setting the tenant context when a tenantId is present.
+ * back instead of leaving it committed but unaudited. getDb() returns the
+ * singleton client's database, and the session pins the insert to the
+ * caller's multi-document transaction.
  */
-export async function recordAuditInTx(client: pg.PoolClient, input: AuditInput): Promise<void> {
+export async function recordAuditInTx(session: ClientSession, input: AuditInput): Promise<void> {
   try {
-    if (input.tenantId) {
-      await client.query("SELECT set_config('app.tenant_id', $1, true)", [input.tenantId]);
-    }
-    await client.query(INSERT_AUDIT_SQL, auditParams(input));
+    const db = await getDb();
+    await db.collection<AuditEventDoc>('audit_events').insertOne(auditDocument(input), { session });
   } catch (err) {
     handleAuditWriteError(input, err);
   }

@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { tenantQuery } from '../db/pool.js';
+import { randomUUID } from 'node:crypto';
+import { tenantOp } from '../db/mongo.js';
 import { Errors, AppError } from '../errors.js';
 import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
@@ -47,6 +48,33 @@ const chatBodySchema = z.object({
 }).strict();
 
 const HEARTBEAT_INTERVAL_MS = 15000;
+
+/** MongoDB document shape for the `conversations` collection (ADR-014). */
+interface ConversationDoc {
+  _id: string;
+  tenantId: string;
+  userId: string;
+  title: string;
+  model: string;
+  modelId?: string;
+  classification: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** MongoDB document shape for the `messages` collection (ADR-014). */
+interface MessageDoc {
+  _id: string;
+  conversationId: string;
+  tenantId: string;
+  role: string;
+  content: string;
+  model?: string;
+  modelId?: string;
+  citations?: unknown;
+  metadata?: unknown;
+  createdAt: Date;
+}
 
 /**
  * Concurrency limiter for chat streams (Phase 4b gateway fairness): one slot
@@ -280,16 +308,27 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     // cleared for). Existing conversations keep their stored classification.
     let classification = (parsed.data.classification ?? (auth.clearance === 'PUBLIC' ? 'PUBLIC' : 'INTERNAL')) as Classification;
     if (conversationId) {
-      const conversation = (
-        await tenantQuery<{ model: string; classification: Classification }>(
-          auth.tenantId,
-          `SELECT COALESCE(model_id, (SELECT id FROM models WHERE name = conversations.model))::text AS model,
-                  classification FROM conversations WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
-          [conversationId, auth.tenantId, auth.userId]
-        )
-      ).rows[0];
+      // The SQL COALESCE(model_id, (SELECT id FROM models WHERE name = ...))
+      // becomes a two-step lookup: fetch the conversation, then fall back to
+      // a name-based model lookup when modelId is not set (legacy rows).
+      const conversation = await tenantOp(auth.tenantId, async (db) => {
+        const doc = await db.collection<ConversationDoc>('conversations').findOne(
+          { _id: conversationId, tenantId: auth.tenantId, userId: auth.userId },
+          { projection: { model: 1, modelId: 1, classification: 1 } }
+        );
+        if (!doc) return null;
+        let model = doc.modelId;
+        if (!model) {
+          const legacy = await db.collection<{ _id: string }>('models').findOne(
+            { name: doc.model },
+            { projection: { _id: 1 } }
+          );
+          model = legacy?._id;
+        }
+        return { model, classification: doc.classification as Classification };
+      });
       if (!conversation) throw Errors.notFound('CONVERSATION_NOT_FOUND', 'Conversation not found');
-      modelId ??= conversation.model;
+      if (!modelId && conversation.model) modelId = conversation.model;
       classification = conversation.classification;
     }
     // A caller may not self-assert a classification above their clearance, even
@@ -319,6 +358,9 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       modelId = capabilityResolution.model.id;
     }
     if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
+    // Const copy: TypeScript narrowing of the `let` does not survive into the
+    // tenantOp closures below, so bind the resolved id once here.
+    const resolvedModelId: string = modelId;
     const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
 
     // Concurrency cap (gateway fairness): acquire one slot BEFORE any
@@ -340,29 +382,59 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     }
     try {
       if (!conversationId) {
-        conversationId = (
-          await tenantQuery<{ id: string }>(
-            auth.tenantId,
-            `INSERT INTO conversations (tenant_id, user_id, title, model, model_id, classification)
-           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-            [auth.tenantId, auth.userId, parsed.data.content.slice(0, 80), model.name, modelId, classification]
-          )
-        ).rows[0]!.id;
+        conversationId = randomUUID();
+        const now = new Date();
+        const conversationDoc: ConversationDoc = {
+          _id: conversationId,
+          tenantId: auth.tenantId,
+          userId: auth.userId,
+          title: parsed.data.content.slice(0, 80),
+          model: model.name,
+          modelId,
+          classification,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await tenantOp(auth.tenantId, async (db) => {
+          await db.collection<ConversationDoc>('conversations').insertOne(conversationDoc);
+        });
       }
+      // Const copy: the `let` narrowing does not survive into closures.
+      const resolvedConversationId: string = conversationId;
 
-      const history = (
-        await tenantQuery<{ role: 'user' | 'assistant' | 'system'; content: string }>(
-          auth.tenantId,
-          `SELECT role, content FROM messages WHERE conversation_id = $1 AND tenant_id = $2
-         AND role IN ('user','assistant','system') ORDER BY created_at DESC LIMIT 50`,
-          [conversationId, auth.tenantId]
+      // The SQL query sorted DESC + LIMIT then reversed; the MongoDB version
+      // does the same so the 50 most recent messages come back oldest-first.
+      const history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = (
+        await tenantOp(auth.tenantId, (db) =>
+          db
+            .collection<MessageDoc>('messages')
+            .find({
+              conversationId: resolvedConversationId,
+              tenantId: auth.tenantId,
+              role: { $in: ['user', 'assistant', 'system'] },
+            })
+            .sort({ createdAt: -1 })
+            .limit(50)
+            .toArray()
         )
-      ).rows.reverse();
-      await tenantQuery(
-        auth.tenantId,
-        `INSERT INTO messages (conversation_id, tenant_id, role, content, model, model_id) VALUES ($1,$2,'user',$3,$4,$5)`,
-        [conversationId, auth.tenantId, parsed.data.content, model.name, modelId]
-      );
+      )
+        .reverse()
+        .map(({ role, content }) => ({
+          role: role as 'user' | 'assistant' | 'system',
+          content,
+        }));
+      await tenantOp(auth.tenantId, async (db) => {
+        await db.collection<MessageDoc>('messages').insertOne({
+          _id: randomUUID(),
+          conversationId: resolvedConversationId,
+          tenantId: auth.tenantId,
+          role: 'user',
+          content: parsed.data.content,
+          model: model.name,
+          modelId: resolvedModelId,
+          createdAt: new Date(),
+        });
+      });
       history.push({ role: 'user', content: parsed.data.content });
 
       let citations: Awaited<ReturnType<typeof retrieveAuthorizedContext>>['citations'] = [];
@@ -455,7 +527,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       // Context-window management: sliding window that always keeps the system
       // prompt and the most recent turns. The drop count is surfaced in `meta`
       // so truncation is never silent.
-      const windowed = applyContextWindow(history, model.context_window, undefined, chatSystemPrompt);
+      const windowed = applyContextWindow(history, model.contextWindow, undefined, chatSystemPrompt);
       if (windowed.dropped > 0) {
         req.log.info({ requestId: req.requestId, conversationId, dropped: windowed.dropped }, 'context window truncated oldest messages');
       }
@@ -598,7 +670,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           requestId: req.requestId,
           classification,
           auth,
-          initialModel: { id: modelId, name: model.name, contextWindow: model.context_window, version: model.version },
+          initialModel: { id: modelId, name: model.name, contextWindow: model.contextWindow, version: model.version },
           buildSystemPrompt: buildTurnSystemPrompt,
           providerTools,
           messages: windowed.messages,
@@ -669,13 +741,28 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           // still counts as completed: the terminal `done` frame told the live
           // client why via finishReason.)
           const interrupted = !doneDelivered && (streamInterrupted || clientDisconnected || sse.backpressureAborted);
-          await tenantQuery(
-            auth.tenantId,
-            `INSERT INTO messages (conversation_id, tenant_id, role, content, model, model_id, citations, metadata)
-           VALUES ($1,$2,'assistant',$3,$4,$5,$6,$7)`,
-            [conversationId, auth.tenantId, content, servingModelName, servingModelId, JSON.stringify(citations), JSON.stringify(streamMetadata(interrupted ? 'interrupted' : 'completed'))]
-          ).catch((error) => req.log.error({ err: error }, 'Failed to persist assistant message'));
-          await tenantQuery(auth.tenantId, 'UPDATE conversations SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2', [conversationId, auth.tenantId]);
+          // citations and metadata are stored as native subdocuments/arrays —
+          // no JSON.stringify needed (that was the PostgreSQL JSONB pattern).
+          await tenantOp(auth.tenantId, async (db) => {
+            await db.collection<MessageDoc>('messages').insertOne({
+              _id: randomUUID(),
+              conversationId: resolvedConversationId,
+              tenantId: auth.tenantId,
+              role: 'assistant',
+              content,
+              model: servingModelName,
+              modelId: servingModelId,
+              citations,
+              metadata: streamMetadata(interrupted ? 'interrupted' : 'completed'),
+              createdAt: new Date(),
+            });
+          }).catch((error) => req.log.error({ err: error }, 'Failed to persist assistant message'));
+          await tenantOp(auth.tenantId, (db) =>
+            db.collection<ConversationDoc>('conversations').updateOne(
+              { _id: resolvedConversationId, tenantId: auth.tenantId },
+              { $set: { updatedAt: new Date() } }
+            )
+          );
           if (dlpDetections.length > 0) {
             // DLP audit: kinds and counts only — matched text is never logged.
             const counts: Record<string, number> = {};

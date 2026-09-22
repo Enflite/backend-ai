@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AuthContext, CLASSIFICATIONS, Classification, canAccessClassification } from '../authz/permissions.js';
-import { withTenant } from '../db/pool.js';
+import { Filter } from 'mongodb';
+import { getDb } from '../db/mongo.js';
 import { config } from '../config.js';
 import { Errors } from '../errors.js';
 import { internalEmbeddingProvider } from '../documents/ingestion.js';
@@ -14,6 +15,14 @@ import { repoNameSchema } from './registry.js';
  * embedding provider never silently matches stale vectors. Results carry
  * repo + path provenance so the model can cite real locations and chain
  * into repo.readFile.
+ *
+ * Vector search runs as an Atlas `$vectorSearch` aggregation on
+ * `repo_code_chunks.embedding`. The vector search index
+ * (`idx_repo_code_chunks_embedding_vector`, 1536 dims, cosine) CANNOT be
+ * created through the MongoDB driver — provision it via the Atlas UI/API or
+ * `backend/src/db/createVectorIndexes.ts` (see migration 005). When the
+ * index is unavailable, search falls back to application-side brute-force
+ * cosine over a bounded candidate set.
  */
 
 export const searchCodeSchema = z
@@ -38,6 +47,93 @@ export interface CodeSearchHit {
 
 const SNIPPET_MAX_CHARS = 3000;
 
+/** Document shape for the `repos` collection (only the fields this module reads). */
+interface RepoDoc {
+  _id: string;
+  tenantId: string;
+  name: string;
+  status: string;
+}
+
+/** Document shape for the `repo_files` collection (only the fields this module reads). */
+interface RepoFileDoc {
+  _id: string;
+  tenantId: string;
+  repoId: string;
+  path: string;
+  content: string;
+  classification: string;
+  commitSha: string | null;
+}
+
+/** Document shape for the `repo_code_chunks` collection (only the fields this module reads). */
+interface RepoChunkDoc {
+  _id: string;
+  tenantId: string;
+  repoId: string;
+  path: string;
+  chunkIndex: number;
+  content: string;
+  embedding: number[];
+  classification: string;
+  embeddingModel: string;
+  embeddingVersion: string;
+  embeddingDimensions: number;
+  commitSha: string | null;
+}
+
+/** Name of the Atlas Vector Search index on repo_code_chunks.embedding. */
+const REPO_VECTOR_INDEX = 'idx_repo_code_chunks_embedding_vector';
+
+/** Bounded candidate set for the application-side brute-force fallback. */
+const BRUTE_FORCE_CANDIDATE_LIMIT = 2000;
+
+interface ChunkCandidate {
+  repoId: string;
+  path: string;
+  chunkIndex: number;
+  content: string;
+  commitSha: string | null;
+  embedding?: number[];
+  vectorScore?: number;
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    dot += x * y;
+    normA += x * x;
+    normB += y * y;
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+/**
+ * Resolve the tenant's READY repos (optionally narrowed to one name) to an
+ * id → name map. Repo status lives on the `repos` collection, not on the
+ * chunks, so status=READY is enforced by restricting the vector search to
+ * these repoIds — the application-level equivalent of the old SQL join.
+ */
+async function readyRepoMap(
+  db: Awaited<ReturnType<typeof getDb>>,
+  tenantId: string,
+  repoName?: string
+): Promise<Map<string, string>> {
+  const filter: Filter<RepoDoc> = { tenantId, status: 'READY' };
+  if (repoName) filter.name = repoName;
+  const repos = await db
+    .collection<RepoDoc>('repos')
+    .find(filter)
+    .project({ _id: 1, name: 1 })
+    .toArray();
+  return new Map(repos.map((repo) => [String(repo._id), String(repo.name)]));
+}
+
 export async function searchIndexedCode(auth: AuthContext, input: SearchCodeInput): Promise<CodeSearchHit[]> {
   const topK = Math.min(input.topK, config.REPO_SEARCH_TOP_K_MAX);
   const provider = internalEmbeddingProvider();
@@ -50,52 +146,90 @@ export async function searchIndexedCode(auth: AuthContext, input: SearchCodeInpu
   ) as Classification[];
   if (allowed.length === 0) return [];
 
-  const rows = await withTenant(auth.tenantId, async (client) => {
-    await client.query('SET LOCAL hnsw.ef_search = 200');
-    return (
-      await client.query<{
-        repo: string;
-        path: string;
-        chunk_index: number;
-        content: string;
-        commit_sha: string | null;
-        vector_score: string;
-      }>(
-        `SELECT r.name AS repo, c.path, c.chunk_index, c.content, c.commit_sha,
-                (1 - (c.embedding <=> $5::vector)) AS vector_score
-         FROM repo_code_chunks c
-         JOIN repos r ON r.id = c.repo_id AND r.tenant_id = c.tenant_id
-         WHERE c.tenant_id = $1
-           AND r.status = 'READY'
-           AND c.classification = ANY($2::text[])
-           AND c.embedding_model = $6 AND c.embedding_version = $7 AND c.embedding_dimensions = $8
-           AND ($3::text IS NULL OR r.name = $3)
-         ORDER BY c.embedding <=> $5::vector
-         LIMIT $4`,
-        [
-          auth.tenantId,
-          allowed,
-          input.repo ?? null,
-          topK,
-          `[${embedding!.join(',')}]`,
-          provider.model,
-          provider.version,
-          provider.dimensions,
-        ]
-      )
-    ).rows;
-  });
+  const db = await getDb();
+  const repoMap = await readyRepoMap(db, auth.tenantId, input.repo);
+  if (repoMap.size === 0) return [];
+  const repoIds = [...repoMap.keys()];
 
-  return rows.map((row) => {
-    const vectorScore = Math.max(0, Math.min(1, Number(row.vector_score)));
-    const content = row.content.length > SNIPPET_MAX_CHARS ? `${row.content.slice(0, SNIPPET_MAX_CHARS)}\n… [truncated]` : row.content;
+  // Provenance pins: a reconfigured embedding provider never silently
+  // matches stale vectors.
+  const provenance = {
+    embeddingModel: provider.model,
+    embeddingVersion: provider.version,
+    embeddingDimensions: provider.dimensions,
+  };
+
+  let candidates: ChunkCandidate[];
+  try {
+    // Atlas $vectorSearch: tenant, repo (READY-only, via repoIds),
+    // classification, and embedding provenance all ride in the filter.
+    // NOTE: the vector search index must be created via the Atlas UI/API
+    // (or backend/src/db/createVectorIndexes.ts) — the driver cannot
+    // create Atlas Search indexes.
+    const pipeline = [
+      {
+        $vectorSearch: {
+          index: REPO_VECTOR_INDEX,
+          path: 'embedding',
+          queryVector: embedding,
+          numCandidates: Math.min(topK * 20, 1000),
+          limit: topK,
+          filter: {
+            tenantId: auth.tenantId,
+            repoId: { $in: repoIds },
+            classification: { $in: allowed },
+            ...provenance,
+          },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          repoId: 1,
+          path: 1,
+          chunkIndex: 1,
+          content: 1,
+          commitSha: 1,
+          vectorScore: { $meta: 'vectorSearchScore' },
+        },
+      },
+    ];
+    candidates = (await db.collection<RepoChunkDoc>('repo_code_chunks').aggregate(pipeline).toArray()) as ChunkCandidate[];
+  } catch {
+    // Atlas Search unavailable (index not provisioned, non-Atlas mongod):
+    // application-side brute-force cosine over a bounded candidate set.
+    // Slower, but keeps code search functional without Atlas Search.
+    const docs = await db
+      .collection<RepoChunkDoc>('repo_code_chunks')
+      .find({
+        tenantId: auth.tenantId,
+        repoId: { $in: repoIds },
+        classification: { $in: allowed },
+        ...provenance,
+      })
+      .project({ repoId: 1, path: 1, chunkIndex: 1, content: 1, commitSha: 1, embedding: 1 })
+      .limit(BRUTE_FORCE_CANDIDATE_LIMIT)
+      .toArray();
+    candidates = (docs as unknown as ChunkCandidate[])
+      .filter((doc) => Array.isArray(doc.embedding) && doc.embedding.length === embedding.length)
+      .map((doc) => ({ ...doc, vectorScore: cosineSimilarity(embedding, doc.embedding!) }))
+      .sort((a, b) => (b.vectorScore ?? 0) - (a.vectorScore ?? 0))
+      .slice(0, topK);
+  }
+
+  return candidates.map((candidate) => {
+    const vectorScore = Math.max(0, Math.min(1, Number(candidate.vectorScore ?? 0)));
+    const content =
+      candidate.content.length > SNIPPET_MAX_CHARS
+        ? `${candidate.content.slice(0, SNIPPET_MAX_CHARS)}\n… [truncated]`
+        : candidate.content;
     return {
-      repo: row.repo,
-      path: row.path,
-      chunkIndex: row.chunk_index,
+      repo: repoMap.get(candidate.repoId) ?? candidate.repoId,
+      path: candidate.path,
+      chunkIndex: candidate.chunkIndex,
       score: Math.round(vectorScore * 1000) / 1000,
       snippet: content,
-      commitSha: row.commit_sha,
+      commitSha: candidate.commitSha ?? null,
     };
   });
 }
@@ -114,31 +248,30 @@ export async function readRepoFile(
 ): Promise<{ repo: string; path: string; content: string; truncated: boolean; commitSha: string | null }> {
   const name = repoNameSchema.parse(repoName);
   const normalized = normalizeRepoPath(filePath);
-  const rows = await withTenant(auth.tenantId, async (client) => {
-    return (
-      await client.query<{ content: string; commit_sha: string | null; classification: Classification }>(
-        `SELECT f.content, f.commit_sha, f.classification
-         FROM repo_files f
-         JOIN repos r ON r.id = f.repo_id AND r.tenant_id = f.tenant_id
-         WHERE f.tenant_id = $1 AND r.name = $2 AND r.status = 'READY' AND f.path = $3`,
-        [auth.tenantId, name, normalized]
-      )
-    ).rows;
+  const db = await getDb();
+  // READY status is enforced by resolving the repo first (status lives on
+  // the repos collection, not the file rows).
+  const repo = await db.collection<RepoDoc>('repos').findOne({ tenantId: auth.tenantId, name, status: 'READY' });
+  if (!repo) throw Errors.notFound('REPO_FILE_NOT_FOUND', 'File not found in the indexed repository');
+  const file = await db.collection<RepoFileDoc>('repo_files').findOne({
+    tenantId: auth.tenantId,
+    repoId: String(repo._id),
+    path: normalized,
   });
-  if (rows.length === 0) throw Errors.notFound('REPO_FILE_NOT_FOUND', 'File not found in the indexed repository');
-  const row = rows[0]!;
-  if (!canAccessClassification(auth.clearance, row.classification) || row.classification === 'UNKNOWN') {
+  if (!file) throw Errors.notFound('REPO_FILE_NOT_FOUND', 'File not found in the indexed repository');
+  const classification = file.classification as Classification;
+  if (!canAccessClassification(auth.clearance, classification) || classification === 'UNKNOWN') {
     throw Errors.forbidden('REPO_FILE_CLASSIFICATION_DENIED', 'Clearance does not cover this file');
   }
   const MAX_READ_CHARS = 100_000;
-  const full = row.content;
+  const full = String(file.content);
   const truncated = full.length > MAX_READ_CHARS;
   return {
     repo: name,
     path: normalized,
     content: truncated ? `${full.slice(0, MAX_READ_CHARS)}\n… [truncated at ${MAX_READ_CHARS} chars]` : full,
     truncated,
-    commitSha: row.commit_sha,
+    commitSha: (file.commitSha as string | null) ?? null,
   };
 }
 

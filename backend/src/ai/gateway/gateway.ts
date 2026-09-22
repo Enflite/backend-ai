@@ -128,7 +128,7 @@ function resolveEndpoint(model: ApprovedModel): void {
 }
 
 function checkClassification(classification: Classification, model: ApprovedModel): void {
-  const decision = canModelProcess(classification, model.allowed_classifications);
+  const decision = canModelProcess(classification, model.allowedClassifications);
   if (!decision.allowed) throw Errors.forbidden('MODEL_CLASSIFICATION_DENIED', 'Model is not approved for this data classification');
 }
 
@@ -219,11 +219,11 @@ async function* streamWithTelemetry(
   const provider: ChatProvider = resolveChatProvider(model);
   const stream = provider.streamChat({
     endpoint: model.endpoint,
-    model: model.model_identifier,
+    model: model.modelIdentifier,
     messages,
     tools: input.tools,
-    timeoutMs: model.request_timeout_ms ?? config.AI_REQUEST_TIMEOUT_MS,
-    maxTokens: model.max_tokens,
+    timeoutMs: model.requestTimeoutMs ?? config.AI_REQUEST_TIMEOUT_MS,
+    maxTokens: model.maxTokens,
     temperature: model.temperature,
     signal: input.signal,
   });
@@ -334,14 +334,14 @@ export async function gatewayStream(input: GatewayStreamInput): Promise<GatewayS
       // second immediate failure on the same dead signal.
       const cancelled = input.signal?.aborted === true;
       const failoverEligible =
-        !cancelled && !primaryProducedOutput && !(err instanceof AppError) && !!primary.fallback_model_id;
+        !cancelled && !primaryProducedOutput && !(err instanceof AppError) && !!primary.fallbackModelId;
       if (!failoverEligible) {
         await auditModelUse(input, primary, telemetry, false, err instanceof Error ? err.message : 'Model provider error');
         throw err instanceof AppError ? err : Errors.internal('Model provider unavailable');
       }
       let fallback: ApprovedModel;
       try {
-        fallback = await getApprovedModelForUser(primary.fallback_model_id!, input.tenantId, input.userId, input.roleId);
+        fallback = await getApprovedModelForUser(primary.fallbackModelId!, input.tenantId, input.userId, input.roleId);
         checkProviderSupport(fallback);
         resolveEndpoint(fallback);
         checkClassification(input.classification, fallback);
@@ -367,7 +367,7 @@ export async function gatewayStream(input: GatewayStreamInput): Promise<GatewayS
         reason: err instanceof Error ? err.message : 'Primary model provider failed',
         metadata: { primaryModelId: primary.id, primaryModel: primary.name },
       });
-      yield { type: 'failover', modelId: fallback.id, modelName: fallback.name, contextWindow: fallback.context_window };
+      yield { type: 'failover', modelId: fallback.id, modelName: fallback.name, contextWindow: fallback.contextWindow };
       try {
         yield* streamWithTelemetry(fallback, messages, input, telemetry);
         await auditModelUse(input, fallback, telemetry, true);

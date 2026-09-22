@@ -1,6 +1,6 @@
 # Development
 
-Copy `backend/.env.example` and provide test-only secrets. `docker compose up postgres minio minio-init` prepares PostgreSQL/pgvector and private S3-compatible storage. Run backend migrations before `npm run dev`; run the frontend with its documented pnpm command.
+Copy `backend/.env.example` and provide test-only secrets. `docker compose up mongodb minio minio-init` prepares MongoDB and private S3-compatible storage. Run backend migrations before `npm run dev`; run the frontend with its documented pnpm command.
 
 Create users with `npm run create-user -- --email <email>`; the password comes from a no-echo TTY prompt unless `BACKEND_CREATE_USER_PASSWORD` is set (`--password` is not accepted).
 

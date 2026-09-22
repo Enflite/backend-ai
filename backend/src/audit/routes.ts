@@ -1,9 +1,11 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { Filter } from 'mongodb';
 import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
-import { tenantQuery } from '../db/pool.js';
+import { getDb } from '../db/mongo.js';
 import { Errors } from '../errors.js';
+import type { AuditEventDoc } from './audit.js';
 
 const querySchema = z.object({
   action: z.string().optional(),
@@ -30,22 +32,20 @@ export async function auditRoutes(fastify: FastifyInstance): Promise<void> {
       const { action, limit, offset } = parsedQuery.data;
       const tenantId = req.auth.tenantId;
 
-      let sql = 'SELECT id, tenant_id, user_id, request_id, ip, action, resource, resource_id, classification, model, tool, success, reason, metadata, created_at FROM audit_events WHERE tenant_id = $1';
-      const params: unknown[] = [tenantId];
+      // Tenant isolation: platform-global rows (tenantId null) are never
+      // visible here — the filter pins the caller's tenantId explicitly.
+      const filter: Filter<AuditEventDoc> = { tenantId };
+      if (action) filter.action = action;
 
-      if (action) {
-        params.push(action);
-        sql += ` AND action = $${params.length}`;
-      }
-
-      params.push(limit);
-      sql += ` ORDER BY created_at DESC LIMIT $${params.length}`;
-
-      params.push(offset);
-      sql += ` OFFSET $${params.length}`;
-
-      const result = await tenantQuery(tenantId, sql, params);
-      return reply.send({ events: result.rows, limit, offset });
+      const db = await getDb();
+      const events = await db
+        .collection<AuditEventDoc>('audit_events')
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip(offset)
+        .limit(limit)
+        .toArray();
+      return reply.send({ events, limit, offset });
     }
   );
 }

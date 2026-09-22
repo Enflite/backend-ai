@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { recordAudit } from '../audit/audit.js';
 import { config } from '../config.js';
-import { query, tenantQuery } from '../db/pool.js';
+import { getDb, tenantOp } from '../db/mongo.js';
 import { Errors } from '../errors.js';
 import { IngestionCanceledError, ingestDocument } from './ingestion.js';
 import { recordIngestionJob } from '../observability/metrics.js';
@@ -48,7 +48,48 @@ interface ClaimedJob {
   attempts: number;
 }
 
-const ACTIVE_JOB_STATUSES = "('PENDING', 'PROCESSING')";
+type IngestionJobStatus =
+  | 'PENDING'
+  | 'PROCESSING'
+  | 'SUCCEEDED'
+  | 'CANCELED'
+  | 'QUARANTINED'
+  | 'FAILED';
+
+/** Shape of the `document_ingestion_jobs` MongoDB documents (ADR-014). */
+interface IngestionJobDoc {
+  _id: string;
+  documentId: string;
+  tenantId: string;
+  requestedBy: string;
+  requestId: string | null;
+  idempotencyKey: string | null;
+  status: IngestionJobStatus;
+  attempts: number;
+  cancelRequested: boolean;
+  errorCode: string | null;
+  lockedAt?: Date | null;
+  nextAttemptAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Job statuses considered "in flight" for enqueue dedupe and orphan healing. */
+const ACTIVE_JOB_STATUSES: IngestionJobStatus[] = ['PENDING', 'PROCESSING'];
+
+/** Minimal tenant reference for tenant discovery scans. */
+interface TenantRef {
+  _id: string;
+}
+
+/** Minimal document shape for ingestion status transitions. */
+interface IngestionDocumentRef {
+  _id: string;
+  tenantId: string;
+  status: string;
+  errorCode: string | null;
+  updatedAt: Date;
+}
 
 // ---------------------------------------------------------------------------
 // Counting semaphore: the single gate for concurrent job executions, shared by
@@ -347,25 +388,33 @@ export async function sweepStaleIngestionWork(options: SweepOptions = {}): Promi
   if (!options.force && now - lastSweepAt < SWEEP_INTERVAL_MS) return;
   lastSweepAt = now;
   try {
+    const db = await getDb();
     const tenantIds = options.tenantIds
-      ?? (await query<{ id: string }>('SELECT id FROM tenants')).rows.map((row) => row.id);
+      ?? (await db.collection<TenantRef>('tenants').find<{ _id: string }>({}, { projection: { _id: 1 } }).toArray()).map((row) => row._id);
     let reseeded = false;
+    const nowDate = new Date(now);
     for (const tenantId of tenantIds) {
-      await tenantQuery(
-        tenantId,
-        `UPDATE document_ingestion_jobs
-         SET status = 'PENDING', locked_at = NULL, next_attempt_at = NOW(), updated_at = NOW()
-         WHERE status = 'PROCESSING' AND locked_at < NOW() - INTERVAL '5 minutes'
-           AND NOT (id = ANY($1))`,
-        [[...activeJobIds]]
+      // Reclaim stranded PROCESSING leases: the lock timeout proves the
+      // worker is gone. Jobs held by this process are never reclaimed.
+      await db.collection<IngestionJobDoc>('document_ingestion_jobs').updateMany(
+        {
+          tenantId,
+          status: 'PROCESSING',
+          lockedAt: { $lt: new Date(now - 5 * 60 * 1000) },
+          _id: { $nin: [...activeJobIds] },
+        },
+        {
+          $set: { status: 'PENDING', nextAttemptAt: nowDate, updatedAt: nowDate },
+          $unset: { lockedAt: '' },
+        }
       );
       // Seed the fairness set: tenants with PENDING work are claim candidates.
       if (!pendingTenants.has(tenantId)) {
-        const pending = await tenantQuery<{ id: string }>(
-          tenantId,
-          `SELECT id FROM document_ingestion_jobs WHERE status = 'PENDING' LIMIT 1`
+        const pending = await db.collection<IngestionJobDoc>('document_ingestion_jobs').findOne(
+          { tenantId, status: 'PENDING' },
+          { projection: { _id: 1 } }
         );
-        if ((pending.rowCount ?? 0) !== 0) {
+        if (pending) {
           pendingTenants.add(tenantId);
           reseeded = true;
         }
@@ -404,37 +453,28 @@ export async function claimNextJob(): Promise<ClaimedJob | null> {
 }
 
 async function tryClaimForTenant(tenantId: string): Promise<ClaimedJob | null> {
-  const claimed = await tenantQuery<{
-    id: string;
-    document_id: string;
-    tenant_id: string;
-    requested_by: string;
-    request_id: string | null;
-    attempts: number;
-  }>(
-    tenantId,
-    `UPDATE document_ingestion_jobs
-     SET status = 'PROCESSING', attempts = attempts + 1,
-         locked_at = NOW(), updated_at = NOW()
-     WHERE id = (
-       SELECT id FROM document_ingestion_jobs
-       WHERE tenant_id = $1 AND status = 'PENDING' AND next_attempt_at <= NOW()
-       ORDER BY created_at
-       LIMIT 1
-       FOR UPDATE SKIP LOCKED
-     )
-     RETURNING id, document_id, tenant_id, requested_by, request_id, attempts`,
-    [tenantId]
+  // Atomic claim: the single findOneAndUpdate replaces
+  // SELECT ... FOR UPDATE SKIP LOCKED — only one worker can transition a
+  // given PENDING job to PROCESSING.
+  const now = new Date();
+  const job = await tenantOp(tenantId, (db) =>
+    db.collection<IngestionJobDoc>('document_ingestion_jobs').findOneAndUpdate(
+      { tenantId, status: 'PENDING', nextAttemptAt: { $lte: now } },
+      {
+        $set: { status: 'PROCESSING', lockedAt: now, updatedAt: now },
+        $inc: { attempts: 1 },
+      },
+      { sort: { createdAt: 1 }, returnDocument: 'after' }
+    )
   );
-  const row = claimed.rows[0];
-  if (!row) return null;
+  if (!job) return null;
   return {
-    id: row.id,
-    documentId: row.document_id,
-    tenantId: row.tenant_id,
-    requestedBy: row.requested_by,
-    requestId: row.request_id,
-    attempts: row.attempts,
+    id: job._id,
+    documentId: job.documentId,
+    tenantId: job.tenantId,
+    requestedBy: job.requestedBy,
+    requestId: job.requestId,
+    attempts: job.attempts,
   };
 }
 
@@ -448,20 +488,19 @@ function safeCode(error: unknown): string {
     : 'INGESTION_FAILED';
 }
 
-function isUniqueViolation(error: unknown): boolean {
-  return !!error && typeof error === 'object' && (error as { code?: unknown }).code === '23505';
+function isDuplicateKey(error: unknown): boolean {
+  return !!error && typeof error === 'object' && (error as { code?: unknown }).code === 11000;
 }
 
 async function isCancelRequested(job: ClaimedJob): Promise<boolean> {
   try {
-    const row = (
-      await tenantQuery<{ cancel_requested: boolean }>(
-        job.tenantId,
-        'SELECT cancel_requested FROM document_ingestion_jobs WHERE id = $1',
-        [job.id]
+    const doc = await tenantOp(job.tenantId, (db) =>
+      db.collection<IngestionJobDoc>('document_ingestion_jobs').findOne(
+        { _id: job.id, tenantId: job.tenantId },
+        { projection: { cancelRequested: 1 } }
       )
-    ).rows[0];
-    return row?.cancel_requested === true;
+    );
+    return doc?.cancelRequested === true;
   } catch {
     // A transient DB error must not cancel a healthy job; the next
     // stage-boundary check retries the read.
@@ -484,19 +523,17 @@ function auditBase(job: ClaimedJob): JobAuditBase {
 }
 
 async function markJobCanceled(job: ClaimedJob, code: string): Promise<void> {
-  await tenantQuery(
-    job.tenantId,
-    `UPDATE document_ingestion_jobs
-     SET status = 'CANCELED', cancel_requested = FALSE, error_code = $2, updated_at = NOW()
-     WHERE id = $1`,
-    [job.id, code]
-  );
-  await tenantQuery(
-    job.tenantId,
-    `UPDATE documents SET status = 'FAILED', error_code = $2, updated_at = NOW()
-     WHERE id = $1 AND status IN ('PENDING', 'PROCESSING')`,
-    [job.documentId, code]
-  );
+  const now = new Date();
+  await tenantOp(job.tenantId, async (db) => {
+    await db.collection<IngestionJobDoc>('document_ingestion_jobs').updateOne(
+      { _id: job.id, tenantId: job.tenantId },
+      { $set: { status: 'CANCELED', cancelRequested: false, errorCode: code, updatedAt: now } }
+    );
+    await db.collection<IngestionDocumentRef>('documents').updateOne(
+      { _id: job.documentId, tenantId: job.tenantId, status: { $in: ['PENDING', 'PROCESSING'] } },
+      { $set: { status: 'FAILED', errorCode: code, updatedAt: now } }
+    );
+  });
   await recordAudit({
     ...auditBase(job),
     action: 'DOCUMENT_INGESTION_CANCELED',
@@ -514,19 +551,17 @@ async function handleJobFailure(job: ClaimedJob, error: unknown): Promise<'quara
     // Poison-job quarantine: terminal, never auto-retried. error_code is
     // preserved so operators can see why the job kept failing; an admin can
     // requeue it via POST /documents/jobs/:id/requeue.
-    await tenantQuery(
-      job.tenantId,
-      `UPDATE document_ingestion_jobs
-       SET status = 'QUARANTINED', error_code = $2, updated_at = NOW()
-       WHERE id = $1`,
-      [job.id, code]
-    );
-    await tenantQuery(
-      job.tenantId,
-      `UPDATE documents SET status = 'QUARANTINED', error_code = $2, updated_at = NOW()
-       WHERE id = $1 AND status IN ('PENDING', 'PROCESSING', 'FAILED')`,
-      [job.documentId, code]
-    );
+    const now = new Date();
+    await tenantOp(job.tenantId, async (db) => {
+      await db.collection<IngestionJobDoc>('document_ingestion_jobs').updateOne(
+        { _id: job.id, tenantId: job.tenantId },
+        { $set: { status: 'QUARANTINED', errorCode: code, updatedAt: now } }
+      );
+      await db.collection<IngestionDocumentRef>('documents').updateOne(
+        { _id: job.documentId, tenantId: job.tenantId, status: { $in: ['PENDING', 'PROCESSING', 'FAILED'] } },
+        { $set: { status: 'QUARANTINED', errorCode: code, updatedAt: now } }
+      );
+    });
     await recordAudit({
       ...auditBase(job),
       action: 'DOCUMENT_INGESTION_QUARANTINED',
@@ -539,15 +574,17 @@ async function handleJobFailure(job: ClaimedJob, error: unknown): Promise<'quara
     return 'quarantined';
   }
   // Retryable failure: back to PENDING with exponential backoff + jitter.
+  // The backoff deadline is computed in JS (no NOW() + INTERVAL arithmetic).
   const delayMs = computeRetryDelayMs(job.attempts);
   const nextAttemptAt = new Date(Date.now() + delayMs);
-  await tenantQuery(
-    job.tenantId,
-    `UPDATE document_ingestion_jobs
-     SET status = 'PENDING', error_code = $2, next_attempt_at = $3,
-         locked_at = NULL, updated_at = NOW()
-     WHERE id = $1`,
-    [job.id, code, nextAttemptAt.toISOString()]
+  await tenantOp(job.tenantId, (db) =>
+    db.collection<IngestionJobDoc>('document_ingestion_jobs').updateOne(
+      { _id: job.id, tenantId: job.tenantId },
+      {
+        $set: { status: 'PENDING', errorCode: code, nextAttemptAt, updatedAt: new Date() },
+        $unset: { lockedAt: '' },
+      }
+    )
   );
   await recordAudit({
     ...auditBase(job),
@@ -589,10 +626,11 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       const status = await ingestDocument(job.documentId, job.tenantId, undefined, {
         shouldCancel: () => isCancelRequested(job),
       });
-      await tenantQuery(
-        job.tenantId,
-        "UPDATE document_ingestion_jobs SET status = 'SUCCEEDED', updated_at = NOW() WHERE id = $1",
-        [job.id]
+      await tenantOp(job.tenantId, (db) =>
+        db.collection<IngestionJobDoc>('document_ingestion_jobs').updateOne(
+          { _id: job.id, tenantId: job.tenantId },
+          { $set: { status: 'SUCCEEDED', updatedAt: new Date() } }
+        )
       );
       recordIngestionJob('processed', (Date.now() - jobStart) / 1000);
       await recordAudit({
@@ -646,56 +684,72 @@ function dispatchJob(request: QueueRequest): void {
 export async function enqueueIngestion(request: QueueRequest): Promise<string> {
   const tenantId = request.tenantId;
   const idempotencyKey = request.idempotencyKey?.trim() ? request.idempotencyKey.trim() : null;
+  const db = await getDb();
+  const jobs = db.collection<IngestionJobDoc>('document_ingestion_jobs');
 
   if (idempotencyKey) {
     // Fast path: a previous enqueue with the same key already has a job in
     // flight — return it instead of duplicating work.
-    const existing = await tenantQuery<{ id: string }>(
-      tenantId,
-      `SELECT id FROM document_ingestion_jobs
-       WHERE tenant_id = $1 AND idempotency_key = $2 AND status IN ${ACTIVE_JOB_STATUSES}
-       ORDER BY created_at DESC LIMIT 1`,
-      [tenantId, idempotencyKey]
+    const existing = await jobs.findOne(
+      { tenantId, idempotencyKey, status: { $in: ACTIVE_JOB_STATUSES } },
+      { sort: { createdAt: -1 }, projection: { _id: 1 } }
     );
-    if (existing.rows[0]) return existing.rows[0].id;
+    if (existing) return existing._id;
   }
 
   const id = randomUUID();
+  const now = new Date();
   try {
-    const inserted = await tenantQuery<{ id: string }>(
-      tenantId,
-      `INSERT INTO document_ingestion_jobs (id, document_id, tenant_id, requested_by, request_id, idempotency_key)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (document_id) WHERE status IN ${ACTIVE_JOB_STATUSES} DO NOTHING
-       RETURNING id`,
-      [id, request.documentId, tenantId, request.requestedBy, request.requestId ?? null, idempotencyKey]
+    // The partial unique index idx_ingestion_jobs_active_document
+    // ({ documentId }, active statuses only) makes this upsert the atomic
+    // equivalent of ON CONFLICT (document_id) WHERE status IN (...) DO
+    // NOTHING: when an active job already exists for the document the filter
+    // matches and $setOnInsert is a no-op; otherwise the job is inserted.
+    const inserted = await jobs.updateOne(
+      { tenantId, documentId: request.documentId, status: { $in: ACTIVE_JOB_STATUSES } },
+      {
+        $setOnInsert: {
+          _id: id,
+          documentId: request.documentId,
+          tenantId,
+          requestedBy: request.requestedBy,
+          requestId: request.requestId ?? null,
+          idempotencyKey,
+          status: 'PENDING',
+          attempts: 0,
+          cancelRequested: false,
+          errorCode: null,
+          nextAttemptAt: now,
+          createdAt: now,
+          updatedAt: now,
+        } satisfies Omit<IngestionJobDoc, 'lockedAt'>,
+      },
+      { upsert: true }
     );
-    const jobId = inserted.rows[0]?.id;
-    if (jobId) {
+    if (inserted.upsertedCount === 1) {
       recordIngestionJob('enqueued');
       dispatchJob(request);
-      return jobId;
+      return id;
     }
   } catch (error) {
-    if (!isUniqueViolation(error)) throw error;
-    // Lost a race with a concurrent enqueue on (tenant_id, idempotency_key);
-    // fall through to the lookup below and return the winner's job.
+    if (!isDuplicateKey(error)) throw error;
+    // Lost a race with a concurrent enqueue (duplicate key on the active-
+    // document or idempotency partial unique index); fall through to the
+    // lookup below and return the winner's job.
   }
-  // Either ON CONFLICT DO NOTHING fired (an active job already exists for this
-  // document) or we lost an idempotency race: return the in-flight job instead
-  // of duplicating it.
-  const existing = await tenantQuery<{ id: string }>(
-    tenantId,
-    `SELECT id FROM document_ingestion_jobs
-     WHERE tenant_id = $1 AND status IN ${ACTIVE_JOB_STATUSES}
-       AND (document_id = $2 OR ($3::text IS NOT NULL AND idempotency_key = $3))
-     ORDER BY created_at DESC LIMIT 1`,
-    [tenantId, request.documentId, idempotencyKey]
+  // Either the upsert matched an existing active job for this document or we
+  // lost an idempotency race: return the in-flight job instead of
+  // duplicating it.
+  const or: Record<string, unknown>[] = [{ documentId: request.documentId }];
+  if (idempotencyKey) or.push({ idempotencyKey });
+  const existing = await jobs.findOne(
+    { tenantId, status: { $in: ACTIVE_JOB_STATUSES }, $or: or },
+    { sort: { createdAt: -1 }, projection: { _id: 1 } }
   );
-  const jobId = existing.rows[0]?.id;
+  const jobId = existing?._id;
   if (!jobId) {
     // Cannot happen: we either hit a conflict or lost a race, both of which
-    // imply a row exists. Fail loudly rather than returning a bogus id.
+    // imply a job exists. Fail loudly rather than returning a bogus id.
     throw Errors.internal('Ingestion enqueue conflict resolved to no job', undefined, 'ENQUEUE_CONFLICT');
   }
   return jobId;
@@ -726,32 +780,28 @@ export type CancelJobResult =
  * cancel. Terminal jobs report their state instead of erroring.
  */
 export async function cancelIngestionJob(request: CancelJobRequest): Promise<CancelJobResult> {
+  const db = await getDb();
+  const jobs = db.collection<IngestionJobDoc>('document_ingestion_jobs');
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const job = (
-      await tenantQuery<{ requested_by: string; status: string; document_id: string }>(
-        request.tenantId,
-        'SELECT requested_by, status, document_id FROM document_ingestion_jobs WHERE id = $1',
-        [request.jobId]
-      )
-    ).rows[0];
+    const job = await jobs.findOne(
+      { _id: request.jobId, tenantId: request.tenantId },
+      { projection: { requestedBy: 1, status: 1, documentId: 1 } }
+    );
     if (!job) throw Errors.notFound('JOB_NOT_FOUND', 'Ingestion job not found');
-    if (job.requested_by !== request.userId && !request.isAdmin) {
+    if (job.requestedBy !== request.userId && !request.isAdmin) {
       throw Errors.forbidden('JOB_CANCEL_FORBIDDEN', 'Only the requesting user or an admin can cancel this job');
     }
     if (job.status === 'PENDING') {
-      const updated = await tenantQuery(
-        request.tenantId,
-        `UPDATE document_ingestion_jobs
-         SET status = 'CANCELED', error_code = 'INGESTION_CANCELED', updated_at = NOW()
-         WHERE id = $1 AND status = 'PENDING'`,
-        [request.jobId]
+      // Conditional update: a worker claiming the job concurrently wins the
+      // race, modifiedCount comes back 0, and we re-read.
+      const updated = await jobs.updateOne(
+        { _id: request.jobId, tenantId: request.tenantId, status: 'PENDING' },
+        { $set: { status: 'CANCELED', errorCode: 'INGESTION_CANCELED', updatedAt: new Date() } }
       );
-      if (updated.rowCount !== 1) continue; // Lost a race with the worker; re-read.
-      await tenantQuery(
-        request.tenantId,
-        `UPDATE documents SET status = 'FAILED', error_code = 'INGESTION_CANCELED', updated_at = NOW()
-         WHERE id = $1 AND status IN ('PENDING', 'PROCESSING')`,
-        [job.document_id]
+      if (updated.modifiedCount !== 1) continue; // Lost a race with the worker; re-read.
+      await db.collection<IngestionDocumentRef>('documents').updateOne(
+        { _id: job.documentId, tenantId: request.tenantId, status: { $in: ['PENDING', 'PROCESSING'] } },
+        { $set: { status: 'FAILED', errorCode: 'INGESTION_CANCELED', updatedAt: new Date() } }
       );
       await recordAudit({
         tenantId: request.tenantId,
@@ -759,17 +809,16 @@ export async function cancelIngestionJob(request: CancelJobRequest): Promise<Can
         ...(request.requestId ? { requestId: request.requestId } : {}),
         action: 'DOCUMENT_INGESTION_CANCELED',
         resource: 'document',
-        resourceId: job.document_id,
+        resourceId: job.documentId,
         success: false,
         reason: 'INGESTION_CANCELED',
       });
       return { status: 'canceled' };
     }
     if (job.status === 'PROCESSING') {
-      await tenantQuery(
-        request.tenantId,
-        'UPDATE document_ingestion_jobs SET cancel_requested = TRUE, updated_at = NOW() WHERE id = $1',
-        [request.jobId]
+      await jobs.updateOne(
+        { _id: request.jobId, tenantId: request.tenantId },
+        { $set: { cancelRequested: true, updatedAt: new Date() } }
       );
       await recordAudit({
         tenantId: request.tenantId,
@@ -777,7 +826,7 @@ export async function cancelIngestionJob(request: CancelJobRequest): Promise<Can
         ...(request.requestId ? { requestId: request.requestId } : {}),
         action: 'DOCUMENT_INGESTION_CANCEL_REQUESTED',
         resource: 'document',
-        resourceId: job.document_id,
+        resourceId: job.documentId,
       });
       return { status: 'cancel-requested' };
     }
@@ -800,22 +849,22 @@ export interface RequeueJobRequest {
  * auto-retried — this is the only way back.
  */
 export async function requeueIngestionJob(request: RequeueJobRequest): Promise<{ jobId: string; status: 'PENDING' }> {
-  const updated = await tenantQuery<{ id: string; document_id: string }>(
-    request.tenantId,
-    `UPDATE document_ingestion_jobs
-     SET status = 'PENDING', attempts = 0, next_attempt_at = NOW(),
-         cancel_requested = FALSE, locked_at = NULL, error_code = NULL, updated_at = NOW()
-     WHERE id = $1 AND status IN ('QUARANTINED', 'FAILED')
-     RETURNING id, document_id`,
-    [request.jobId]
+  const db = await getDb();
+  const job = await db.collection<IngestionJobDoc>('document_ingestion_jobs').findOneAndUpdate(
+    { _id: request.jobId, tenantId: request.tenantId, status: { $in: ['QUARANTINED', 'FAILED'] } },
+    {
+      $set: {
+        status: 'PENDING', attempts: 0, nextAttemptAt: new Date(),
+        cancelRequested: false, errorCode: null, updatedAt: new Date(),
+      },
+      $unset: { lockedAt: '' },
+    },
+    { returnDocument: 'after', projection: { _id: 1, documentId: 1 } }
   );
-  const row = updated.rows[0];
-  if (!row) throw Errors.notFound('JOB_NOT_FOUND', 'Quarantined or failed ingestion job not found');
-  await tenantQuery(
-    request.tenantId,
-    `UPDATE documents SET status = 'PENDING', error_code = NULL, updated_at = NOW()
-     WHERE id = $1 AND status IN ('QUARANTINED', 'FAILED')`,
-    [row.document_id]
+  if (!job) throw Errors.notFound('JOB_NOT_FOUND', 'Quarantined or failed ingestion job not found');
+  await db.collection<IngestionDocumentRef>('documents').updateOne(
+    { _id: job.documentId, tenantId: request.tenantId, status: { $in: ['QUARANTINED', 'FAILED'] } },
+    { $set: { status: 'PENDING', errorCode: null, updatedAt: new Date() } }
   );
   await recordAudit({
     tenantId: request.tenantId,
@@ -823,12 +872,12 @@ export async function requeueIngestionJob(request: RequeueJobRequest): Promise<{
     ...(request.requestId ? { requestId: request.requestId } : {}),
     action: 'DOCUMENT_INGESTION_REQUEUED',
     resource: 'document',
-    resourceId: row.document_id,
-    metadata: { jobId: row.id },
+    resourceId: job.documentId,
+    metadata: { jobId: job._id },
   });
   pendingTenants.add(request.tenantId);
   notifyIngestionWorkers();
-  return { jobId: row.id, status: 'PENDING' };
+  return { jobId: job._id, status: 'PENDING' };
 }
 
 // ---------------------------------------------------------------------------
@@ -842,54 +891,51 @@ export interface RecoverOptions {
 
 export async function recoverIngestionJobs(options: RecoverOptions = {}): Promise<void> {
   const maxAttempts = config.INGEST_MAX_ATTEMPTS;
-  const tenants = await query<{ id: string }>('SELECT id FROM tenants');
-  for (const tenant of tenants.rows) {
+  const db = await getDb();
+  const tenants = await db.collection<TenantRef>('tenants').find<{ _id: string }>({}, { projection: { _id: 1 } }).toArray();
+  for (const tenant of tenants) {
+    const tenantId = tenant._id;
     // Reclaim-and-reseed is shared with the periodic pump sweep (forced here,
     // not throttled) so boot and runtime healing cannot drift apart.
-    await sweepStaleIngestionWork({ force: true, tenantIds: [tenant.id] });
+    await sweepStaleIngestionWork({ force: true, tenantIds: [tenantId] });
     // Poison handling runs BEFORE orphan healing: a job that crashed
     // maxAttempts+ times without ever succeeding is QUARANTINED (terminal,
     // never auto-retried) instead of being retried forever. The crash counter
-    // lives in `attempts`, incremented on every claim. error_code is preserved
+    // lives in `attempts`, incremented on every claim. errorCode is preserved
     // so operators can see the last failure; jobs with no recorded error get
     // POISON_MESSAGE.
-    const poisoned = await tenantQuery<{
-      id: string;
-      document_id: string;
-      requested_by: string;
-      request_id: string | null;
-      error_code: string | null;
-      attempts: number;
-    }>(
-      tenant.id,
-      `UPDATE document_ingestion_jobs
-       SET status = 'QUARANTINED', updated_at = NOW()
-       WHERE status = 'PENDING' AND attempts >= $1
-       RETURNING id, document_id, requested_by, request_id, error_code, attempts`,
-      [maxAttempts]
-    );
-    for (const poison of poisoned.rows) {
-      const code = poison.error_code ?? 'POISON_MESSAGE';
-      if (!poison.error_code) {
-        await tenantQuery(
-          tenant.id,
-          "UPDATE document_ingestion_jobs SET error_code = 'POISON_MESSAGE' WHERE id = $1",
-          [poison.id]
+    const candidates = await db.collection<IngestionJobDoc>('document_ingestion_jobs').find(
+      { tenantId, status: 'PENDING', attempts: { $gte: maxAttempts } },
+      { projection: { _id: 1 } }
+    ).toArray();
+    const jobs = db.collection<IngestionJobDoc>('document_ingestion_jobs');
+    for (const candidate of candidates) {
+      // Atomic per-job transition: a worker claiming the job concurrently
+      // flips it to PROCESSING first, the filter misses, and we skip it.
+      const poison = await jobs.findOneAndUpdate(
+        { _id: candidate._id, tenantId, status: 'PENDING' },
+        { $set: { status: 'QUARANTINED', updatedAt: new Date() } },
+        { returnDocument: 'after' }
+      );
+      if (!poison) continue;
+      const code = poison.errorCode ?? 'POISON_MESSAGE';
+      if (!poison.errorCode) {
+        await jobs.updateOne(
+          { _id: poison._id, tenantId },
+          { $set: { errorCode: 'POISON_MESSAGE' } }
         );
       }
-      await tenantQuery(
-        tenant.id,
-        `UPDATE documents SET status = 'QUARANTINED', error_code = $2, updated_at = NOW()
-         WHERE id = $1 AND status IN ('PENDING', 'PROCESSING', 'FAILED')`,
-        [poison.document_id, code]
+      await db.collection<IngestionDocumentRef>('documents').updateOne(
+        { _id: poison.documentId, tenantId, status: { $in: ['PENDING', 'PROCESSING', 'FAILED'] } },
+        { $set: { status: 'QUARANTINED', errorCode: code, updatedAt: new Date() } }
       );
       await recordAudit({
-        tenantId: tenant.id,
-        userId: poison.requested_by,
-        ...(poison.request_id ? { requestId: poison.request_id } : {}),
+        tenantId,
+        userId: poison.requestedBy,
+        ...(poison.requestId ? { requestId: poison.requestId } : {}),
         action: 'DOCUMENT_INGESTION_QUARANTINED',
         resource: 'document',
-        resourceId: poison.document_id,
+        resourceId: poison.documentId,
         success: false,
         reason: code,
         metadata: { attempts: poison.attempts, maxAttempts, recoveredAtStartup: true },
@@ -906,26 +952,32 @@ export async function recoverIngestionJobs(options: RecoverOptions = {}): Promis
     const ORPHAN_BATCH_SIZE = 20;
     const ORPHAN_MAX_BATCHES = 500;
     for (let batch = 0; batch < ORPHAN_MAX_BATCHES; batch += 1) {
-      const orphaned = await tenantQuery<{ id: string; owner_id: string }>(
-        tenant.id,
-        `SELECT d.id, d.owner_id FROM documents d
-         LEFT JOIN document_ingestion_jobs j
-           ON j.document_id = d.id AND j.status IN ${ACTIVE_JOB_STATUSES}
-         WHERE d.tenant_id = $1 AND d.deleted_at IS NULL
-           AND d.status IN ('PENDING', 'PROCESSING')
-           AND d.classification <> 'UNKNOWN'
-           AND j.id IS NULL
-         LIMIT $2`,
-        [tenant.id, ORPHAN_BATCH_SIZE]
-      );
-      if (orphaned.rows.length === 0) break;
-      for (const document of orphaned.rows) {
-        await enqueueIngestion({ documentId: document.id, tenantId: tenant.id, requestedBy: document.owner_id });
+      // Application-side anti-join: the LEFT JOIN ... IS NULL becomes a
+      // $nin over the in-flight job document IDs. Recovery is a rare,
+      // startup-only path, so the two-query form is acceptable.
+      const activeJobs = await jobs.find(
+        { tenantId, status: { $in: ACTIVE_JOB_STATUSES } },
+        { projection: { documentId: 1 } }
+      ).toArray();
+      const activeDocumentIds = activeJobs.map((j) => j.documentId);
+      const orphaned = await db.collection<IngestionDocumentRef>('documents').find<{ _id: string; ownerId: string }>(
+        {
+          tenantId,
+          deletedAt: null,
+          status: { $in: ['PENDING', 'PROCESSING'] },
+          classification: { $ne: 'UNKNOWN' },
+          _id: { $nin: activeDocumentIds },
+        },
+        { projection: { _id: 1, ownerId: 1 } }
+      ).limit(ORPHAN_BATCH_SIZE).toArray();
+      if (orphaned.length === 0) break;
+      for (const document of orphaned) {
+        await enqueueIngestion({ documentId: document._id, tenantId, requestedBy: document.ownerId });
       }
-      if (orphaned.rows.length < ORPHAN_BATCH_SIZE) break;
+      if (orphaned.length < ORPHAN_BATCH_SIZE) break;
       if (batch === ORPHAN_MAX_BATCHES - 1) {
         console.warn(
-          `Orphan recovery for tenant ${tenant.id} hit the ${ORPHAN_MAX_BATCHES}-batch cap; ` +
+          `Orphan recovery for tenant ${tenantId} hit the ${ORPHAN_MAX_BATCHES}-batch cap; ` +
             'remaining orphans will be retried on the next restart'
         );
       }

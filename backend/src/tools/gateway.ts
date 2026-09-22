@@ -1,7 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { AuthContext, Classification, Permission } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
-import { tenantQuery } from '../db/pool.js';
+import { getDb } from '../db/mongo.js';
 import { recordAudit, sanitizeReason } from '../audit/audit.js';
 import { config } from '../config.js';
 import { Errors } from '../errors.js';
@@ -19,6 +20,23 @@ import { repoToolDefinitions } from './repos.js';
 export interface ToolExecutionContext {
   auth: AuthContext;
   classification: Classification;
+}
+
+/** Document shape for the `tool_executions` collection. `_id` is an app-generated UUID string (ADR-014). */
+interface ToolExecutionDoc {
+  _id: string;
+  requestId: string;
+  tenantId: string;
+  userId: string;
+  toolName: string;
+  action: string;
+  parameters: Record<string, unknown>;
+  authorizationDecision: string;
+  classification: string;
+  status: string;
+  errorCode?: string;
+  createdAt: Date;
+  completedAt?: Date;
 }
 
 export interface ToolDefinition<T = unknown> {
@@ -288,12 +306,22 @@ export async function runToolCall(options: {
   } catch {
     // Malformed invocations are still audited: "audit every invocation" holds
     // even when the arguments never reach a tool definition.
-    await tenantQuery(
-      auth.tenantId,
-      `INSERT INTO tool_executions (request_id, tenant_id, user_id, tool_name, action, parameters, authorization_decision, classification, status, error_code, completed_at)
-       VALUES ($1,$2,$3,$4,'execute',$5,'DENIED',$6,'DENIED','INVALID_TOOL_ARGUMENTS',NOW())`,
-      [requestId ?? 'none', auth.tenantId, auth.userId, name, JSON.stringify({ raw: options.rawArguments.slice(0, 4000) }), classification]
-    );
+    const db = await getDb();
+    await db.collection<ToolExecutionDoc>('tool_executions').insertOne({
+      _id: randomUUID(),
+      requestId: requestId ?? 'none',
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      toolName: name,
+      action: 'execute',
+      parameters: { raw: options.rawArguments.slice(0, 4000) },
+      authorizationDecision: 'DENIED',
+      classification,
+      status: 'DENIED',
+      errorCode: 'INVALID_TOOL_ARGUMENTS',
+      createdAt: new Date(),
+      completedAt: new Date(),
+    });
     await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId, action: 'TOOL_EXECUTION', tool: name, classification, success: false, reason: 'Tool arguments are not valid JSON' });
     return { ok: false, errorCode: 'INVALID_TOOL_ARGUMENTS', message: 'Tool arguments are not valid JSON' };
   }
@@ -303,23 +331,41 @@ export async function runToolCall(options: {
     prepared = authorizeTool(auth, name, parameters, classification, confirmed);
   } catch (error) {
     const code = toolErrorCode(error);
-    await tenantQuery(
-      auth.tenantId,
-      `INSERT INTO tool_executions (request_id, tenant_id, user_id, tool_name, action, parameters, authorization_decision, classification, status, error_code, completed_at)
-       VALUES ($1,$2,$3,$4,'execute','{}','DENIED',$5,'DENIED',$6,NOW())`,
-      [requestId ?? 'none', auth.tenantId, auth.userId, name, classification, code]
-    );
+    const db = await getDb();
+    await db.collection<ToolExecutionDoc>('tool_executions').insertOne({
+      _id: randomUUID(),
+      requestId: requestId ?? 'none',
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      toolName: name,
+      action: 'execute',
+      parameters: {},
+      authorizationDecision: 'DENIED',
+      classification,
+      status: 'DENIED',
+      errorCode: code,
+      createdAt: new Date(),
+      completedAt: new Date(),
+    });
     await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId, action: 'TOOL_EXECUTION', tool: name, classification, success: false, reason: error instanceof Error ? error.message : 'Tool request denied' });
     return { ok: false, errorCode: code, message: error instanceof Error ? error.message : 'Tool request denied' };
   }
 
-  const pending = await tenantQuery<{ id: string }>(
-    auth.tenantId,
-    `INSERT INTO tool_executions (request_id, tenant_id, user_id, tool_name, action, parameters, authorization_decision, classification, status)
-     VALUES ($1,$2,$3,$4,'execute',$5,'ALLOWED',$6,'PENDING') RETURNING id`,
-    [requestId ?? 'none', auth.tenantId, auth.userId, name, JSON.stringify(prepared.input), classification]
-  );
-  const executionId = pending.rows[0]!.id;
+  const db = await getDb();
+  const pending = await db.collection<ToolExecutionDoc>('tool_executions').insertOne({
+    _id: randomUUID(),
+    requestId: requestId ?? 'none',
+    tenantId: auth.tenantId,
+    userId: auth.userId,
+    toolName: name,
+    action: 'execute',
+    parameters: prepared.input as Record<string, unknown>,
+    authorizationDecision: 'ALLOWED',
+    classification,
+    status: 'PENDING',
+    createdAt: new Date(),
+  });
+  const executionId = String(pending.insertedId);
   // Per-tool timeout on top of the caller's signal: a hung tool must not hold
   // a chat turn or worker slot indefinitely, even when the client is gone.
   // The combined signal aborts cooperatively for adapters that listen, but a
@@ -342,7 +388,9 @@ export async function runToolCall(options: {
       prepared.definition.execute(prepared.input, { auth, classification }, toolSignal),
       deadline,
     ]);
-    await tenantQuery(auth.tenantId, "UPDATE tool_executions SET status = 'SUCCEEDED', completed_at = NOW() WHERE id = $1", [executionId]);
+    await db
+      .collection<ToolExecutionDoc>('tool_executions')
+      .updateOne({ _id: executionId, tenantId: auth.tenantId }, { $set: { status: 'SUCCEEDED', completedAt: new Date() } });
     const rendered = safeStringify(output);
     // Bounded result-size metadata (counts only, never result content):
     // operators can see when an upstream returns pathological payloads.
@@ -373,7 +421,12 @@ export async function runToolCall(options: {
     // sanitized server-side with the audit sanitizer patterns before being
     // recorded, so credential-shaped material never persists raw.
     const diagnostics = sanitizeReason(error instanceof Error ? error.message : 'Tool execution failed');
-    await tenantQuery(auth.tenantId, "UPDATE tool_executions SET status = 'FAILED', error_code = $2, completed_at = NOW() WHERE id = $1", [executionId, code]);
+    await db
+      .collection<ToolExecutionDoc>('tool_executions')
+      .updateOne(
+        { _id: executionId, tenantId: auth.tenantId },
+        { $set: { status: 'FAILED', errorCode: code, completedAt: new Date() } }
+      );
     await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId, action: 'TOOL_EXECUTION', tool: name, classification, success: false, reason: diagnostics ?? 'Tool execution failed' });
     return { ok: false, errorCode: code, message: 'Tool execution failed' };
   } finally {

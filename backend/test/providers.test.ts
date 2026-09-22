@@ -40,9 +40,9 @@ function modelRef(provider: string) {
   return {
     provider,
     endpoint: 'http://vllm.test/v1',
-    model_identifier: 'test-model',
-    request_timeout_ms: null,
-    max_tokens: null,
+    modelIdentifier: 'test-model',
+    requestTimeoutMs: null,
+    maxTokens: null,
     temperature: null,
   };
 }

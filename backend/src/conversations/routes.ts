@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { tenantQuery } from '../db/pool.js';
+import { randomUUID } from 'node:crypto';
+import { tenantOp } from '../db/mongo.js';
 import { Errors } from '../errors.js';
 import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
@@ -25,18 +26,77 @@ const paginationSchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
+export interface Conversation {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  title: string;
+  model_id: string;
+  classification: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+/**
+ * MongoDB document shape for the `conversations` collection: camelCase
+ * fields, `_id` is the UUID string (ADR-014). `model` (the denormalized
+ * serving-model name) is storage-only — it is not part of the Conversation
+ * API view, which keeps its original snake_case shape.
+ */
+interface ConversationDoc {
+  _id: string;
+  tenantId: string;
+  userId: string;
+  title: string;
+  model: string;
+  modelId: string;
+  classification: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+function toConversation(doc: ConversationDoc): Conversation {
+  return {
+    id: doc._id,
+    tenant_id: doc.tenantId,
+    user_id: doc.userId,
+    title: doc.title,
+    model_id: doc.modelId,
+    classification: doc.classification,
+    created_at: doc.createdAt,
+    updated_at: doc.updatedAt,
+  };
+}
+
+/** MongoDB document shape for the `messages` collection. */
+interface MessageDoc {
+  _id: string;
+  conversationId: string;
+  tenantId: string;
+  role: string;
+  content: string;
+  model?: string;
+  modelId?: string;
+  citations?: unknown;
+  metadata?: unknown;
+  createdAt: Date;
+}
+
 export async function conversationRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get('/conversations', { preHandler: [requireAuth, requirePermission('conversation:read')] }, async (req, reply) => {
     const auth = req.auth!;
     const pagination = paginationSchema.safeParse(req.query);
     if (!pagination.success) throw Errors.badRequest('INVALID_PAGINATION', 'Invalid pagination parameters');
-    const result = await tenantQuery(
-      auth.tenantId,
-      `SELECT id, tenant_id, user_id, title, model_id, classification, created_at, updated_at
-       FROM conversations WHERE tenant_id = $1 AND user_id = $2 ORDER BY updated_at DESC LIMIT $3 OFFSET $4`,
-      [auth.tenantId, auth.userId, pagination.data.limit, pagination.data.offset]
+    const docs = await tenantOp(auth.tenantId, (db) =>
+      db
+        .collection<ConversationDoc>('conversations')
+        .find({ tenantId: auth.tenantId, userId: auth.userId })
+        .sort({ updatedAt: -1 })
+        .skip(pagination.data.offset)
+        .limit(pagination.data.limit)
+        .toArray()
     );
-    return reply.send({ conversations: result.rows, pagination: pagination.data });
+    return reply.send({ conversations: docs.map(toConversation), pagination: pagination.data });
   });
 
   fastify.post('/conversations', { preHandler: [requireAuth, requirePermission('chat:create')] }, async (req, reply) => {
@@ -55,26 +115,36 @@ export async function conversationRoutes(fastify: FastifyInstance): Promise<void
       (await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId))[0]?.id;
     if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
     const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
-    const result = await tenantQuery(
-      auth.tenantId,
-      `INSERT INTO conversations (tenant_id, user_id, title, model, model_id, classification)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       RETURNING id, tenant_id, user_id, title, model_id, classification, created_at, updated_at`,
-      [auth.tenantId, auth.userId, body.data.title ?? 'New Conversation', model.name, modelId, classification]
-    );
-    return reply.status(201).send({ conversation: result.rows[0] });
+    const now = new Date();
+    const doc: ConversationDoc = {
+      _id: randomUUID(),
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      title: body.data.title ?? 'New Conversation',
+      model: model.name,
+      modelId,
+      classification,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await tenantOp(auth.tenantId, async (db) => {
+      await db.collection<ConversationDoc>('conversations').insertOne(doc);
+    });
+    return reply.status(201).send({ conversation: toConversation(doc) });
   });
 
   fastify.get('/conversations/:id', { preHandler: [requireAuth, requirePermission('conversation:read')] }, async (req, reply) => {
     const auth = req.auth!;
     const params = idSchema.safeParse(req.params);
     if (!params.success) throw Errors.badRequest('INVALID_ID', 'Invalid conversation ID');
-    const conversation = (
-      await tenantQuery(auth.tenantId, `SELECT id, tenant_id, user_id, title, model_id, classification, created_at, updated_at FROM conversations WHERE id = $1 AND tenant_id = $2 AND user_id = $3`, [params.data.id, auth.tenantId, auth.userId])
-    ).rows[0];
-    if (!conversation) throw Errors.notFound('CONVERSATION_NOT_FOUND', 'Conversation not found');
+    const doc = await tenantOp(auth.tenantId, (db) =>
+      db.collection<ConversationDoc>('conversations').findOne(
+        { _id: params.data.id, tenantId: auth.tenantId, userId: auth.userId }
+      )
+    );
+    if (!doc) throw Errors.notFound('CONVERSATION_NOT_FOUND', 'Conversation not found');
     await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, action: 'CONVERSATION_ACCESS', resource: 'conversation', resourceId: params.data.id });
-    return reply.send({ conversation });
+    return reply.send({ conversation: toConversation(doc) });
   });
 
   fastify.get('/conversations/:id/messages', { preHandler: [requireAuth, requirePermission('conversation:read')] }, async (req, reply) => {
@@ -83,18 +153,34 @@ export async function conversationRoutes(fastify: FastifyInstance): Promise<void
     const pagination = paginationSchema.safeParse(req.query);
     if (!params.success) throw Errors.badRequest('INVALID_ID', 'Invalid conversation ID');
     if (!pagination.success) throw Errors.badRequest('INVALID_PAGINATION', 'Invalid pagination parameters');
-    const result = await tenantQuery(
-      auth.tenantId,
-      `SELECT m.id, m.conversation_id, m.role, m.content, m.model_id, m.citations, m.metadata, m.created_at
-       FROM messages m JOIN conversations c ON c.id = m.conversation_id AND c.tenant_id = m.tenant_id
-       WHERE m.conversation_id = $1 AND m.tenant_id = $2 AND c.user_id = $3 ORDER BY m.created_at LIMIT $4 OFFSET $5`,
-      [params.data.id, auth.tenantId, auth.userId, pagination.data.limit, pagination.data.offset]
-    );
-    if (result.rowCount === 0) {
-      const exists = await tenantQuery(auth.tenantId, 'SELECT 1 FROM conversations WHERE id = $1 AND tenant_id = $2 AND user_id = $3', [params.data.id, auth.tenantId, auth.userId]);
-      if (exists.rowCount === 0) throw Errors.notFound('CONVERSATION_NOT_FOUND', 'Conversation not found');
-    }
-    return reply.send({ messages: result.rows, pagination: pagination.data });
+    // The SQL JOIN verified conversation ownership inline; in MongoDB this
+    // is a two-step: confirm the conversation belongs to the caller first
+    // (404 when it does not exist or is not theirs), then list its messages.
+    const messages = await tenantOp(auth.tenantId, async (db) => {
+      const conversation = await db.collection<ConversationDoc>('conversations').findOne(
+        { _id: params.data.id, tenantId: auth.tenantId, userId: auth.userId },
+        { projection: { _id: 1 } }
+      );
+      if (!conversation) throw Errors.notFound('CONVERSATION_NOT_FOUND', 'Conversation not found');
+      const docs = await db
+        .collection<MessageDoc>('messages')
+        .find({ conversationId: params.data.id, tenantId: auth.tenantId })
+        .sort({ createdAt: 1 })
+        .skip(pagination.data.offset)
+        .limit(pagination.data.limit)
+        .toArray();
+      return docs.map(({ _id, conversationId, role, content, modelId, citations, metadata, createdAt }) => ({
+        id: _id,
+        conversationId,
+        role,
+        content,
+        modelId,
+        citations,
+        metadata,
+        createdAt,
+      }));
+    });
+    return reply.send({ messages, pagination: pagination.data });
   });
 
   fastify.patch('/conversations/:id', { preHandler: [requireAuth, requirePermission('conversation:update')] }, async (req, reply) => {
@@ -102,19 +188,32 @@ export async function conversationRoutes(fastify: FastifyInstance): Promise<void
     const params = idSchema.safeParse(req.params);
     const body = updateSchema.safeParse(req.body);
     if (!params.success || !body.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid conversation update');
-    const conversation = (
-      await tenantQuery(auth.tenantId, `UPDATE conversations SET title = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3 AND user_id = $4 RETURNING id, tenant_id, user_id, title, model_id, classification, created_at, updated_at`, [body.data.title, params.data.id, auth.tenantId, auth.userId])
-    ).rows[0];
-    if (!conversation) throw Errors.notFound('CONVERSATION_NOT_FOUND', 'Conversation not found');
-    return reply.send({ conversation });
+    const doc = await tenantOp(auth.tenantId, (db) =>
+      db.collection<ConversationDoc>('conversations').findOneAndUpdate(
+        { _id: params.data.id, tenantId: auth.tenantId, userId: auth.userId },
+        { $set: { title: body.data.title, updatedAt: new Date() } },
+        { returnDocument: 'after' }
+      )
+    );
+    if (!doc) throw Errors.notFound('CONVERSATION_NOT_FOUND', 'Conversation not found');
+    return reply.send({ conversation: toConversation(doc) });
   });
 
   fastify.delete('/conversations/:id', { preHandler: [requireAuth, requirePermission('conversation:delete')] }, async (req, reply) => {
     const auth = req.auth!;
     const params = idSchema.safeParse(req.params);
     if (!params.success) throw Errors.badRequest('INVALID_ID', 'Invalid conversation ID');
-    const result = await tenantQuery(auth.tenantId, 'DELETE FROM conversations WHERE id = $1 AND tenant_id = $2 AND user_id = $3 RETURNING id', [params.data.id, auth.tenantId, auth.userId]);
-    if (result.rowCount === 0) throw Errors.notFound('CONVERSATION_NOT_FOUND', 'Conversation not found');
+    await tenantOp(auth.tenantId, async (db) => {
+      const conversation = await db.collection<ConversationDoc>('conversations').findOne(
+        { _id: params.data.id, tenantId: auth.tenantId, userId: auth.userId },
+        { projection: { _id: 1 } }
+      );
+      if (!conversation) throw Errors.notFound('CONVERSATION_NOT_FOUND', 'Conversation not found');
+      // Explicit cascade: PostgreSQL's ON DELETE CASCADE has no MongoDB
+      // equivalent, so messages are deleted first, then the conversation.
+      await db.collection<MessageDoc>('messages').deleteMany({ conversationId: params.data.id, tenantId: auth.tenantId });
+      await db.collection<ConversationDoc>('conversations').deleteOne({ _id: params.data.id, tenantId: auth.tenantId });
+    });
     await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip, action: 'CONVERSATION_DELETE', resource: 'conversation', resourceId: params.data.id });
     return reply.status(204).send();
   });

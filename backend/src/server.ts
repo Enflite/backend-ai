@@ -28,7 +28,7 @@ import { evalRoutes } from './eval/routes.js';
 import { retentionRoutes } from './retention/routes.js';
 import { startRetentionScheduler, stopRetentionScheduler } from './retention/scheduler.js';
 import { recoverIngestionJobs } from './documents/queue.js';
-import { pool, query } from './db/pool.js';
+import { closeDb } from './db/mongo.js';
 
 /**
  * Retry-After (seconds) attached to 429s from the instance-global ceiling.
@@ -296,30 +296,16 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename
     } finally {
       if (drainTimer) clearTimeout(drainTimer);
     }
-    await pool.end().catch((error) => server.log.error({ err: error }, 'Error draining database pool'));
+    await closeDb().catch((error) => server.log.error({ err: error }, 'Error closing database connection'));
     process.exit(0);
   };
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
   process.once('SIGINT', () => void shutdown('SIGINT'));
   try {
-    if (config.NODE_ENV === 'production') {
-      // Defense in depth: PostgreSQL superusers and BYPASSRLS roles bypass
-      // row-level security entirely (even FORCE ROW LEVEL SECURITY, applied
-      // by migration 013 so table owners stay subject to the tenant
-      // policies), which would silently disable tenant isolation. Refuse to
-      // serve production on such a role.
-      const role = (
-        await query<{ rolsuper: boolean; rolbypassrl: boolean }>(
-          'SELECT rolsuper, rolbypassrl FROM pg_roles WHERE rolname = current_user'
-        )
-      ).rows[0];
-      if (!role || role.rolsuper || role.rolbypassrl) {
-        console.error(
-          'Configuration error: production DATABASE_URL must use a non-superuser role without BYPASSRLS, otherwise RLS tenant isolation is bypassed'
-        );
-        process.exit(1);
-      }
-    }
+    // MongoDB has no RLS equivalent; tenant isolation is enforced by
+    // application-level tenantId filters on every query (ADR-004, ADR-014).
+    // The production safety check for privileged database roles is not
+    // applicable.
     await server.listen({ port: config.PORT, host: '0.0.0.0' });
     await recoverIngestionJobs();
     console.log(`Server listening on 0.0.0.0:${config.PORT}`);

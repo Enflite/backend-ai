@@ -17,7 +17,7 @@
  * Every transition commits together with its audit event in one
  * transaction, so a model can never change state unaudited.
  */
-import { query, withTx } from '../../db/pool.js';
+import { withTx, tenantOp } from '../../db/mongo.js';
 import { Errors } from '../../errors.js';
 import { recordAuditInTx } from '../../audit/audit.js';
 import { getPromotionGate } from '../../eval/compare.js';
@@ -67,8 +67,9 @@ export function isServableStatus(status: string): status is 'CANARY' | 'ACTIVE' 
   return status === 'CANARY' || status === 'ACTIVE';
 }
 
-interface ModelLifecycleRow {
-  id: string;
+/** MongoDB document shape for the fields transitionModel reads (ADR-014). */
+interface ModelLifecycleDoc {
+  _id: string;
   status: string;
   version: string;
   enabled: boolean;
@@ -100,13 +101,9 @@ export interface TransitionModelResult {
  * fails required evals cannot be approved through this API, period.
  */
 export async function transitionModel(input: TransitionModelInput): Promise<TransitionModelResult> {
-  return withTx(async (client) => {
-    const row = (
-      await client.query<ModelLifecycleRow>(
-        `SELECT id, status, version, enabled FROM models WHERE id = $1 FOR UPDATE`,
-        [input.modelId]
-      )
-    ).rows[0];
+  return withTx(async (session, db) => {
+    const models = db.collection<ModelLifecycleDoc>('models');
+    const row = await models.findOne({ _id: input.modelId }, { session });
     if (!row) throw Errors.notFound('MODEL_NOT_FOUND', 'Model not found');
 
     const fromStatus = row.status as ModelStatus;
@@ -125,7 +122,7 @@ export async function transitionModel(input: TransitionModelInput): Promise<Tran
     // grounding/honesty regressions. Failed required evals block promotion.
     let gateRunId: string | null = null;
     let approvedBy: string | null = null;
-    let approvedAt: string | null = null;
+    let approvedAt: Date | null = null;
     if (input.toStatus === 'APPROVED') {
       const gate = await getPromotionGate(input.modelId);
       if (!gate.eligible) {
@@ -136,21 +133,24 @@ export async function transitionModel(input: TransitionModelInput): Promise<Tran
       }
       gateRunId = gate.latestRunId;
       approvedBy = input.actorUserId;
-      approvedAt = new Date().toISOString();
+      approvedAt = new Date();
     }
 
-    await client.query(
-      `UPDATE models
-       SET status = $2,
-           lifecycle_updated_at = NOW(),
-           approved_by = CASE WHEN $2 = 'APPROVED' THEN $3::uuid ELSE approved_by END,
-           approved_at = CASE WHEN $2 = 'APPROVED' THEN $4::timestamptz ELSE approved_at END,
-           last_eval_run_id = CASE WHEN $2 = 'APPROVED' THEN $5::uuid ELSE last_eval_run_id END
-       WHERE id = $1`,
-      [input.modelId, input.toStatus, approvedBy, approvedAt, gateRunId]
+    // The approval fields are only stamped on the PENDING_APPROVAL ->
+    // APPROVED transition; other transitions leave the existing values.
+    await models.updateOne(
+      { _id: input.modelId },
+      {
+        $set: {
+          status: input.toStatus,
+          lifecycleUpdatedAt: new Date(),
+          ...(input.toStatus === 'APPROVED' ? { approvedBy, approvedAt, lastEvalRunId: gateRunId } : {}),
+        },
+      },
+      { session }
     );
 
-    await recordAuditInTx(client, {
+    await recordAuditInTx(session, {
       tenantId: input.tenantId,
       userId: input.actorUserId,
       requestId: input.requestId,
@@ -189,6 +189,26 @@ export interface ServingDefault {
   updatedAt: Date;
 }
 
+/** MongoDB document shape for the `model_serving_defaults` collection (ADR-014). */
+interface ServingDefaultDoc {
+  _id: string;
+  tenantId: string;
+  capability: string;
+  modelId: string;
+  updatedBy: string | null;
+  updatedAt: Date;
+}
+
+function toServingDefault(doc: ServingDefaultDoc): ServingDefault {
+  return {
+    tenantId: doc.tenantId,
+    capability: doc.capability,
+    modelId: doc.modelId,
+    updatedBy: doc.updatedBy,
+    updatedAt: doc.updatedAt,
+  };
+}
+
 /**
  * Set (upsert) the default model for a tenant+capability. Admin-only
  * (model:manage), audited. The model must be servable (ACTIVE/CANARY) and
@@ -207,13 +227,10 @@ export async function setServingDefault(
   if (!normalizedCapability || normalizedCapability.length > 64) {
     throw Errors.badRequest('INVALID_CAPABILITY', 'Capability must be a non-empty string up to 64 characters');
   }
-  return withTx(async (client) => {
-    const model = (
-      await client.query<{ id: string; status: string; enabled: boolean }>(
-        `SELECT id, status, enabled FROM models WHERE id = $1`,
-        [modelId]
-      )
-    ).rows[0];
+  return withTx(async (session, db) => {
+    const model = await db
+      .collection<{ _id: string; status: string; enabled: boolean }>('models')
+      .findOne({ _id: modelId }, { session });
     if (!model) throw Errors.notFound('MODEL_NOT_FOUND', 'Model not found');
     if (!isServableStatus(model.status) || !model.enabled) {
       throw Errors.badRequest(
@@ -221,18 +238,17 @@ export async function setServingDefault(
         'Serving defaults must point at an enabled ACTIVE or CANARY model'
       );
     }
-    const row = (
-      await client.query<ServingDefault>(
-        `INSERT INTO model_serving_defaults (tenant_id, capability, model_id, updated_by, updated_at)
-         VALUES ($1, $2, $3, $4, NOW())
-         ON CONFLICT (tenant_id, capability)
-         DO UPDATE SET model_id = EXCLUDED.model_id, updated_by = EXCLUDED.updated_by, updated_at = NOW()
-         RETURNING tenant_id AS "tenantId", capability, model_id AS "modelId",
-                   updated_by AS "updatedBy", updated_at AS "updatedAt"`,
-        [tenantId, normalizedCapability, modelId, actorUserId]
-      )
-    ).rows[0]!;
-    await recordAuditInTx(client, {
+    const coll = db.collection<ServingDefaultDoc>('model_serving_defaults');
+    await coll.updateOne(
+      { tenantId, capability: normalizedCapability },
+      { $set: { modelId, updatedBy: actorUserId, updatedAt: new Date() } },
+      { upsert: true, session }
+    );
+    const doc = await coll.findOne({ tenantId, capability: normalizedCapability }, { session });
+    if (!doc) {
+      throw Errors.internal('Serving default upsert did not return a document', undefined, 'MODEL_SERVING_DEFAULT_UPSERT_FAILED');
+    }
+    await recordAuditInTx(session, {
       tenantId,
       userId: actorUserId,
       requestId,
@@ -243,31 +259,28 @@ export async function setServingDefault(
       success: true,
       metadata: { capability: normalizedCapability, modelId },
     });
-    return row;
+    return toServingDefault(doc);
   });
 }
 
 export async function getServingDefault(tenantId: string, capability: string): Promise<ServingDefault | null> {
-  const row = (
-    await query<ServingDefault>(
-      `SELECT tenant_id AS "tenantId", capability, model_id AS "modelId",
-              updated_by AS "updatedBy", updated_at AS "updatedAt"
-       FROM model_serving_defaults WHERE tenant_id = $1 AND capability = $2`,
-      [tenantId, capability.trim().toLowerCase()]
-    )
-  ).rows[0];
-  return row ?? null;
+  const doc = await tenantOp(tenantId, async (db) =>
+    db
+      .collection<ServingDefaultDoc>('model_serving_defaults')
+      .findOne({ tenantId, capability: capability.trim().toLowerCase() })
+  );
+  return doc ? toServingDefault(doc) : null;
 }
 
 export async function listServingDefaults(tenantId: string): Promise<ServingDefault[]> {
-  return (
-    await query<ServingDefault>(
-      `SELECT tenant_id AS "tenantId", capability, model_id AS "modelId",
-              updated_by AS "updatedBy", updated_at AS "updatedAt"
-       FROM model_serving_defaults WHERE tenant_id = $1 ORDER BY capability ASC`,
-      [tenantId]
-    )
-  ).rows;
+  const docs = await tenantOp(tenantId, async (db) =>
+    db
+      .collection<ServingDefaultDoc>('model_serving_defaults')
+      .find({ tenantId })
+      .sort({ capability: 1 })
+      .toArray()
+  );
+  return docs.map(toServingDefault);
 }
 
 /**

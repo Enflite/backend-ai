@@ -37,8 +37,8 @@
  * ---------------------------------------------------------------------------
  * ENVIRONMENT
  * ---------------------------------------------------------------------------
- *   DATABASE_URL        Postgres to test against (must be migrated).
- *                       Default: postgres://postgres:postgres@localhost:5432/ai_test
+ *   MONGODB_URI       MongoDB to test against (must be migrated).
+ *                       Default: mongodb://127.0.0.1:27017/ai_test
  *   JWT_SECRET          Backend JWT secret (>= 32 chars).
  *                       Default: a fixed dev-only secret (never production).
  *   LOADTEST_EMAIL      Dev user to create/reuse. Default: loadtest@example.com
@@ -85,8 +85,8 @@ const TOTAL = Number(ARGS.total);
 const MOCK_TTFB_MS = Number(ARGS['mock-ttfb-ms']);
 const SLO_TTFB_P95_MS = Number(ARGS['slo-ttfb-p95-ms']);
 const LOADTEST_PORT = Number(process.env.LOADTEST_PORT ?? '18080');
-const DATABASE_URL =
-  process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/ai_test';
+const MONGODB_URI =
+  process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017/ai_test';
 const JWT_SECRET = process.env.JWT_SECRET ?? 'loadtest-dev-secret-please-rotate-32-chars';
 const EMAIL = process.env.LOADTEST_EMAIL ?? 'loadtest@example.com';
 const PASSWORD = process.env.LOADTEST_PASSWORD ?? randomBytes(16).toString('hex');
@@ -221,7 +221,7 @@ function spawnBackend({ mockBase, sytelineBase, port }) {
     ...process.env,
     NODE_ENV: 'development',
     PORT: String(port),
-    DATABASE_URL,
+    MONGODB_URI,
     JWT_SECRET,
     DEV_AUTH_ENABLED: 'true',
     // The model endpoint below is `${mockBase}/v1`; the allowlist compares
@@ -287,7 +287,7 @@ function ensureUser() {
   const result = spawnSync(
     'npx',
     ['tsx', 'scripts/create-user.ts', '--email', EMAIL, '--role', 'Admin', '--clearance', 'INTERNAL'],
-    { cwd: BACKEND_DIR, env: { ...process.env, DATABASE_URL, JWT_SECRET, BACKEND_CREATE_USER_PASSWORD: PASSWORD }, encoding: 'utf8' }
+    { cwd: BACKEND_DIR, env: { ...process.env, MONGODB_URI, JWT_SECRET, BACKEND_CREATE_USER_PASSWORD: PASSWORD }, encoding: 'utf8' }
   );
   if (result.status !== 0) {
     throw new Error(`create-user failed: ${result.stderr || result.stdout}`);
@@ -332,7 +332,7 @@ main().catch((e) => { console.error(e); process.exit(1); });
     writeFileSync(helperPath, code);
     const result = spawnSync('npx', ['tsx', helperPath, modelId, tenantId, roleId], {
       cwd: BACKEND_DIR,
-      env: { ...process.env, DATABASE_URL, JWT_SECRET },
+      env: { ...process.env, MONGODB_URI, JWT_SECRET },
       encoding: 'utf8',
     });
     if (result.status !== 0) {

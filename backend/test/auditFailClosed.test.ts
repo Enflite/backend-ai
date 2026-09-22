@@ -1,18 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { query, tenantQuery } = vi.hoisted(() => ({ query: vi.fn(), tenantQuery: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ query, tenantQuery }));
+const { getDbMock, insertOneMock } = vi.hoisted(() => ({
+  getDbMock: vi.fn(),
+  insertOneMock: vi.fn(),
+}));
+vi.mock('../src/db/mongo.js', () => ({
+  getDb: getDbMock,
+  tenantOp: vi.fn(async (_tenantId: string, cb: (db: unknown) => Promise<unknown>) => cb(await getDbMock())),
+  withTenantTx: vi.fn(async (_tenantId: string, cb: (s: unknown, db: unknown) => Promise<unknown>) => cb({}, await getDbMock())),
+}));
 
 import { AuditPersistenceError, recordAudit } from '../src/audit/audit.js';
 import { config } from '../src/config.js';
 
-const DB_DOWN = new Error('connect ECONNREFUSED 127.0.0.1:5432');
+const DB_DOWN = new Error('connect ECONNREFUSED 127.0.0.1:27017');
 
 beforeEach(() => {
   vi.clearAllMocks();
   config.AUDIT_FAIL_CLOSED = false;
-  tenantQuery.mockRejectedValue(DB_DOWN);
-  query.mockRejectedValue(DB_DOWN);
+  getDbMock.mockRejectedValue(DB_DOWN);
+  insertOneMock.mockRejectedValue(DB_DOWN);
+  // Default: getDb returns a db with collection().insertOne()
+  getDbMock.mockImplementation(async () => ({
+    collection: vi.fn().mockReturnValue({ insertOne: insertOneMock }),
+  }));
 });
 
 describe('recordAudit failure mode', () => {
@@ -48,22 +59,22 @@ describe('recordAudit failure mode', () => {
 
   it('still writes the audit event when the database is healthy', async () => {
     config.AUDIT_FAIL_CLOSED = true;
-    tenantQuery.mockResolvedValue({ rows: [], rowCount: 1 });
+    insertOneMock.mockResolvedValue({ acknowledged: true });
     await expect(
       recordAudit({ tenantId: 't1', userId: 'u1', action: 'LOGIN' })
     ).resolves.toBeUndefined();
-    expect(tenantQuery).toHaveBeenCalledTimes(1);
+    expect(insertOneMock).toHaveBeenCalledTimes(1);
   });
 
   it('sanitizes credential-shaped metadata before the insert', async () => {
     config.AUDIT_FAIL_CLOSED = false;
-    tenantQuery.mockResolvedValue({ rows: [], rowCount: 1 });
+    insertOneMock.mockResolvedValue({ acknowledged: true });
     await recordAudit({
       tenantId: 't1', userId: 'u1', action: 'LOGIN',
       metadata: { token: 'abc123', nested: { password: 'hunter2' }, benign: 'ok' },
     });
-    const params = tenantQuery.mock.calls[0]![2] as unknown[];
-    const stored = JSON.parse(params[12] as string) as Record<string, unknown>;
+    const doc = insertOneMock.mock.calls[0]![0] as Record<string, unknown>;
+    const stored = doc.metadata as Record<string, unknown>;
     expect(stored).toMatchObject({
       token: '[REDACTED]',
       nested: { password: '[REDACTED]' },
