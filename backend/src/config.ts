@@ -141,6 +141,25 @@ const envSchema = z.object({
   RAG_CHUNK_MAX_CHARS: z.coerce.number().int().min(64).max(20000).default(1600),
   RAG_CHUNK_OVERLAP: z.coerce.number().int().min(0).max(5000).default(200),
   // ---------------------------------------------------------------------------
+  // Cross-encoder reranker (backend/src/rag/crossEncoderReranker.ts). Disabled
+  // by default: retrieval keeps the in-process hybrid order until an operator
+  // sets RERANKER_ENABLED=true and points RERANKER_URL at a scoring endpoint.
+  // The endpoint only ever receives the query text and already
+  // permission-filtered chunk texts; no credentials, tenant ids, or user ids
+  // are sent. The endpoint's origin must be on AI_PROVIDER_ALLOWED_ORIGINS
+  // (same egress allowlist as the AI gateway).
+  // ---------------------------------------------------------------------------
+  RERANKER_ENABLED: z
+    .preprocess(
+      (val) => (val === undefined || val === null || val === '' ? undefined : val === true || val === 'true' || val === '1'),
+      z.boolean()
+    )
+    .default(false),
+  RERANKER_URL: z.string().default(''),
+  RERANKER_MODEL: z.string().min(1).default('cross-encoder/ms-marco-MiniLM-L-6-v2'),
+  RERANKER_TIMEOUT_MS: z.coerce.number().int().min(500).max(120000).default(5000),
+  RERANKER_TOP_N: z.coerce.number().int().min(1).max(100).default(10),
+  // ---------------------------------------------------------------------------
   // Multi-repo code indexing (backend/src/repos/). Repositories are
   // registered per-tenant via the admin API; the indexer clones git_url (or
   // reads local_path), chunks text files, and embeds them with the shared

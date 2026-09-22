@@ -202,6 +202,16 @@ export const retrievalQueryDuration = metricsRegistry.register(
 );
 
 /**
+ * Cross-encoder reranker fallbacks. Every fallback returns the hybrid order
+ * unchanged: retrieval must never hard-fail because the reranker endpoint is
+ * down. `reason`: not_configured | not_allowed | timeout | http_error |
+ * invalid_response.
+ */
+export const rerankerFallbacksTotal = metricsRegistry.register(
+  new Counter('reranker_fallbacks_total', 'Total reranker requests that fell back to hybrid order.', ['reason'])
+);
+
+/**
  * Ingestion jobs. `outcome`: enqueued | processed | failed | quarantined.
  * Duration is recorded for terminal outcomes (processed/failed/quarantined).
  */
@@ -258,6 +268,20 @@ export function recordRetrieval(outcome: RetrievalOutcome, durationSeconds: numb
   safe(() => {
     retrievalQueriesTotal.inc({ outcome });
     retrievalQueryDuration.observe({}, durationSeconds);
+  });
+}
+
+export type RerankerFallbackReason =
+  | 'not_configured'
+  | 'not_allowed'
+  | 'timeout'
+  | 'http_error'
+  | 'invalid_response';
+
+/** Record a fail-open reranker fallback. Metrics must never break a request. */
+export function recordRerankerFallback(reason: RerankerFallbackReason): void {
+  safe(() => {
+    rerankerFallbacksTotal.inc({ reason });
   });
 }
 
