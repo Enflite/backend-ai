@@ -202,7 +202,11 @@ describe('context integrity (charter §4.1)', () => {
 // --- Route wiring: the chat route builds the charter prompt per turn and ---
 // --- hands it to the gateway, which pins it at index 0.                 ---
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { getDbMock, tenantOpMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  return { getDbMock, tenantOpMock };
+});
 const { listApprovedModelsForUser, getApprovedModelForUser } = vi.hoisted(() => ({
   listApprovedModelsForUser: vi.fn(),
   getApprovedModelForUser: vi.fn(),
@@ -225,7 +229,7 @@ const { currentAuth } = vi.hoisted(() => ({
 }));
 
 const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock }));
 vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
@@ -253,17 +257,65 @@ const testModel = {
   version: '1',
   provider: 'vllm',
   endpoint: 'http://localhost:8000/v1',
-  model_identifier: 'test-model',
+  modelIdentifier: 'test-model',
   status: 'ACTIVE',
-  context_window: 8192,
+  contextWindow: 8192,
   capabilities: {},
-  allowed_classifications: ['PUBLIC', 'INTERNAL'],
+  allowedClassifications: ['PUBLIC', 'INTERNAL'],
   deployment: {},
-  request_timeout_ms: null,
-  max_tokens: null,
+  requestTimeoutMs: null,
+  maxTokens: null,
   temperature: null,
-  fallback_model_id: null,
+  fallbackModelId: null,
 };
+
+// Mock collections registry for chat route tests
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        skip: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      deleteOne: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function mockChatDb() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset();
+    coll.findOne.mockResolvedValue(null);
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    coll.insertOne.mockReset();
+    coll.insertOne.mockResolvedValue({ acknowledged: true });
+    coll.updateOne.mockReset();
+    coll.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+}
 
 async function* textOnly(text: string) {
   yield { type: 'text', content: text };
@@ -272,13 +324,7 @@ async function* textOnly(text: string) {
 describe('chat route system-prompt wiring', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    tenantQuery.mockImplementation(async (_tenantId: string, sql: string) => {
-      if (sql.includes('INSERT INTO conversations')) return { rows: [{ id: 'conv-1' }] };
-      if (sql.includes('FROM messages')) return { rows: [] };
-      if (sql.includes('INSERT INTO messages')) return { rows: [] };
-      if (sql.includes('UPDATE conversations')) return { rows: [] };
-      throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
-    });
+    mockChatDb();
     listApprovedModelsForUser.mockResolvedValue([testModel]);
   resolveCapabilityModel.mockResolvedValue({
     requested: 'chat',
@@ -371,13 +417,7 @@ describe('chat route system-prompt wiring', () => {
 describe('chat route capability resolution', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    tenantQuery.mockImplementation(async (_tenantId: string, sql: string) => {
-      if (sql.includes('INSERT INTO conversations')) return { rows: [{ id: 'conv-1' }] };
-      if (sql.includes('FROM messages')) return { rows: [] };
-      if (sql.includes('INSERT INTO messages')) return { rows: [] };
-      if (sql.includes('UPDATE conversations')) return { rows: [] };
-      throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
-    });
+    mockChatDb();
     listApprovedModelsForUser.mockResolvedValue([testModel]);
   resolveCapabilityModel.mockResolvedValue({
     requested: 'chat',

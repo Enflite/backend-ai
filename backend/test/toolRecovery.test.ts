@@ -108,7 +108,11 @@ describe('runToolCallWithRecovery', () => {
 // --- Route level: a transient tool failure is retried once, then the ---
 // --- sanitized error is fed back so the model can explain gracefully. ---
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { getDbMock, tenantOpMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  return { getDbMock, tenantOpMock };
+});
 const { listApprovedModelsForUser, getApprovedModelForUser } = vi.hoisted(() => ({
   listApprovedModelsForUser: vi.fn(),
   getApprovedModelForUser: vi.fn(),
@@ -136,7 +140,7 @@ const { currentAuth } = vi.hoisted(() => ({
 }));
 
 const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock }));
 vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
@@ -168,17 +172,63 @@ const testModel = {
   version: '1',
   provider: 'vllm',
   endpoint: 'http://localhost:8000/v1',
-  model_identifier: 'test-model',
+  modelIdentifier: 'test-model',
   status: 'ACTIVE',
-  context_window: 8192,
+  contextWindow: 8192,
   capabilities: {},
-  allowed_classifications: ['PUBLIC', 'INTERNAL'],
+  allowedClassifications: ['PUBLIC', 'INTERNAL'],
   deployment: {},
-  request_timeout_ms: null,
-  max_tokens: null,
+  requestTimeoutMs: null,
+  maxTokens: null,
   temperature: null,
-  fallback_model_id: null,
+  fallbackModelId: null,
 };
+
+// Mock collections registry for route-level tests
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true, insertedId: 'new-id' }),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetRouteMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset();
+    coll.findOne.mockResolvedValue(null);
+    coll.insertOne.mockReset();
+    coll.insertOne.mockImplementation(async (doc: any) => ({ acknowledged: true, insertedId: doc._id || 'new-id' }));
+    coll.updateOne.mockReset();
+    coll.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    coll.updateMany.mockReset();
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+  tenantOpMock.mockReset();
+  tenantOpMock.mockImplementation(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+}
 
 async function* textOnly(text: string) {
   yield { type: 'text', content: text };
@@ -190,24 +240,37 @@ describe('chat route tool recovery', () => {
     // otherwise leave unconsumed mockImplementationOnce queues behind for
     // the next test. Implementations are re-applied below.
     vi.resetAllMocks();
-    tenantQuery.mockImplementation(async (_tenantId: string, sql: string) => {
-      if (sql.includes('INSERT INTO conversations')) return { rows: [{ id: 'conv-1' }] };
-      if (sql.includes('FROM messages')) return { rows: [] };
-      if (sql.includes('INSERT INTO tool_executions')) return { rows: [{ id: 'exec-1' }] };
-      if (sql.includes('UPDATE tool_executions')) return { rows: [] };
-      if (sql.includes('INSERT INTO messages')) return { rows: [] };
-      if (sql.includes('UPDATE conversations')) return { rows: [] };
-      throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
-    });
+    resetRouteMocks();
+
+    // Mock the conversation/message collections for chat flow
+    const conversationsColl = getMockCollection('conversations');
+    const messagesColl = getMockCollection('messages');
+    const toolExecColl = getMockCollection('tool_executions');
+
+    // New conversation: insertOne returns the doc's _id
+    conversationsColl.insertOne.mockImplementation(async (doc: any) => ({
+      acknowledged: true,
+      insertedId: doc._id,
+    }));
+    // Messages: empty history
+    messagesColl.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    // Tool executions: return exec-1
+    toolExecColl.insertOne.mockResolvedValue({ acknowledged: true, insertedId: 'exec-1' });
+
     listApprovedModelsForUser.mockResolvedValue([testModel]);
     getApprovedModelForUser.mockResolvedValue(testModel);
-  resolveCapabilityModel.mockResolvedValue({
-    requested: 'chat',
-    resolved: 'chat',
-    model: testModel,
-    fallbackUsed: false,
-    strategy: 'quality',
-  });
+    resolveCapabilityModel.mockResolvedValue({
+      requested: 'chat',
+      resolved: 'chat',
+      model: testModel,
+      fallbackUsed: false,
+      strategy: 'quality',
+    });
     retrieveAuthorizedContext.mockResolvedValue({ context: '', citations: [], results: [] });
     recordAudit.mockResolvedValue(undefined);
   });

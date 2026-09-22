@@ -1,13 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { query, tenantQuery } = vi.hoisted(() => ({ query: vi.fn(), tenantQuery: vi.fn() }));
+const { getDbMock, tenantOpMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  return { getDbMock, tenantOpMock };
+});
 const { ingestDocument } = vi.hoisted(() => ({ ingestDocument: vi.fn() }));
 const { recordAudit, sanitizeReason } = vi.hoisted(() => ({
   recordAudit: vi.fn(),
   sanitizeReason: (reason: unknown) => reason,
 }));
 
-vi.mock('../src/db/pool.js', () => ({ query, tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock }));
 // Keep the real IngestionCanceledError (thrown across the worker boundary) while
 // stubbing the pipeline itself.
 vi.mock('../src/documents/ingestion.js', async (importOriginal) => {
@@ -34,11 +38,12 @@ import {
 
 // ---------------------------------------------------------------------------
 // In-memory fake for document_ingestion_jobs. Understands just enough of the
-// worker's SQL to exercise enqueue/claim/execute/recover paths realistically.
+// worker's MongoDB operations to exercise enqueue/claim/execute/recover paths
+// realistically.
 // ---------------------------------------------------------------------------
 
 interface FakeJob {
-  id: string;
+  _id: string;
   documentId: string;
   tenantId: string;
   requestedBy: string;
@@ -46,228 +51,263 @@ interface FakeJob {
   idempotencyKey: string | null;
   status: string;
   attempts: number;
-  nextAttemptAt: number;
+  nextAttemptAt: Date;
+  lockedAt?: Date;
   cancelRequested: boolean;
   errorCode: string | null;
-  createdAt: number;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
+const ACTIVE_STATUSES = ['PENDING', 'PROCESSING'];
 const isActive = (status: string) => status === 'PENDING' || status === 'PROCESSING';
+
+// Simple MongoDB filter matcher for the operators used in queue.ts
+function matchesFilter(doc: Record<string, any>, filter: Record<string, any>): boolean {
+  for (const [key, condition] of Object.entries(filter)) {
+    if (key === '$or') {
+      if (!Array.isArray(condition) || !condition.some((c) => matchesFilter(doc, c))) return false;
+      continue;
+    }
+    const value = doc[key];
+    if (condition !== null && typeof condition === 'object' && !Array.isArray(condition) && !(condition instanceof Date)) {
+      // Operator object
+      for (const [op, opValue] of Object.entries(condition)) {
+        if (op === '$in') {
+          if (!Array.isArray(opValue) || !opValue.includes(value)) return false;
+        } else if (op === '$nin') {
+          if (Array.isArray(opValue) && opValue.includes(value)) return false;
+        } else if (op === '$lte') {
+          if (!(value <= (opValue as any))) return false;
+        } else if (op === '$lt') {
+          if (!(value < (opValue as any))) return false;
+        } else if (op === '$gte') {
+          if (!(value >= (opValue as any))) return false;
+        } else if (op === '$gt') {
+          if (!(value > (opValue as any))) return false;
+        } else if (op === '$ne') {
+          if (value === opValue) return false;
+        } else {
+          // Unknown operator: treat as equality (should not happen)
+          if (value !== condition) return false;
+        }
+      }
+    } else {
+      // Direct equality (handles Date, string, null, etc.)
+      if (condition instanceof Date && value instanceof Date) {
+        if (condition.getTime() !== value.getTime()) return false;
+      } else if (value !== condition) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function applyUpdate(doc: Record<string, any>, update: Record<string, any>): void {
+  if (update.$set) {
+    for (const [key, value] of Object.entries(update.$set)) {
+      doc[key] = value;
+    }
+  }
+  if (update.$inc) {
+    for (const [key, value] of Object.entries(update.$inc)) {
+      doc[key] = (doc[key] ?? 0) + (value as number);
+    }
+  }
+  if (update.$unset) {
+    for (const key of Object.keys(update.$unset)) {
+      delete doc[key];
+    }
+  }
+  // $setOnInsert is handled by the upsert logic, not here
+}
 
 function createFakeDb() {
   const jobs = new Map<string, FakeJob>();
-  const documentUpdates: Array<{ sql: string; params: unknown[] }> = [];
-  const orphans: Array<{ id: string; owner_id: string }> = [];
+  const documentUpdates: Array<{ filter: unknown; update: unknown }> = [];
+  const orphans: Array<{ _id: string; ownerId: string }> = [];
   const extraTenants: string[] = [];
   let seq = 0;
   let blindFastPathOnce = false;
+  let duplicateKeyOnce = false;
 
-  const seedJob = (overrides: Partial<FakeJob> & { id: string }): FakeJob => {
+  const jobCollectionCalls: Array<{ op: string; filter: unknown; update?: unknown; options?: unknown }> = [];
+
+  const seedJob = (overrides: Partial<FakeJob> & { _id: string }): FakeJob => {
     const job: FakeJob = {
-      documentId: `doc-${overrides.id}`,
+      documentId: `doc-${overrides._id}`,
       tenantId: 't1',
       requestedBy: 'u1',
       requestId: null,
       idempotencyKey: null,
       status: 'PENDING',
       attempts: 0,
-      nextAttemptAt: Date.now(),
+      nextAttemptAt: new Date(),
       cancelRequested: false,
       errorCode: null,
-      createdAt: Date.now() + seq++,
+      createdAt: new Date(Date.now() + seq++),
+      updatedAt: new Date(),
       ...overrides,
     };
-    jobs.set(job.id, job);
+    jobs.set(job._id, job);
     return job;
   };
 
-  query.mockImplementation(async (sql?: string) => {
-    // Vitest teardown may invoke the implementation with no arguments; ignore.
-    const text = typeof sql === 'string' ? sql : '';
-    if (text.includes('SELECT id FROM tenants')) {
-      const ids = [...new Set([...jobs.values()].map((j) => j.tenantId).concat(extraTenants))];
-      return { rows: ids.map((id) => ({ id })), rowCount: ids.length };
-    }
-    return { rows: [], rowCount: 0 };
-  });
-
-  tenantQuery.mockImplementation(async (tenantId?: string, sql?: string, params?: unknown[]) => {
-    const text = typeof sql === 'string' ? sql : '';
-    const p = params ?? [];
-    if (text.includes('INSERT INTO document_ingestion_jobs')) {
-      const [id, documentId, , requestedBy, requestId, idempotencyKey] = p as [
-        string, string, string, string, string | null, string | null,
-      ];
-      if ([...jobs.values()].some((j) => j.documentId === documentId && isActive(j.status))) {
-        return { rows: [], rowCount: 0 }; // ON CONFLICT (document_id) DO NOTHING
+  const jobsCollection = {
+    findOne: vi.fn(async (filter: any, options?: any) => {
+      jobCollectionCalls.push({ op: 'findOne', filter, options });
+      let candidates = [...jobs.values()].filter((j) => matchesFilter(j as any, filter));
+      if (options?.sort) {
+        const [sortKey, sortDir] = Object.entries(options.sort)[0] as [string, number];
+        candidates.sort((a, b) => {
+          const av = (a as any)[sortKey];
+          const bv = (b as any)[sortKey];
+          const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+          return sortDir === -1 ? -cmp : cmp;
+        });
       }
-      if (
-        idempotencyKey &&
-        [...jobs.values()].some(
-          (j) => j.tenantId === tenantId && j.idempotencyKey === idempotencyKey && isActive(j.status)
-        )
-      ) {
-        const err = new Error(
-          'duplicate key value violates unique constraint "idx_ingestion_jobs_idempotency"'
-        ) as Error & { code: string };
-        err.code = '23505';
-        throw err;
-      }
-      const job: FakeJob = {
-        id, documentId, tenantId: tenantId!, requestedBy, requestId: requestId ?? null, idempotencyKey,
-        status: 'PENDING', attempts: 0, nextAttemptAt: Date.now(), cancelRequested: false,
-        errorCode: null, createdAt: Date.now() + seq++,
-      };
-      jobs.set(id, job);
-      return { rows: [{ id }], rowCount: 1 };
-    }
-    if (text.includes('FOR UPDATE SKIP LOCKED')) {
-      const now = Date.now();
-      const candidate = [...jobs.values()]
-        .filter((j) => j.tenantId === tenantId && j.status === 'PENDING' && j.nextAttemptAt <= now)
-        .sort((a, b) => a.createdAt - b.createdAt)[0];
-      if (!candidate) return { rows: [], rowCount: 0 };
-      candidate.status = 'PROCESSING';
-      candidate.attempts += 1;
-      return {
-        rows: [{
-          id: candidate.id, document_id: candidate.documentId, tenant_id: candidate.tenantId,
-          requested_by: candidate.requestedBy, request_id: candidate.requestId, attempts: candidate.attempts,
-        }],
-        rowCount: 1,
-      };
-    }
-    if (text.includes('SELECT cancel_requested')) {
-      const job = jobs.get(p[0] as string);
-      return job ? { rows: [{ cancel_requested: job.cancelRequested }], rowCount: 1 } : { rows: [], rowCount: 0 };
-    }
-    if (text.includes('SELECT requested_by, status, document_id')) {
-      const job = jobs.get(p[0] as string);
-      return job
-        ? { rows: [{ requested_by: job.requestedBy, status: job.status, document_id: job.documentId }], rowCount: 1 }
-        : { rows: [], rowCount: 0 };
-    }
-    if (text.includes('SELECT id FROM document_ingestion_jobs')) {
-      if (text.includes('idempotency_key = $2')) {
-        if (blindFastPathOnce) {
-          blindFastPathOnce = false;
-          return { rows: [], rowCount: 0 }; // simulate the race window
-        }
-        const found = [...jobs.values()]
-          .filter((j) => j.tenantId === tenantId && j.idempotencyKey === (p[1] as string) && isActive(j.status))
-          .sort((a, b) => b.createdAt - a.createdAt)[0];
-        return found ? { rows: [{ id: found.id }], rowCount: 1 } : { rows: [], rowCount: 0 };
-      }
-      if (text.includes('document_id = $2')) {
-        const key = p[2] as string | null;
-        const found = [...jobs.values()]
-          .filter((j) => j.tenantId === tenantId && isActive(j.status) &&
-            (j.documentId === (p[1] as string) || (key != null && j.idempotencyKey === key)))
-          .sort((a, b) => b.createdAt - a.createdAt)[0];
-        return found ? { rows: [{ id: found.id }], rowCount: 1 } : { rows: [], rowCount: 0 };
-      }
-      // Recovery seed: tenants with PENDING work.
-      const anyPending = [...jobs.values()].some((j) => j.tenantId === tenantId && j.status === 'PENDING');
-      return anyPending ? { rows: [{ id: 'seed' }], rowCount: 1 } : { rows: [], rowCount: 0 };
-    }
-    if (text.includes("SET status = 'PENDING', locked_at = NULL")) {
-      // Recovery: reclaim crashed PROCESSING jobs (lock timeout proves the worker is gone).
-      let n = 0;
-      for (const j of jobs.values()) {
-        if (j.tenantId === tenantId && j.status === 'PROCESSING') {
-          j.status = 'PENDING';
-          j.nextAttemptAt = Date.now();
-          n += 1;
-        }
-      }
-      return { rows: [], rowCount: n };
-    }
-    if (text.includes('RETURNING id, document_id') && text.includes('attempts >=')) {
-      // Recovery: quarantine poison jobs.
-      const maxAttempts = p[0] as number;
-      const poisoned = [...jobs.values()].filter(
-        (j) => j.tenantId === tenantId && j.status === 'PENDING' && j.attempts >= maxAttempts
-      );
-      for (const j of poisoned) j.status = 'QUARANTINED';
-      return {
-        rows: poisoned.map((j) => ({
-          id: j.id, document_id: j.documentId, requested_by: j.requestedBy,
-          request_id: j.requestId, error_code: j.errorCode, attempts: j.attempts,
-        })),
-        rowCount: poisoned.length,
-      };
-    }
-    if (text.includes('UPDATE document_ingestion_jobs')) {
-      const job = jobs.get(p[0] as string);
-      if (text.includes("SET status = 'SUCCEEDED'")) {
-        if (job) job.status = 'SUCCEEDED';
-        return { rows: [], rowCount: job ? 1 : 0 };
-      }
-      if (text.includes("SET status = 'CANCELED'")) {
-        if (text.includes('cancel_requested = FALSE')) {
-          // markJobCanceled: unconditional — the worker owns this PROCESSING job.
-          if (job) {
-            job.status = 'CANCELED';
-            job.cancelRequested = false;
-            job.errorCode = p[1] as string;
+      const found = candidates[0];
+      if (!found) return null;
+      // Apply projection if specified
+      if (options?.projection) {
+        const projected: any = { _id: found._id };
+        for (const key of Object.keys(options.projection)) {
+          if (options.projection[key] && key in found) {
+            projected[key] = (found as any)[key];
           }
-          return { rows: [], rowCount: job ? 1 : 0 };
         }
-        // Route cancel: only a PENDING job flips to CANCELED.
-        if (job && job.status === 'PENDING') {
-          job.status = 'CANCELED';
-          job.errorCode = p[1] as string;
-          return { rows: [], rowCount: 1 };
+        return projected;
+      }
+      return { ...found };
+    }),
+    find: vi.fn((filter: any, options?: any) => {
+      jobCollectionCalls.push({ op: 'find', filter, options });
+      const candidates = [...jobs.values()].filter((j) => matchesFilter(j as any, filter));
+      return {
+        toArray: vi.fn(async () => {
+          if (options?.projection) {
+            return candidates.map((j) => {
+              const projected: any = { _id: j._id };
+              for (const key of Object.keys(options.projection)) {
+                if (options.projection[key] && key in j) {
+                  projected[key] = (j as any)[key];
+                }
+              }
+              return projected;
+            });
+          }
+          return candidates.map((j) => ({ ...j }));
+        }),
+        limit: vi.fn().mockReturnThis(),
+        sort: vi.fn().mockReturnThis(),
+      };
+    }),
+    updateOne: vi.fn(async (filter: any, update: any, options?: any) => {
+      jobCollectionCalls.push({ op: 'updateOne', filter, update, options });
+      const found = [...jobs.values()].find((j) => matchesFilter(j as any, filter));
+      if (found) {
+        applyUpdate(found as any, update);
+        (found as any).updatedAt = new Date();
+        return { acknowledged: true, matchedCount: 1, modifiedCount: 1, upsertedCount: 0 };
+      }
+      if (options?.upsert && update.$setOnInsert) {
+        // Check for duplicate key on idempotency (simulates partial unique index)
+        if (duplicateKeyOnce) {
+          duplicateKeyOnce = false;
+          const err = new Error('duplicate key error') as Error & { code: number };
+          err.code = 11000;
+          throw err;
         }
-        return { rows: [], rowCount: 0 };
+        const newDoc = { ...update.$setOnInsert } as FakeJob;
+        jobs.set(newDoc._id, newDoc);
+        return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 1, upsertedId: newDoc._id };
       }
-      if (text.includes("SET status = 'QUARANTINED'")) {
-        if (job) {
-          job.status = 'QUARANTINED';
-          job.errorCode = p[1] as string;
+      return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 0 };
+    }),
+    updateMany: vi.fn(async (filter: any, update: any, _options?: any) => {
+      jobCollectionCalls.push({ op: 'updateMany', filter, update });
+      let count = 0;
+      for (const job of jobs.values()) {
+        if (matchesFilter(job as any, filter)) {
+          applyUpdate(job as any, update);
+          (job as any).updatedAt = new Date();
+          count += 1;
         }
-        return { rows: [], rowCount: job ? 1 : 0 };
       }
-      if (text.includes('next_attempt_at = $3')) {
-        if (job) {
-          job.status = 'PENDING';
-          job.errorCode = p[1] as string;
-          job.nextAttemptAt = Date.parse(p[2] as string);
-        }
-        return { rows: [], rowCount: job ? 1 : 0 };
+      return { acknowledged: true, matchedCount: count, modifiedCount: count };
+    }),
+    findOneAndUpdate: vi.fn(async (filter: any, update: any, options?: any) => {
+      jobCollectionCalls.push({ op: 'findOneAndUpdate', filter, update, options });
+      let candidates = [...jobs.values()].filter((j) => matchesFilter(j as any, filter));
+      if (options?.sort) {
+        const [sortKey, sortDir] = Object.entries(options.sort)[0] as [string, number];
+        candidates.sort((a, b) => {
+          const av = (a as any)[sortKey];
+          const bv = (b as any)[sortKey];
+          const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+          return sortDir === -1 ? -cmp : cmp;
+        });
       }
-      if (text.includes('SET cancel_requested = TRUE')) {
-        if (job) job.cancelRequested = true;
-        return { rows: [], rowCount: job ? 1 : 0 };
+      const found = candidates[0];
+      if (!found) return null;
+      applyUpdate(found as any, update);
+      (found as any).updatedAt = new Date();
+      if (options?.returnDocument === 'after') {
+        return { ...found };
       }
-      if (text.includes('attempts = 0')) {
-        // Admin requeue.
-        if (job && (job.status === 'QUARANTINED' || job.status === 'FAILED')) {
-          job.status = 'PENDING';
-          job.attempts = 0;
-          job.cancelRequested = false;
-          job.errorCode = null;
-          job.nextAttemptAt = Date.now();
-          return { rows: [{ id: job.id, document_id: job.documentId }], rowCount: 1 };
-        }
-        return { rows: [], rowCount: 0 };
+      return { ...found }; // Simplified: always return after
+    }),
+  };
+
+  const documentsCollection = {
+    updateOne: vi.fn(async (filter: any, update: any, _options?: any) => {
+      documentUpdates.push({ filter, update });
+      return { acknowledged: true, matchedCount: 1, modifiedCount: 1 };
+    }),
+    find: vi.fn((filter: any, _options?: any) => {
+      // Orphan healing: return orphans matching the filter
+      const batch = orphans.splice(0, 20);
+      return {
+        toArray: vi.fn(async () => batch),
+        limit: vi.fn().mockReturnThis(),
+      };
+    }),
+  };
+
+  const tenantsCollection = {
+    find: vi.fn((_filter: any, _options?: any) => {
+      const ids = [...new Set([...jobs.values()].map((j) => j.tenantId).concat(extraTenants))];
+      return {
+        toArray: vi.fn(async () => ids.map((id) => ({ _id: id }))),
+      };
+    }),
+  };
+
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => {
+      if (name === 'document_ingestion_jobs') return jobsCollection;
+      if (name === 'documents') return documentsCollection;
+      if (name === 'tenants') return tenantsCollection;
+      throw new Error(`unexpected collection: ${name}`);
+    },
+  }));
+
+  // For the blind fast-path test: simulate the race where findOne misses
+  // but the upsert hits a duplicate key
+  const simulateIdempotencyRace = () => {
+    blindFastPathOnce = true;
+    // Override findOne to miss once for idempotency lookups
+    const originalFindOne = jobsCollection.findOne.getMockImplementation();
+    jobsCollection.findOne.mockImplementationOnce(async (filter: any, options?: any) => {
+      if (filter.idempotencyKey && blindFastPathOnce) {
+        blindFastPathOnce = false;
+        duplicateKeyOnce = true; // Next upsert will hit duplicate key
+        return null;
       }
-      if (text.includes("error_code = 'POISON_MESSAGE'")) {
-        if (job) job.errorCode = 'POISON_MESSAGE';
-        return { rows: [], rowCount: job ? 1 : 0 };
-      }
-      return { rows: [], rowCount: 0 };
-    }
-    if (text.includes('UPDATE documents SET')) {
-      documentUpdates.push({ sql: text, params: p });
-      return { rows: [], rowCount: 1 };
-    }
-    if (text.includes('FROM documents d')) {
-      const batch = orphans.splice(0, p[1] as number);
-      return { rows: batch, rowCount: batch.length };
-    }
-    throw new Error(`fakeDb: unexpected SQL: ${text.slice(0, 160)}`);
-  });
+      return originalFindOne!(filter, options);
+    });
+  };
 
   return {
     jobs,
@@ -275,11 +315,12 @@ function createFakeDb() {
     orphans,
     extraTenants,
     seedJob,
+    jobCollectionCalls,
     setCancelRequested: (id: string, value = true) => {
       const job = jobs.get(id);
       if (job) job.cancelRequested = value;
     },
-    blindFastPathOnce: () => { blindFastPathOnce = true; },
+    blindFastPathOnce: simulateIdempotencyRace,
   };
 }
 
@@ -297,8 +338,8 @@ function failureWithCode(code: string): Error {
 
 beforeEach(async () => {
   await stopIngestionWorkers();
-  query.mockReset();
-  tenantQuery.mockReset();
+  getDbMock.mockReset();
+  tenantOpMock.mockClear();
   ingestDocument.mockReset();
   recordAudit.mockReset();
   recordAudit.mockResolvedValue(undefined);
@@ -380,11 +421,9 @@ describe('enqueueIngestion', () => {
     await waitFor(() => db.jobs.get(first)?.status === 'PROCESSING');
     const second = await enqueueIngestion({ documentId: 'doc-2', tenantId: 't1', requestedBy: 'u1', idempotencyKey: 'key-1' });
     expect(second).toBe(first);
-    const inserts = tenantQuery.mock.calls.filter(([, sql]) =>
-      (sql as string).includes('INSERT INTO document_ingestion_jobs')
-    );
-    expect(inserts).toHaveLength(1);
-    expect(inserts[0]![2]).toContain('key-1');
+    const upserts = db.jobCollectionCalls.filter((c) => c.op === 'updateOne' && (c.options as any)?.upsert);
+    expect(upserts).toHaveLength(1);
+    expect((upserts[0]!.update as any).$setOnInsert.idempotencyKey).toBe('key-1');
     release('READY');
     await waitFor(() => db.jobs.get(first)?.status === 'SUCCEEDED');
   });
@@ -395,8 +434,8 @@ describe('enqueueIngestion', () => {
     ingestDocument.mockImplementation(() => new Promise<'READY'>((resolve) => { release = resolve; }));
     const winner = await enqueueIngestion({ documentId: 'doc-w', tenantId: 't1', requestedBy: 'u1', idempotencyKey: 'k' });
     await waitFor(() => db.jobs.get(winner)?.status === 'PROCESSING');
-    // Simulate the race window: the fast-path lookup misses, then the INSERT
-    // hits the partial unique index (23505) because the winner committed first.
+    // Simulate the race window: the fast-path lookup misses, then the upsert
+    // hits a duplicate key (11000) because the winner committed first.
     db.blindFastPathOnce();
     const racer = await enqueueIngestion({ documentId: 'doc-r', tenantId: 't1', requestedBy: 'u1', idempotencyKey: 'k' });
     expect(racer).toBe(winner);
@@ -443,8 +482,8 @@ describe('job failure handling', () => {
     });
     const job = db.jobs.get(jobId)!;
     expect(job.errorCode).toBe('EMBEDDING_TIMEOUT');
-    expect(job.nextAttemptAt).toBeGreaterThan(Date.now());
-    expect(job.nextAttemptAt).toBeLessThanOrEqual(Date.now() + 900000);
+    expect(job.nextAttemptAt.getTime()).toBeGreaterThan(Date.now());
+    expect(job.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now() + 900000);
     const failed = recordAudit.mock.calls.find((call) => call[0].action === 'DOCUMENT_INGESTION_FAILED');
     expect(failed?.[0]).toMatchObject({ reason: 'EMBEDDING_TIMEOUT', success: false });
     expect(failed?.[0].metadata).toMatchObject({ attempts: 1, maxAttempts: 5 });
@@ -469,7 +508,7 @@ describe('job failure handling', () => {
     });
     expect(quarantined?.[0].metadata).toMatchObject({ attempts: 5, maxAttempts: 5 });
     expect(
-      db.documentUpdates.some((u) => u.sql.includes("status = 'QUARANTINED'"))
+      db.documentUpdates.some((u) => (u.update as any).$set?.status === 'QUARANTINED')
     ).toBe(true);
   });
 
@@ -492,13 +531,13 @@ describe('job failure handling', () => {
 describe('cancelIngestionJob', () => {
   it('cancels a PENDING job immediately with audit and document update', async () => {
     const db = createFakeDb();
-    db.seedJob({ id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PENDING' });
+    db.seedJob({ _id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PENDING' });
     const result = await cancelIngestionJob({ jobId: 'job-1', tenantId: 't1', userId: 'u1', isAdmin: false });
     expect(result).toEqual({ status: 'canceled' });
     expect(db.jobs.get('job-1')!.status).toBe('CANCELED');
     expect(
       db.documentUpdates.some(
-        (u) => u.sql.includes("status = 'FAILED'") && u.sql.includes("error_code = 'INGESTION_CANCELED'")
+        (u) => (u.update as any).$set?.status === 'FAILED' && (u.update as any).$set?.errorCode === 'INGESTION_CANCELED'
       )
     ).toBe(true);
     expect(recordAudit).toHaveBeenCalledWith(
@@ -508,7 +547,7 @@ describe('cancelIngestionJob', () => {
 
   it('rejects cancel from a non-owner non-admin', async () => {
     const db = createFakeDb();
-    db.seedJob({ id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PENDING' });
+    db.seedJob({ _id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PENDING' });
     await expect(
       cancelIngestionJob({ jobId: 'job-1', tenantId: 't1', userId: 'intruder', isAdmin: false })
     ).rejects.toMatchObject({ code: 'JOB_CANCEL_FORBIDDEN' });
@@ -517,14 +556,14 @@ describe('cancelIngestionJob', () => {
 
   it("lets an admin cancel another user's job", async () => {
     const db = createFakeDb();
-    db.seedJob({ id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PENDING' });
+    db.seedJob({ _id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PENDING' });
     const result = await cancelIngestionJob({ jobId: 'job-1', tenantId: 't1', userId: 'admin', isAdmin: true });
     expect(result).toEqual({ status: 'canceled' });
   });
 
   it('marks cancel-requested on a PROCESSING job for the worker to pick up', async () => {
     const db = createFakeDb();
-    db.seedJob({ id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PROCESSING' });
+    db.seedJob({ _id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PROCESSING' });
     const result = await cancelIngestionJob({ jobId: 'job-1', tenantId: 't1', userId: 'u1', isAdmin: false });
     expect(result).toEqual({ status: 'cancel-requested' });
     expect(db.jobs.get('job-1')!.cancelRequested).toBe(true);
@@ -536,7 +575,7 @@ describe('cancelIngestionJob', () => {
 
   it('reports already-terminal jobs without error', async () => {
     const db = createFakeDb();
-    db.seedJob({ id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'SUCCEEDED' });
+    db.seedJob({ _id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'SUCCEEDED' });
     const result = await cancelIngestionJob({ jobId: 'job-1', tenantId: 't1', userId: 'u1', isAdmin: false });
     expect(result).toEqual({ status: 'already-terminal', jobStatus: 'SUCCEEDED' });
   });
@@ -581,7 +620,7 @@ describe('requeueIngestionJob', () => {
   it('requeues a QUARANTINED job with attempts and backoff reset', async () => {
     const db = createFakeDb();
     db.seedJob({
-      id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1',
+      _id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1',
       status: 'QUARANTINED', attempts: 5, errorCode: 'EMBEDDING_TIMEOUT',
     });
     const result = await requeueIngestionJob({ jobId: 'job-1', tenantId: 't1', userId: 'admin-1' });
@@ -590,7 +629,7 @@ describe('requeueIngestionJob', () => {
     expect(job.status).toBe('PENDING');
     expect(job.attempts).toBe(0);
     expect(job.errorCode).toBeNull();
-    expect(job.nextAttemptAt).toBeLessThanOrEqual(Date.now());
+    expect(job.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now());
     expect(recordAudit).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'DOCUMENT_INGESTION_REQUEUED', userId: 'admin-1', resourceId: 'doc-1' })
     );
@@ -598,7 +637,7 @@ describe('requeueIngestionJob', () => {
 
   it('404s when the job is not quarantined or failed', async () => {
     const db = createFakeDb();
-    db.seedJob({ id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PENDING' });
+    db.seedJob({ _id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PENDING' });
     await expect(
       requeueIngestionJob({ jobId: 'job-1', tenantId: 't1', userId: 'admin-1' })
     ).rejects.toMatchObject({ code: 'JOB_NOT_FOUND' });
@@ -663,8 +702,9 @@ describe('recoverIngestionJobs', () => {
   it('reclaims crashed PROCESSING jobs to PENDING, preserving a cancel request', async () => {
     const db = createFakeDb();
     db.seedJob({
-      id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1',
+      _id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1',
       status: 'PROCESSING', attempts: 1, cancelRequested: true,
+      lockedAt: new Date(Date.now() - 10 * 60 * 1000), // stale lock proves the worker is gone
     });
     await recoverIngestionJobs({ startWorkers: false });
     const job = db.jobs.get('job-1')!;
@@ -675,11 +715,11 @@ describe('recoverIngestionJobs', () => {
   it('quarantines poison jobs that exhausted attempts, preserving the error code', async () => {
     const db = createFakeDb();
     db.seedJob({
-      id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1',
+      _id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1',
       status: 'PENDING', attempts: 5, errorCode: 'EMBEDDING_TIMEOUT',
     });
     db.seedJob({
-      id: 'job-2', documentId: 'doc-2', tenantId: 't1', requestedBy: 'u1',
+      _id: 'job-2', documentId: 'doc-2', tenantId: 't1', requestedBy: 'u1',
       status: 'PENDING', attempts: 2, errorCode: 'EMBEDDING_TIMEOUT',
     });
     await recoverIngestionJobs({ startWorkers: false });
@@ -691,20 +731,18 @@ describe('recoverIngestionJobs', () => {
     );
     expect(quarantined?.[0]).toMatchObject({ reason: 'EMBEDDING_TIMEOUT', resourceId: 'doc-1' });
     expect(quarantined?.[0].metadata).toMatchObject({ recoveredAtStartup: true });
-    expect(db.documentUpdates.some((u) => u.sql.includes("status = 'QUARANTINED'"))).toBe(true);
+    expect(db.documentUpdates.some((u) => (u.update as any).$set?.status === 'QUARANTINED')).toBe(true);
   });
 
   it('heals orphaned documents across batches', async () => {
     const db = createFakeDb();
     db.extraTenants.push('t1');
-    for (let i = 0; i < 20; i++) db.orphans.push({ id: `d${i}`, owner_id: 'u1' });
+    for (let i = 0; i < 20; i++) db.orphans.push({ _id: `d${i}`, ownerId: 'u1' });
     await recoverIngestionJobs({ startWorkers: false });
-    // First batch is full (20 = batch size, so a second SELECT runs), the
+    // First batch is full (20 = batch size, so a second find runs), the
     // second comes back empty and the loop stops.
     expect(db.orphans).toHaveLength(0);
-    const enqueues = tenantQuery.mock.calls.filter(([, sql]) =>
-      (sql as string).includes('INSERT INTO document_ingestion_jobs')
-    );
+    const enqueues = db.jobCollectionCalls.filter((c) => c.op === 'updateOne' && (c.options as any)?.upsert);
     expect(enqueues).toHaveLength(20);
     await waitFor(() => db.jobs.size === 20);
   });
@@ -728,7 +766,8 @@ describe('sweepStaleIngestionWork', () => {
   it('reclaims a stranded PROCESSING job and reseeds the fairness set', async () => {
     const db = createFakeDb();
     db.seedJob({
-      id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PROCESSING',
+      _id: 'job-1', documentId: 'doc-1', tenantId: 't1', requestedBy: 'u1', status: 'PROCESSING',
+      lockedAt: new Date(Date.now() - 10 * 60 * 1000), // stale lock proves the worker is gone
     });
     await sweepStaleIngestionWork({ force: true });
     expect(db.jobs.get('job-1')!.status).toBe('PENDING');
@@ -740,17 +779,17 @@ describe('sweepStaleIngestionWork', () => {
 
   it('is throttled to once per minute unless forced', async () => {
     createFakeDb();
-    const callsBefore = query.mock.calls.length;
+    const callsBefore = getDbMock.mock.calls.length;
     await sweepStaleIngestionWork({ force: true });
-    const afterFirst = query.mock.calls.length;
+    const afterFirst = getDbMock.mock.calls.length;
     expect(afterFirst).toBeGreaterThan(callsBefore);
     await sweepStaleIngestionWork();
-    expect(query.mock.calls.length).toBe(afterFirst);
+    expect(getDbMock.mock.calls.length).toBe(afterFirst);
   });
 
   it('never throws on a database blip', async () => {
     createFakeDb();
-    query.mockRejectedValueOnce(new Error('connection reset'));
+    getDbMock.mockRejectedValueOnce(new Error('connection reset'));
     await expect(sweepStaleIngestionWork({ force: true })).resolves.toBeUndefined();
   });
 });

@@ -1,8 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { tenantQuery, withTenant } = vi.hoisted(() => ({ tenantQuery: vi.fn(), withTenant: vi.fn() }));
+const { getDbMock, tenantOpMock, withTenantTxMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  const withTenantTxMock = vi.fn(async (_tenantId: string, cb: (s: any, db: any) => Promise<any>) => cb({}, await getDbMock()));
+  return { getDbMock, tenantOpMock, withTenantTxMock };
+});
 const embedMock = vi.hoisted(() => vi.fn());
-vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenant }));
+vi.mock('../src/db/mongo.js', () => ({
+  getDb: getDbMock,
+  tenantOp: tenantOpMock,
+  withTenantTx: withTenantTxMock,
+}));
 // Mock only the embedding provider; chunkText/chunkSections/ingestDocument
 // stay real so chunking quality is exercised, not the mock.
 vi.mock('../src/documents/ingestion.js', async (importOriginal) => {
@@ -35,25 +44,115 @@ const auth: AuthContext = {
 
 const DEFAULT_RERANKER = { name: 'hybrid-score', rerank: (_q: string, chunks: AuthorizedChunk[]) => chunks };
 
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      insertMany: vi.fn().mockResolvedValue({ acknowledged: true }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      aggregate: vi.fn().mockImplementation(() => ({ toArray: vi.fn().mockResolvedValue([]) })),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetDbMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset(); coll.findOne.mockResolvedValue(null);
+    coll.findOneAndUpdate.mockReset(); coll.findOneAndUpdate.mockResolvedValue(null);
+    coll.updateOne.mockReset(); coll.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    coll.aggregate.mockReset();
+    coll.aggregate.mockImplementation(() => ({ toArray: vi.fn().mockResolvedValue([]) }));
+    coll.insertMany.mockReset(); coll.insertMany.mockResolvedValue({ acknowledged: true });
+    coll.deleteMany.mockReset(); coll.deleteMany.mockResolvedValue({ deletedCount: 0 });
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+  tenantOpMock.mockReset();
+  tenantOpMock.mockImplementation(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+}
+
+// Chunk row in the MongoDB aggregate output shape (what $vectorSearch returns
+// after the $project stage).
 function chunkRow(overrides: Record<string, unknown> = {}) {
   return {
-    chunk_id: 'c1', content: 'alpha beta gamma delta', page: null, section: null,
-    source_location: null, document_id: 'd1', filename: 'doc.md', vector_score: '0.9',
+    _id: 'c1',
+    content: 'alpha beta gamma delta',
+    documentId: 'd1',
+    classification: 'INTERNAL',
+    page: null,
+    section: null,
+    sourceLocation: null,
+    vectorScore: 0.9,
     ...overrides,
   };
 }
 
-const seenSql: string[] = [];
-const seenParams: unknown[][] = [];
-const fakeClient = {
-  query: vi.fn(async (sql: string, params?: unknown[]) => {
-    if (typeof sql === 'string' && sql.startsWith('SET LOCAL')) return { rows: [] };
-    seenSql.push(sql);
-    seenParams.push(params ?? []);
-    return { rows: fakeClient.rows };
-  }),
-  rows: [] as Record<string, unknown>[],
-};
+// Authorized document in the shape resolveAuthorizedDocuments returns.
+function authorizedDoc(overrides: Record<string, unknown> = {}) {
+  return {
+    _id: 'd1',
+    filename: 'doc.md',
+    classification: 'INTERNAL',
+    ...overrides,
+  };
+}
+
+const seenPipelines: any[][] = [];
+const seenDocFilters: any[] = [];
+let chunkRows: Record<string, unknown>[] = [];
+let docRows: Record<string, unknown>[] = [];
+
+function setupRetrievalMocks() {
+  const docsColl = getMockCollection('documents');
+  docsColl.find.mockImplementation((filter: any) => {
+    seenDocFilters.push(filter);
+    return {
+      toArray: vi.fn().mockResolvedValue(docRows),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    };
+  });
+  const chunksColl = getMockCollection('document_chunks');
+  chunksColl.aggregate.mockImplementation((pipeline: any[]) => {
+    seenPipelines.push(pipeline);
+    return { toArray: vi.fn().mockResolvedValue(chunkRows) };
+  });
+}
+
+function setupIngestionMocks() {
+  const documentsColl = getMockCollection('documents');
+  documentsColl.findOneAndUpdate.mockResolvedValue({
+    _id: 'd1',
+    tenantId: 't1',
+    objectKey: 'k',
+    mimeType: 'text/plain',
+    classification: 'INTERNAL',
+  });
+}
 
 const ORIGINAL_CONFIG = {
   RAG_DIVERSITY_LAMBDA: config.RAG_DIVERSITY_LAMBDA,
@@ -64,16 +163,14 @@ const ORIGINAL_CONFIG = {
 };
 
 beforeEach(() => {
-  tenantQuery.mockReset();
-  withTenant.mockReset();
+  resetDbMocks();
   embedMock.mockReset();
   embedMock.mockResolvedValue([[0.1, 0.2]]);
-  seenSql.length = 0;
-  seenParams.length = 0;
-  fakeClient.rows = [];
-  fakeClient.query.mockClear();
-  withTenant.mockImplementation(async (_tenantId: string, callback: (client: unknown) => Promise<unknown>) =>
-    callback(fakeClient));
+  seenPipelines.length = 0;
+  seenDocFilters.length = 0;
+  chunkRows = [];
+  docRows = [];
+  setupRetrievalMocks();
   setReranker(DEFAULT_RERANKER);
 });
 
@@ -92,7 +189,8 @@ describe('query normalization', () => {
   });
 
   it('embeds the normalized query, not the raw text', async () => {
-    fakeClient.rows = [chunkRow()];
+    chunkRows = [chunkRow()];
+    docRows = [authorizedDoc()];
     await retrieveAuthorizedContext(auth, '  hello   world  ');
     expect(embedMock).toHaveBeenCalledTimes(1);
     expect(embedMock.mock.calls[0]![0]).toEqual(['hello world']);
@@ -144,10 +242,14 @@ describe('MMR-lite diversity selection', () => {
     // Query 'query' shares no terms with the contents, so the hybrid score is
     // exactly 0.85 * vector_score: a1 = 0.8075, a2 = 0.799, b1 = 0.68.
     config.RAG_DIVERSITY_LAMBDA = 0.5;
-    fakeClient.rows = [
-      chunkRow({ chunk_id: 'a1', document_id: 'dA', vector_score: '0.95' }),
-      chunkRow({ chunk_id: 'a2', document_id: 'dA', vector_score: '0.94' }),
-      chunkRow({ chunk_id: 'b1', document_id: 'dB', vector_score: '0.80' }),
+    chunkRows = [
+      chunkRow({ _id: 'a1', documentId: 'dA', vectorScore: 0.95 }),
+      chunkRow({ _id: 'a2', documentId: 'dA', vectorScore: 0.94 }),
+      chunkRow({ _id: 'b1', documentId: 'dB', vectorScore: 0.80 }),
+    ];
+    docRows = [
+      authorizedDoc({ _id: 'dA', filename: 'dA.md' }),
+      authorizedDoc({ _id: 'dB', filename: 'dB.md' }),
     ];
     const result = await retrieveAuthorizedContext(auth, 'query', undefined, 2);
     expect(result.results.map((r) => r.chunkId)).toEqual(['a1', 'b1']);
@@ -155,10 +257,14 @@ describe('MMR-lite diversity selection', () => {
 
   it('with diversity disabled the full path keeps strict top-K order', async () => {
     config.RAG_DIVERSITY_LAMBDA = 0;
-    fakeClient.rows = [
-      chunkRow({ chunk_id: 'a1', document_id: 'dA', vector_score: '0.95' }),
-      chunkRow({ chunk_id: 'a2', document_id: 'dA', vector_score: '0.94' }),
-      chunkRow({ chunk_id: 'b1', document_id: 'dB', vector_score: '0.80' }),
+    chunkRows = [
+      chunkRow({ _id: 'a1', documentId: 'dA', vectorScore: 0.95 }),
+      chunkRow({ _id: 'a2', documentId: 'dA', vectorScore: 0.94 }),
+      chunkRow({ _id: 'b1', documentId: 'dB', vectorScore: 0.80 }),
+    ];
+    docRows = [
+      authorizedDoc({ _id: 'dA', filename: 'dA.md' }),
+      authorizedDoc({ _id: 'dB', filename: 'dB.md' }),
     ];
     const result = await retrieveAuthorizedContext(auth, 'query', undefined, 2);
     expect(result.results.map((r) => r.chunkId)).toEqual(['a1', 'a2']);
@@ -167,9 +273,13 @@ describe('MMR-lite diversity selection', () => {
 
 describe('citation grounding', () => {
   it('every citation in the context string references a returned chunkId', async () => {
-    fakeClient.rows = [
-      chunkRow({ chunk_id: 'c1', document_id: 'd1', filename: 'a.md', page: 3, section: 'Intro' }),
-      chunkRow({ chunk_id: 'c2', document_id: 'd2', filename: 'b.md' }),
+    chunkRows = [
+      chunkRow({ _id: 'c1', documentId: 'd1', page: 3, section: 'Intro' }),
+      chunkRow({ _id: 'c2', documentId: 'd2' }),
+    ];
+    docRows = [
+      authorizedDoc({ _id: 'd1', filename: 'a.md' }),
+      authorizedDoc({ _id: 'd2', filename: 'b.md' }),
     ];
     const result = await retrieveAuthorizedContext(auth, 'query');
     const returnedIds = new Set(result.results.map((r) => r.chunkId));
@@ -181,8 +291,9 @@ describe('citation grounding', () => {
     }
   });
 
-  it('citations carry the DB row provenance (page/section) and are never synthesized', async () => {
-    fakeClient.rows = [chunkRow({ chunk_id: 'c9', page: 12, section: 'Appendix', source_location: 'page:12' })];
+  it('citations carry the chunk provenance (page/section) and are never synthesized', async () => {
+    chunkRows = [chunkRow({ _id: 'c9', page: 12, section: 'Appendix', sourceLocation: 'page:12' })];
+    docRows = [authorizedDoc()];
     const result = await retrieveAuthorizedContext(auth, 'query');
     expect(result.citations[0]).toMatchObject({
       documentId: 'd1', documentName: 'doc.md', chunkId: 'c9', page: 12, section: 'Appendix',
@@ -191,16 +302,21 @@ describe('citation grounding', () => {
 });
 
 describe('UNKNOWN classification fail-closed', () => {
-  it('excludes UNKNOWN chunks in SQL, not just the JS allow-list', async () => {
-    fakeClient.rows = [];
+  it('excludes UNKNOWN chunks in the $vectorSearch filter, not just the JS allow-list', async () => {
+    chunkRows = [];
+    // One authorized doc so retrieval reaches the $vectorSearch stage.
+    docRows = [authorizedDoc()];
     await retrieveAuthorizedContext(auth, 'query');
-    const sql = seenSql.find((s) => s.includes('FROM document_chunks'))!;
-    expect(sql).toContain("dc.classification <> 'UNKNOWN'");
-    expect(sql).toContain("d.classification <> 'UNKNOWN'");
-    // Belt and suspenders: the classification allow-list parameter must not
-    // contain UNKNOWN either.
-    const params = seenParams[seenSql.indexOf(sql)]!;
-    expect(params[1]).not.toContain('UNKNOWN');
+    // The $vectorSearch.filter carries the classification allow-list: UNKNOWN
+    // is excluded at the database level, not just in JS.
+    expect(seenPipelines).toHaveLength(1);
+    const filter = seenPipelines[0]![0].$vectorSearch.filter;
+    expect(filter.classification.$in).not.toContain('UNKNOWN');
+    expect(filter.classification.$in).toEqual(['PUBLIC', 'INTERNAL']);
+    // Belt and suspenders: the documents query allow-list must not contain
+    // UNKNOWN either.
+    const docsFilter = seenDocFilters[0];
+    expect(docsFilter.classification.$in).not.toContain('UNKNOWN');
   });
 });
 
@@ -208,10 +324,11 @@ describe('threshold applies after the reranker', () => {
   it('a reranker-downgraded chunk is filtered by the threshold', async () => {
     // Hybrid scores: a = 0.765, b = 0.68 — both above the 0.5 threshold.
     config.RAG_SIMILARITY_THRESHOLD = 0.5;
-    fakeClient.rows = [
-      chunkRow({ chunk_id: 'a', vector_score: '0.9' }),
-      chunkRow({ chunk_id: 'b', vector_score: '0.8' }),
+    chunkRows = [
+      chunkRow({ _id: 'a', vectorScore: 0.9 }),
+      chunkRow({ _id: 'b', vectorScore: 0.8 }),
     ];
+    docRows = [authorizedDoc()];
     setReranker({
       name: 'downgrader',
       rerank: (_q, chunks) => chunks.map((c) => (c.chunkId === 'a' ? { ...c, score: 0.1 } : c)),
@@ -225,7 +342,8 @@ describe('threshold applies after the reranker', () => {
 
   it('a reranker-upgraded chunk still passes when above the threshold', async () => {
     config.RAG_SIMILARITY_THRESHOLD = 0.5;
-    fakeClient.rows = [chunkRow({ chunk_id: 'a', vector_score: '0.9' })];
+    chunkRows = [chunkRow({ _id: 'a', vectorScore: 0.9 })];
+    docRows = [authorizedDoc()];
     setReranker({
       name: 'upgrader',
       rerank: (_q, chunks) => chunks.map((c) => ({ ...c, score: 0.99 })),
@@ -269,13 +387,7 @@ describe('chunking quality', () => {
     config.MAX_DOCUMENT_CHUNKS = 4;
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      tenantQuery.mockImplementation(async (...args: unknown[]) => {
-        const sql = (args[1] ?? '') as string;
-        if (sql.includes("UPDATE documents SET status = 'PROCESSING'")) {
-          return { rows: [{ object_key: 'k', mime_type: 'text/plain', classification: 'INTERNAL' }], rowCount: 1 };
-        }
-        return { rows: [], rowCount: 0 };
-      });
+      setupIngestionMocks();
       // 4000 chars / 1600-char chunks with 200 overlap -> 3 chunks, which is
       // >= 75% of the temporary cap of 4 but below it.
       const deps = {
@@ -299,13 +411,7 @@ describe('chunking quality', () => {
 
   it('still fails closed above the chunk cap', async () => {
     config.MAX_DOCUMENT_CHUNKS = 2;
-    tenantQuery.mockImplementation(async (...args: unknown[]) => {
-      const sql = (args[1] ?? '') as string;
-      if (sql.includes("UPDATE documents SET status = 'PROCESSING'")) {
-        return { rows: [{ object_key: 'k', mime_type: 'text/plain', classification: 'INTERNAL' }], rowCount: 1 };
-      }
-      return { rows: [], rowCount: 0 };
-    });
+    setupIngestionMocks();
     const deps = {
       storage: { get: vi.fn().mockResolvedValue(new TextEncoder().encode('x')) },
       scanner: { scan: vi.fn().mockResolvedValue({ verdict: 'CLEAN', scanner: 'test' }) },
@@ -321,7 +427,8 @@ describe('chunking quality', () => {
 
 describe('empty retrieval', () => {
   it('returns the empty shape (not an error) when no rows match', async () => {
-    fakeClient.rows = [];
+    chunkRows = [];
+    docRows = [];
     const result = await retrieveAuthorizedContext(auth, 'query');
     expect(result).toEqual({ context: '', citations: [], results: [] });
   });

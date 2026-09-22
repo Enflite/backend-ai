@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Errors } from '../src/errors.js';
 
-const { tenantQuery, withTenantTx } = vi.hoisted(() => ({
-  tenantQuery: vi.fn(),
-  withTenantTx: vi.fn(async (_tenantId: string, fn: (client: any) => Promise<unknown>) => fn({ query: tenantQuery })),
-}));
+const { getDbMock, tenantOpMock, withTenantTxMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  const withTenantTxMock = vi.fn(async (_tenantId: string, cb: (s: any, db: any) => Promise<any>) => cb({}, await getDbMock()));
+  return { getDbMock, tenantOpMock, withTenantTxMock };
+});
 const { recordAudit, recordAuditInTx } = vi.hoisted(() => ({
   recordAudit: vi.fn(),
   recordAuditInTx: vi.fn(),
@@ -14,7 +16,11 @@ const { listApprovedModelsForUser } = vi.hoisted(() => ({
   listApprovedModelsForUser: vi.fn(),
 }));
 
-vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenantTx }));
+vi.mock('../src/db/mongo.js', () => ({
+  getDb: getDbMock,
+  tenantOp: tenantOpMock,
+  withTenantTx: withTenantTxMock,
+}));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit, recordAuditInTx }));
 vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({
   resolveServingModel,
@@ -33,8 +39,60 @@ import {
 const chatModel = { id: 'chat-1', name: 'Chat Model', contextWindow: 8192, version: '1.0' };
 const sytelineModel = { id: 'sy-1', name: 'SyteLine Model', contextWindow: 32768, version: '2.0' };
 
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1, upsertedCount: 0 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true, insertedId: 'mock-id' }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetDbMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset();
+    coll.findOne.mockResolvedValue(null);
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    coll.findOneAndUpdate.mockReset();
+    coll.findOneAndUpdate.mockResolvedValue(null);
+    coll.updateOne.mockReset();
+    coll.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1, upsertedCount: 0 });
+    coll.updateMany.mockReset();
+    coll.updateMany.mockResolvedValue({ acknowledged: true, modifiedCount: 0 });
+    coll.insertOne.mockReset();
+    coll.insertOne.mockResolvedValue({ acknowledged: true, insertedId: 'mock-id' });
+    coll.deleteMany.mockReset();
+    coll.deleteMany.mockResolvedValue({ deletedCount: 0 });
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  resetDbMocks();
   recordAudit.mockResolvedValue(undefined);
   recordAuditInTx.mockResolvedValue(undefined);
 });
@@ -53,21 +111,42 @@ describe('normalizeCapability', () => {
 
 describe('routing policy storage', () => {
   it('returns the platform default when the tenant never configured one', async () => {
-    tenantQuery.mockResolvedValue({ rows: [] });
+    getMockCollection('model_routing_policies').findOne.mockResolvedValue(null);
     const policy = await getRoutingPolicy('t1', 'coding');
     expect(policy).toMatchObject({ tenantId: 't1', capability: 'coding', strategy: 'quality', fallbackToChat: true });
   });
   it('lists configured policies', async () => {
-    tenantQuery.mockResolvedValue({
-      rows: [{ tenantId: 't1', capability: 'syteline', strategy: 'latency', fallbackToChat: false }],
-    });
+    const policiesColl = getMockCollection('model_routing_policies');
+    policiesColl.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([
+        { _id: 'p1', tenantId: 't1', capability: 'syteline', strategy: 'latency', fallbackToChat: false, updatedBy: 'admin-1', updatedAt: new Date() },
+      ]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
     expect(await listRoutingPolicies('t1')).toHaveLength(1);
   });
   it('upserts a policy and audits it', async () => {
-    const row = { tenantId: 't1', capability: 'syteline', strategy: 'latency', fallbackToChat: false };
-    tenantQuery.mockResolvedValue({ rows: [row] });
+    const policiesColl = getMockCollection('model_routing_policies');
+    const doc = {
+      _id: 'p1',
+      tenantId: 't1',
+      capability: 'syteline',
+      strategy: 'latency',
+      fallbackToChat: false,
+      updatedBy: 'admin-1',
+      updatedAt: new Date(),
+    };
+    policiesColl.findOne.mockResolvedValue(doc);
     const saved = await setRoutingPolicy('t1', 'syteline', { strategy: 'latency', fallbackToChat: false }, 'admin-1', 'req-1');
-    expect(saved).toEqual(row);
+    expect(saved).toMatchObject({ tenantId: 't1', capability: 'syteline', strategy: 'latency', fallbackToChat: false });
+    // The upsert ran with upsert:true inside the tenant transaction.
+    expect(policiesColl.updateOne).toHaveBeenCalledWith(
+      { tenantId: 't1', capability: 'syteline' },
+      expect.objectContaining({ $set: expect.objectContaining({ strategy: 'latency', fallbackToChat: false }) }),
+      expect.objectContaining({ upsert: true })
+    );
     expect(recordAuditInTx).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -89,7 +168,7 @@ describe('routing policy storage', () => {
 
 describe('resolveCapabilityModel', () => {
   function mockDefaultPolicy() {
-    tenantQuery.mockResolvedValue({ rows: [] }); // getRoutingPolicy -> platform default
+    getMockCollection('model_routing_policies').findOne.mockResolvedValue(null); // getRoutingPolicy -> platform default
   }
 
   it('serves chat exactly as before: chat default, then first approved', async () => {
@@ -153,8 +232,14 @@ describe('resolveCapabilityModel', () => {
   });
 
   it('fails closed when the tenant disabled fallback', async () => {
-    tenantQuery.mockResolvedValue({
-      rows: [{ tenantId: 't1', capability: 'coding', strategy: 'cost', fallbackToChat: false }],
+    getMockCollection('model_routing_policies').findOne.mockResolvedValue({
+      _id: 'p1',
+      tenantId: 't1',
+      capability: 'coding',
+      strategy: 'cost',
+      fallbackToChat: false,
+      updatedBy: 'admin-1',
+      updatedAt: new Date(),
     });
     resolveServingModel.mockResolvedValue(null);
     await expect(
@@ -184,6 +269,6 @@ describe('resolveCapabilityModel', () => {
     await expect(
       resolveCapabilityModel({ tenantId: 't1', userId: 'u1', roleId: 'r1', capability: 'nope' })
     ).rejects.toThrowError(expect.objectContaining({ code: 'INVALID_CAPABILITY' }));
-    expect(tenantQuery).not.toHaveBeenCalled();
+    expect(getMockCollection('model_routing_policies').findOne).not.toHaveBeenCalled();
   });
 });

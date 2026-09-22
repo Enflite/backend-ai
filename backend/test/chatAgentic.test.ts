@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { getDbMock, tenantOpMock, withTenantTxMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  const withTenantTxMock = vi.fn(async (_tenantId: string, cb: (s: any, db: any) => Promise<any>) => cb({}, await getDbMock()));
+  return { getDbMock, tenantOpMock, withTenantTxMock };
+});
 const { listApprovedModelsForUser, getApprovedModelForUser } = vi.hoisted(() => ({
   listApprovedModelsForUser: vi.fn(),
   getApprovedModelForUser: vi.fn(),
@@ -24,7 +29,11 @@ const { currentAuth } = vi.hoisted(() => ({
 }));
 
 const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({
+  getDb: getDbMock,
+  tenantOp: tenantOpMock,
+  withTenantTx: withTenantTxMock,
+}));
 vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
@@ -47,7 +56,57 @@ import { chatRoutes } from '../src/chat/routes.js';
 import { toolRegistry } from '../src/tools/gateway.js';
 
 const sytelineTool = toolRegistry.find((tool) => tool.name === 'syteline.getItem')!;
-const originalExecute = sytelineTool.execute;
+
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true, insertedId: 'mock-id' }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetDbMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset();
+    coll.findOne.mockResolvedValue(null);
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    coll.findOneAndUpdate.mockReset();
+    coll.findOneAndUpdate.mockResolvedValue(null);
+    coll.updateOne.mockReset();
+    coll.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    coll.updateMany.mockReset();
+    coll.updateMany.mockResolvedValue({ acknowledged: true, modifiedCount: 0 });
+    coll.insertOne.mockReset();
+    coll.insertOne.mockResolvedValue({ acknowledged: true, insertedId: 'mock-id' });
+    coll.deleteMany.mockReset();
+    coll.deleteMany.mockResolvedValue({ deletedCount: 0 });
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+}
 
 const testModel = {
   id: 'm1',
@@ -55,29 +114,17 @@ const testModel = {
   version: '1',
   provider: 'vllm',
   endpoint: 'http://localhost:8000/v1',
-  model_identifier: 'test-model',
+  modelIdentifier: 'test-model',
   status: 'ACTIVE',
-  context_window: 8192,
+  contextWindow: 8192,
   capabilities: {},
-  allowed_classifications: ['PUBLIC', 'INTERNAL'],
+  allowedClassifications: ['PUBLIC', 'INTERNAL'],
   deployment: {},
-  request_timeout_ms: null,
-  max_tokens: null,
+  requestTimeoutMs: null,
+  maxTokens: null,
   temperature: null,
-  fallback_model_id: null,
+  fallbackModelId: null,
 };
-
-function mockDb() {
-  tenantQuery.mockImplementation(async (tenantId: string, sql: string) => {
-    if (sql.includes('INSERT INTO conversations')) return { rows: [{ id: 'conv-1' }] };
-    if (sql.includes('FROM messages')) return { rows: [] };
-    if (sql.includes('INSERT INTO tool_executions')) return { rows: [{ id: 'exec-1' }] };
-    if (sql.includes('UPDATE tool_executions')) return { rows: [] };
-    if (sql.includes('INSERT INTO messages')) return { rows: [] };
-    if (sql.includes('UPDATE conversations')) return { rows: [] };
-    throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
-  });
-}
 
 async function* textOnly(text: string) {
   yield { type: 'text', content: text };
@@ -89,8 +136,8 @@ function ssePayload(res: { rawPayload: Buffer }): string[] {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetDbMocks();
   sytelineTool.execute = vi.fn(async () => ({ item: 'ABC', price: 42 })) as never;
-  mockDb();
   listApprovedModelsForUser.mockResolvedValue([testModel]);
   resolveCapabilityModel.mockResolvedValue({
     requested: 'chat',

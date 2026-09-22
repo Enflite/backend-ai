@@ -5,7 +5,7 @@
  * oversized/malformed input rejection, session expiry, per-message SSE auth,
  * and data-exfiltration resistance.
  *
- * Deterministic and DB-free: tenantQuery/recordAudit are mocked (the REAL
+ * Deterministic and DB-free: getDb/tenantOp are mocked (the REAL
  * sanitizeReason is kept so secret-redaction is asserted end-to-end), and the
  * real requireAuth middleware is exercised via doUnmock for the session and
  * SSE tests.
@@ -18,12 +18,16 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { getDbMock, tenantOpMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  return { getDbMock, tenantOpMock };
+});
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 const { currentAuth } = vi.hoisted(() => ({ currentAuth: {} as Record<string, unknown> }));
 
 const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock }));
 vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 // Keep the real sanitizeReason: secret-redaction assertions below run against
 // production code, with only the DB write itself mocked out.
@@ -54,6 +58,56 @@ import type { AuthContext, Permission } from '../src/authz/permissions.js';
 const sytelineTool = toolRegistry.find((tool) => tool.name === 'syteline.getItem')!;
 const originalExecute = sytelineTool.execute;
 
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        skip: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      deleteOne: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    for (const m of ['findOne', 'findOneAndUpdate', 'updateOne', 'updateMany', 'insertOne', 'deleteOne', 'deleteMany']) {
+      coll[m].mockReset();
+      if (m === 'findOne') coll[m].mockResolvedValue(null);
+      else if (m === 'findOneAndUpdate') coll[m].mockResolvedValue(null);
+      else if (m === 'updateOne' || m === 'updateMany') coll[m].mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+      else if (m === 'insertOne') coll[m].mockResolvedValue({ acknowledged: true });
+      else if (m === 'deleteOne' || m === 'deleteMany') coll[m].mockResolvedValue({ deletedCount: 1 });
+    }
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+}
+
 function as(auth: AuthContext) {
   for (const key of Object.keys(currentAuth)) delete currentAuth[key];
   Object.assign(currentAuth, auth);
@@ -72,12 +126,9 @@ const toolAuth = () =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetMocks();
   sytelineTool.execute = vi.fn(originalExecute);
   recordAudit.mockResolvedValue(undefined);
-  tenantQuery.mockImplementation(async (_tenant: string, sql: string) => {
-    if (sql.includes('INSERT INTO tool_executions')) return { rows: [{ id: 'exec-1' }], rowCount: 1 };
-    return { rows: [], rowCount: 0 };
-  });
   as(authFor(USER_A1, TENANT_A));
 });
 
@@ -97,10 +148,11 @@ describe('denied tool calls are always audited', () => {
       tenantId: TENANT_A, userId: USER_A1, action: 'TOOL_EXECUTION',
       tool: 'syteline.getItem', success: false,
     }));
-    const deniedInsert = tenantQuery.mock.calls.find(([, sql]) =>
-      (sql as string).includes('INSERT INTO tool_executions'));
+    const toolExecColl = getMockCollection('tool_executions');
+    const deniedInsert = toolExecColl.insertOne.mock.calls.find(([doc]: any[]) =>
+      doc.toolName === 'syteline.getItem' && doc.authorizationDecision === 'DENIED');
     expect(deniedInsert).toBeDefined();
-    expect(deniedInsert![1] as string).toContain("'DENIED'");
+    expect(deniedInsert![0].status).toBe('DENIED');
   });
 
   it('audits malformed tool arguments and never runs the tool', async () => {
@@ -257,7 +309,7 @@ describe('prompt-injection resistance', () => {
     });
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe('CLASSIFICATION_DENIED');
-    expect(tenantQuery).not.toHaveBeenCalled();
+    expect(getMockCollection('tool_executions').insertOne).not.toHaveBeenCalled();
     await app.close();
   });
 
@@ -318,7 +370,7 @@ describe('oversized and malformed input rejection', () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('INVALID_REQUEST');
-    expect(tenantQuery).not.toHaveBeenCalled();
+    expect(getMockCollection('tool_executions').insertOne).not.toHaveBeenCalled();
     await app.close();
   });
 
@@ -362,14 +414,14 @@ describe('oversized and malformed input rejection', () => {
       payload: { conversationId: 'not-a-uuid', content: 'hello' },
     });
     expect(res.statusCode).toBe(400);
-    expect(tenantQuery).not.toHaveBeenCalled();
+    expect(getMockCollection('tool_executions').insertOne).not.toHaveBeenCalled();
     await app.close();
   });
 });
 
 describe('session expiry and invalid tokens (real requireAuth)', () => {
   // The file-level mock is bypassed here: the REAL middleware is loaded via
-  // doUnmock, still backed by the mocked pool and audit modules.
+  // doUnmock, still backed by the mocked mongo module.
   let realRequireAuth: (req: any, reply: any) => Promise<void>;
 
   function fakeReq(authorization?: string) {
@@ -380,17 +432,60 @@ describe('session expiry and invalid tokens (real requireAuth)', () => {
     } as any;
   }
 
+  function mockValidSession(auth: AuthContext, permissions: string[] = ['tool:use']) {
+    const sessionsColl = getMockCollection('sessions');
+    const usersColl = getMockCollection('users');
+    const membershipsColl = getMockCollection('memberships');
+    const rolesColl = getMockCollection('roles');
+    const rolePermsColl = getMockCollection('role_permissions');
+    const permsColl = getMockCollection('permissions');
+
+    sessionsColl.findOne.mockImplementation(async (filter: any) => {
+      if (filter._id === auth.sessionId) {
+        return {
+          _id: auth.sessionId,
+          userId: auth.userId,
+          tenantId: auth.tenantId,
+          revokedAt: null,
+          expiresAt: new Date(Date.now() + 3600000),
+        };
+      }
+      return null;
+    });
+    usersColl.findOne.mockResolvedValue({ _id: auth.userId, isActive: true });
+    membershipsColl.findOne.mockResolvedValue({ userId: auth.userId, tenantId: auth.tenantId, roleId: 'r1' });
+    rolesColl.findOne.mockResolvedValue({ _id: 'r1', name: 'User' });
+    rolePermsColl.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue(permissions.map((_, i) => ({ _id: `rp-${i}`, permissionId: `p-${i}` }))),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    permsColl.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue(permissions.map((name, i) => ({ _id: `p-${i}`, name }))),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+  }
+
   beforeEach(async () => {
     vi.resetModules();
     vi.doUnmock('../src/auth/middleware.js');
+    // Re-apply the mongo mock after resetModules
+    vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock }));
     realRequireAuth = (await import('../src/auth/middleware.js')).requireAuth;
+    // Re-establish the mock implementations after module reset
+    resetMocks();
   });
 
   it('rejects a missing token without touching the database', async () => {
     await expect(realRequireAuth(fakeReq(), {} as any)).rejects.toMatchObject({
       statusCode: 401, code: 'MISSING_TOKEN',
     });
-    expect(tenantQuery).not.toHaveBeenCalled();
+    expect(getMockCollection('sessions').findOne).not.toHaveBeenCalled();
   });
 
   it('rejects a garbage token and audits the failure without echoing the token', async () => {
@@ -409,7 +504,8 @@ describe('session expiry and invalid tokens (real requireAuth)', () => {
   it('rejects a validly-signed token whose session is expired or revoked', async () => {
     const { signToken } = await import('../src/auth/jwt.js');
     const token = await signToken(toolAuth());
-    tenantQuery.mockResolvedValue({ rows: [], rowCount: 0 });
+    // Session lookup returns null (expired/revoked)
+    getMockCollection('sessions').findOne.mockResolvedValue(null);
     await expect(realRequireAuth(fakeReq(`Bearer ${token}`), {} as any)).rejects.toMatchObject({
       statusCode: 401, code: 'INVALID_TOKEN',
     });
@@ -438,10 +534,7 @@ describe('session expiry and invalid tokens (real requireAuth)', () => {
     const { signToken } = await import('../src/auth/jwt.js');
     const auth = toolAuth();
     const token = await signToken(auth);
-    tenantQuery.mockResolvedValue({
-      rows: [{ role_id: 'r1', role_name: 'User', permissions: ['tool:use'] }],
-      rowCount: 1,
-    });
+    mockValidSession(auth, ['tool:use']);
     const req = fakeReq(`Bearer ${token}`);
     await realRequireAuth(req, {} as any);
     expect(req.auth.userId).toBe(auth.userId);
@@ -457,13 +550,18 @@ describe('SSE/chat auth on every message', () => {
     vi.doUnmock('../src/authz/middleware.js');
     vi.doUnmock('../src/chat/routes.js');
     vi.doUnmock('../src/server.js');
+    // Re-apply the mongo mock after resetModules
+    vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock }));
     const { chatRoutes: realChatRoutes } = await import('../src/chat/routes.js');
     // Fresh serverErrorHandler from the same module generation, so its
     // `instanceof AppError` check matches the re-imported route's errors.
     const { serverErrorHandler: freshErrorHandler } = await import('../src/server.js');
     const app = Fastify();
     app.setErrorHandler(freshErrorHandler);
-    tenantQuery.mockImplementation(() => {
+    getDbMock.mockImplementation(() => {
+      throw new Error('database must not be touched before authentication');
+    });
+    tenantOpMock.mockImplementation(() => {
       throw new Error('database must not be touched before authentication');
     });
     await app.register(realChatRoutes);
@@ -473,7 +571,7 @@ describe('SSE/chat auth on every message', () => {
     });
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe('MISSING_TOKEN');
-    expect(tenantQuery).not.toHaveBeenCalled();
+    expect(getDbMock).not.toHaveBeenCalled();
     await app.close();
   });
 });
@@ -535,7 +633,13 @@ describe('data-exfiltration resistance', () => {
     expect(res.json().error.code).toBe('TOOL_NOT_FOUND');
     const body = JSON.stringify(res.json());
     expect(body).not.toContain(process.env.JWT_SECRET!);
-    expect(body).not.toContain(process.env.DATABASE_URL!);
+    // The secret is now MONGODB_URI (DATABASE_URL was the PostgreSQL-era variable).
+    if (process.env.DATABASE_URL) {
+      expect(body).not.toContain(process.env.DATABASE_URL);
+    }
+    if (process.env.MONGODB_URI) {
+      expect(body).not.toContain(process.env.MONGODB_URI);
+    }
     await app.close();
   });
 });

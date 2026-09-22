@@ -4,8 +4,15 @@ import { assertClassificationAllowed } from '../src/authz/classification.js';
 import { resolveUploadClassification } from '../src/documents/uploadClassification.js';
 import { AppError } from '../src/errors.js';
 
-const { tenantQuery, recordedPermissions } = vi.hoisted(() => ({
-  tenantQuery: vi.fn(),
+const { tenantOpMock, recordedPermissions } = vi.hoisted(() => ({
+  tenantOpMock: vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => {
+    const db = {
+      collection: () => ({
+        insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      }),
+    };
+    return cb(db);
+  }),
   recordedPermissions: [] as string[],
 }));
 const { listApprovedModelsForUser, getApprovedModelForUser } = vi.hoisted(() => ({
@@ -14,7 +21,7 @@ const { listApprovedModelsForUser, getApprovedModelForUser } = vi.hoisted(() => 
 }));
 
 const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({ tenantOp: tenantOpMock }));
 vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({ resolveServingModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({
   listApprovedModelsForUser,
@@ -133,7 +140,7 @@ describe('resolveUploadClassification', () => {
 
 describe('conversation classification enforcement (route level)', () => {
   beforeEach(() => {
-    tenantQuery.mockReset();
+    tenantOpMock.mockClear();
     listApprovedModelsForUser.mockReset();
     getApprovedModelForUser.mockReset();
   });
@@ -153,14 +160,13 @@ describe('conversation classification enforcement (route level)', () => {
     });
     expect(response.statusCode).toBe(403);
     expect(response.json().code).toBe('CLASSIFICATION_DENIED');
-    expect(tenantQuery).not.toHaveBeenCalled();
+    expect(tenantOpMock).not.toHaveBeenCalled();
     await app.close();
   });
 
   it('creates a conversation at the caller clearance', async () => {
     listApprovedModelsForUser.mockResolvedValue([{ id: 'm1' }]);
     getApprovedModelForUser.mockResolvedValue({ id: 'm1', name: 'model' });
-    tenantQuery.mockResolvedValue({ rows: [{ id: 'c1', classification: 'PUBLIC' }] });
     const app = await buildConversationsApp();
     const response = await app.inject({
       method: 'POST',
@@ -168,6 +174,7 @@ describe('conversation classification enforcement (route level)', () => {
       payload: { title: 'x', classification: 'PUBLIC' },
     });
     expect(response.statusCode).toBe(201);
+    expect(tenantOpMock).toHaveBeenCalled();
     await app.close();
   });
 
@@ -189,7 +196,7 @@ describe('conversation classification enforcement (route level)', () => {
 
 describe('chat classification enforcement (route level)', () => {
   beforeEach(() => {
-    tenantQuery.mockReset();
+    tenantOpMock.mockClear();
     listApprovedModelsForUser.mockReset();
     getApprovedModelForUser.mockReset();
   });

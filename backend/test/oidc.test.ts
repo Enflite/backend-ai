@@ -1,10 +1,10 @@
 /**
  * oidc.test.ts — OIDC enterprise login unit tests (Phase 5b).
  *
- * Mocks: IdP HTTP endpoints (stubbed global fetch), the DB pool (in-memory
- * rows), and JWKS (a real RSA key pair signed through jose, served by the
- * stubbed fetch). Env is stubbed before the modules under test are
- * dynamically imported, since config is read at module load.
+ * Mocks: IdP HTTP endpoints (stubbed global fetch), the MongoDB collections
+ * (in-memory mocks), and JWKS (a real RSA key pair signed through jose,
+ * served by the stubbed fetch). Env is stubbed before the modules under test
+ * are dynamically imported, since config is read at module load.
  *
  * VALIDATED IN CI with mocks; a live IdP round-trip
  * REQUIRES REAL PRODUCTION INFRASTRUCTURE.
@@ -17,8 +17,65 @@ import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 // NOTE: config is imported dynamically (after vi.stubEnv in beforeAll) — a
 // static import would read the environment before the stubs are installed.
 
-const queryMock = vi.fn();
-vi.mock('../src/db/pool.js', () => ({ query: queryMock, tenantQuery: queryMock }));
+const { getDbMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  return { getDbMock };
+});
+vi.mock('../src/db/mongo.js', () => ({
+  getDb: getDbMock,
+  tenantOp: vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock())),
+  withTenantTx: vi.fn(async (_tenantId: string, cb: (s: any, db: any) => Promise<any>) => cb({}, await getDbMock())),
+  withTx: vi.fn(async (cb: (s: any, db: any) => Promise<any>) => cb({}, await getDbMock())),
+}));
+
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      findOneAndDelete: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      deleteOne: vi.fn().mockResolvedValue({ deletedCount: 1 }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetDbMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset().mockResolvedValue(null);
+    coll.findOneAndDelete.mockReset().mockResolvedValue(null);
+    coll.findOneAndUpdate.mockReset().mockResolvedValue(null);
+    coll.updateOne.mockReset().mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    coll.updateMany.mockReset().mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    coll.insertOne.mockReset().mockResolvedValue({ acknowledged: true });
+    coll.deleteOne.mockReset().mockResolvedValue({ deletedCount: 1 });
+    coll.deleteMany.mockReset().mockResolvedValue({ deletedCount: 0 });
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+}
 
 type OidcModule = typeof import('../src/auth/oidc.js');
 let oidc: OidcModule;
@@ -47,7 +104,7 @@ let fetchMock: ReturnType<typeof vi.fn>;
 let jwksJson: { keys: unknown[] };
 
 beforeEach(() => {
-  queryMock.mockReset();
+  resetDbMocks();
   oidc.clearOidcDiscoveryCache();
   fetchMock = vi.fn(async (url: unknown) => {
     const target = String(url);
@@ -127,7 +184,7 @@ describe('oidc discovery', () => {
 
 describe('oidc authorize URL', () => {
   it('stores the verifier and nonce and builds a PKCE authorization URL', async () => {
-    queryMock.mockResolvedValue({ rows: [] });
+    const authRequests = getMockCollection('oidc_auth_requests');
     const { url, state } = await oidc.buildAuthorizeUrl();
     const parsed = new URL(url);
     expect(parsed.origin + parsed.pathname).toBe(DISCOVERY.authorization_endpoint);
@@ -138,26 +195,38 @@ describe('oidc authorize URL', () => {
     expect(parsed.searchParams.get('code_challenge')).toHaveLength(43);
     const nonce = parsed.searchParams.get('nonce');
     expect(nonce).toHaveLength(43);
-    // Verifier + nonce persisted keyed by state (INSERT), plus the expiry
-    // cleanup (DELETE).
-    expect(queryMock).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO oidc_auth_requests'), expect.any(Array));
-    const insertArgs = queryMock.mock.calls.find((call) => String(call[0]).includes('INSERT'))![1] as string[];
-    expect(insertArgs[0]).toBe(state);
-    expect(insertArgs[1]).toHaveLength(43);
-    expect(insertArgs[2]).toBe(nonce);
+    // Verifier + nonce persisted keyed by state (insertOne), plus the expiry
+    // cleanup (deleteMany).
+    expect(authRequests.deleteMany).toHaveBeenCalledWith({ expiresAt: { $lt: expect.any(Date) } });
+    expect(authRequests.insertOne).toHaveBeenCalledWith(expect.objectContaining({
+      _id: state,
+      codeVerifier: expect.any(String),
+      nonce,
+    }));
+    const insertDoc = authRequests.insertOne.mock.calls[0][0];
+    expect(insertDoc.codeVerifier).toHaveLength(43);
+    expect(insertDoc.nonce).toBe(nonce);
   });
 });
 
 describe('oidc state consumption', () => {
   it('is single-use: a consumed state returns the verifier and nonce, then nothing', async () => {
-    queryMock.mockResolvedValueOnce({ rows: [{ code_verifier: 'v', nonce: 'n' }] });
+    const authRequests = getMockCollection('oidc_auth_requests');
+    authRequests.findOneAndDelete
+      .mockResolvedValueOnce({ _id: 'state-1', codeVerifier: 'v', nonce: 'n' })
+      .mockResolvedValueOnce(null);
     expect(await oidc.consumeOidcState('state-1')).toEqual({ verifier: 'v', nonce: 'n' });
-    queryMock.mockResolvedValueOnce({ rows: [] });
+    // Atomic single-use: findOneAndDelete filters by _id and unexpired.
+    expect(authRequests.findOneAndDelete).toHaveBeenCalledWith({
+      _id: 'state-1',
+      expiresAt: { $gt: expect.any(Date) },
+    });
     expect(await oidc.consumeOidcState('state-1')).toBeNull();
   });
 
   it('rejects a state row with no nonce (pre-nonce issuance)', async () => {
-    queryMock.mockResolvedValueOnce({ rows: [{ code_verifier: 'v', nonce: null }] });
+    const authRequests = getMockCollection('oidc_auth_requests');
+    authRequests.findOneAndDelete.mockResolvedValueOnce({ _id: 'state-old', codeVerifier: 'v', nonce: null });
     expect(await oidc.consumeOidcState('state-old')).toBeNull();
   });
 });
@@ -372,17 +441,22 @@ describe('oidc role mapping', () => {
   });
 
   it('resolves a mapped group to a real internal role', async () => {
-    queryMock.mockResolvedValueOnce({ rows: [{ name: 'Admin' }] });
+    const roles = getMockCollection('roles');
+    roles.findOne.mockResolvedValueOnce({ _id: 'role-1', name: 'Admin' });
     expect(await oidc.resolveInternalRole(['sso-admins'])).toBe('Admin');
+    // MongoDB: roles.findOne({ name }, { projection: { name: 1 } }).
+    expect(roles.findOne).toHaveBeenCalledWith({ name: 'Admin' }, { projection: { name: 1 } });
   });
 
   it('fails closed when the mapped role does not exist', async () => {
-    queryMock.mockResolvedValueOnce({ rows: [] });
+    const roles = getMockCollection('roles');
+    roles.findOne.mockResolvedValueOnce(null);
     expect(await oidc.resolveInternalRole(['sso-ghosts'])).toBeNull();
   });
 
   it('fails closed for unmapped groups', async () => {
+    const roles = getMockCollection('roles');
     expect(await oidc.resolveInternalRole(['some-other-group'])).toBeNull();
-    expect(queryMock).not.toHaveBeenCalled();
+    expect(roles.findOne).not.toHaveBeenCalled();
   });
 });
