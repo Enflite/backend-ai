@@ -335,15 +335,25 @@ describe('runner with mockChatFn', () => {
 describe('runLlmJudge', () => {
   const llmCase = EVAL_SEED_CORPUS.find((c) => c.id === 'seed-tone-llm-015')!;
   const response = { content: 'a response' };
-  const saved = process.env.EVAL_JUDGE_MODEL;
+  // These tests exercise the real-judge path with a stubbed transport, so
+  // they run outside CI: CI=true would (correctly) refuse real-judge mode.
+  const savedModel = process.env.EVAL_JUDGE_MODEL;
+  const savedCI = process.env.CI;
+  const savedAllow = process.env.EVAL_JUDGE_ALLOW_CI;
 
   beforeEach(() => {
     delete process.env.EVAL_JUDGE_MODEL;
+    delete process.env.CI;
+    delete process.env.EVAL_JUDGE_ALLOW_CI;
     vi.restoreAllMocks();
   });
   afterEach(() => {
-    if (saved === undefined) delete process.env.EVAL_JUDGE_MODEL;
-    else process.env.EVAL_JUDGE_MODEL = saved;
+    if (savedModel === undefined) delete process.env.EVAL_JUDGE_MODEL;
+    else process.env.EVAL_JUDGE_MODEL = savedModel;
+    if (savedCI === undefined) delete process.env.CI;
+    else process.env.CI = savedCI;
+    if (savedAllow === undefined) delete process.env.EVAL_JUDGE_ALLOW_CI;
+    else process.env.EVAL_JUDGE_ALLOW_CI = savedAllow;
   });
 
   it('SKIPS (never fails) in explicit skip mode, and logs why', async () => {
