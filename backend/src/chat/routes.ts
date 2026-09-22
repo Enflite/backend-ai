@@ -17,6 +17,8 @@ import { buildCacheableSystemPrompt } from '../ai/gateway/prefixCache.js';
 import { detectCapability } from './capabilityDetect.js';
 import { runAgenticLoop, type AgenticLoopSink } from './agenticLoop.js';
 import { assembleCodeContext, normalizeCodeFiles } from './codeContext.js';
+import { listMemories } from '../memory/store.js';
+import { buildUserMemoryInjection } from '../memory/inject.js';
 import { canModelProcess } from '../policy/engine.js';
 import { config } from '../config.js';
 import { createChatConcurrencyLimiter, replyBusy } from '../ai/gateway/limits.js';
@@ -422,6 +424,22 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       // sections after, so vLLM's automatic prefix caching can reuse the
       // head's KV blocks across turns. Same model-visible content as the
       // plain builder — only the ordering guarantee differs.
+      // User memory injection: the caller's remembered facts, classification-
+      // filtered against this turn's request classification (UNKNOWN fails
+      // closed) and secret-scrubbed by buildUserMemoryInjection. Best effort:
+      // a memory lookup failure must never fail the chat turn. This section
+      // is per-user dynamic content, so it belongs in the dynamic tail —
+      // never in the byte-stable static head.
+      let userMemorySection = '';
+      try {
+        const facts = await listMemories(
+          { tenantId: auth.tenantId, userId: auth.userId, clearance: auth.clearance },
+          { limit: 25 }
+        );
+        userMemorySection = buildUserMemoryInjection(facts, classification);
+      } catch (err) {
+        req.log.warn({ err, requestId: req.requestId }, 'user memory lookup failed; continuing without it');
+      }
       const buildTurnSystemPrompt = (modelName: string, modelVersion?: string) =>
         buildCacheableSystemPrompt({
           modelName,
@@ -430,6 +448,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           sytelineToolsAvailable,
           codingMode,
           repoToolsAvailable,
+          userMemory: userMemorySection,
         }).text;
       const chatSystemPrompt = buildTurnSystemPrompt(model.name, model.version);
 

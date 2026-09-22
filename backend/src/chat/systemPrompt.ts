@@ -26,15 +26,23 @@
  * Layout (prompt prefix-cache contract, ADR-011): the byte-stable static
  * head (`buildStaticPromptHead` — identity + charter spec, invariant across
  * models, turns, and capabilities) comes first; the per-turn dynamic tail
- * (serving-model identity, tool guidance, SyteLine pack, coding guidance)
- * follows. vLLM's automatic prefix caching reuses the head's KV blocks
- * across every request.
+ * (serving-model identity, tool guidance, SyteLine pack, coding guidance,
+ * user memory) follows. vLLM's automatic prefix caching reuses the head's
+ * KV blocks across every request.
+ *
+ * The optional `userMemory` section (built by `backend/src/memory/inject.ts`,
+ * passed as a pre-rendered, classification-filtered, secret-scrubbed
+ * string) is appended in the dynamic tail when the chat route injects the
+ * caller's remembered facts. Like RAG context it is explicitly marked
+ * untrusted DATA, never instructions, and it never carries secrets, keys,
+ * tokens, or endpoint details — the scrub in memory/inject.ts is the
+ * enforcement point, not this template.
  */
 
 import { SYTELINE_EXPERT_KNOWLEDGE } from './sytelineExpertKnowledge.js';
 
 /** Version of the default system prompt; bump when the text changes. */
-export const SYSTEM_PROMPT_VERSION = '2.5.0';
+export const SYSTEM_PROMPT_VERSION = '2.6.0';
 
 export interface SystemPromptOptions {
   /**
@@ -76,6 +84,15 @@ export interface SystemPromptOptions {
    * paste files. Defaults to false.
    */
   repoToolsAvailable?: boolean;
+  /**
+   * Pre-rendered USER MEMORY section for this turn, built by
+   * `buildUserMemoryInjection` in `backend/src/memory/inject.ts` (already
+   * classification-filtered, budget-capped, and secret-scrubbed). When
+   * present it is appended as an explicitly untrusted section — DATA,
+   * never instructions. Empty/undefined means no memory section is added.
+   * The raw fact rows are never passed here; only the formatted section.
+   */
+  userMemory?: string;
 }
 
 /**
@@ -210,6 +227,9 @@ function buildDynamicTail(options: SystemPromptOptions): string[] {
     `- ${toolGuidance}`,
     ...(sytelineGuidance ? [sytelineGuidance] : []),
     ...(codingGuidance ? [codingGuidance] : []),
+    // User memory: per-user dynamic content, so it lives in the dynamic
+    // tail — never in the byte-stable static head (prefix-cache contract).
+    ...(options.userMemory && options.userMemory.trim() !== '' ? ['', options.userMemory] : []),
   ];
 }
 
@@ -220,9 +240,11 @@ function buildDynamicTail(options: SystemPromptOptions): string[] {
  * values (tenant IDs, user IDs, conversation contents).
  *
  * Layout (prompt prefix-cache contract): the byte-stable static head
- * (`buildStaticPromptHead`) comes first, then the per-turn dynamic tail.
- * Same sentences as the pre-2.5.0 prompt, reordered so vLLM's automatic
- * prefix caching can share the head across models, turns, and capabilities.
+ * (`buildStaticPromptHead`) comes first, then the per-turn dynamic tail
+ * (serving-model identity, tool guidance, SyteLine pack, coding guidance,
+ * user memory). Same sentences as the pre-2.5.0 prompt, reordered so vLLM's
+ * automatic prefix caching can share the head across models, turns, and
+ * capabilities.
  */
 export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
   return [STATIC_HEAD, buildDynamicTail(options).join('\n')].join('\n\n');

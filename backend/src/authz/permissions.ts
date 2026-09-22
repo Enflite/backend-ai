@@ -43,6 +43,8 @@ export const PERMISSIONS = [
   'audit:read',
   'tenant:manage',
   'retention:manage',
+  'memory:read',
+  'memory:write',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -59,6 +61,8 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'tool:use',
     'syteline:read',
     'repo:read',
+    'memory:read',
+    'memory:write',
   ],
   Admin: PERMISSIONS,
   'Security Admin': [
@@ -79,6 +83,8 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'chat:create',
     'conversation:read',
     'document:read',
+    'memory:read',
+    'memory:write',
   ],
   Developer: [
     'chat:create',
@@ -90,8 +96,10 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'tool:use',
     'syteline:read',
     'repo:read',
+    'memory:read',
+    'memory:write',
   ],
-  'Read Only': ['conversation:read', 'document:read'],
+  'Read Only': ['conversation:read', 'document:read', 'memory:read'],
 };
 
 export interface AuthContext {

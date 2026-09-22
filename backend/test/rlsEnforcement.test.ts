@@ -204,7 +204,7 @@ describe('static: raw query() is never used on tenant tables', () => {
     'conversations', 'messages', 'audit_events', 'sessions', 'model_access',
     'documents', 'document_permissions', 'document_chunks', 'tool_executions',
     'departments', 'security_groups', 'department_memberships',
-    'security_group_memberships', 'document_ingestion_jobs',
+    'security_group_memberships', 'document_ingestion_jobs', 'memory_facts',
   ];
 
   function rawQueryImporters(): string[] {
@@ -348,5 +348,21 @@ describe('static: migrations enforce RLS on every tenant table', () => {
   it('documents why FORCE (not just ENABLE) is required', () => {
     const sql = readFileSync(join(MIGRATIONS, '013_force_rls.sql'), 'utf8');
     expect(sql.toLowerCase()).toContain('owner');
+  });
+
+  it('027_user_memory.sql enables+forces RLS with a tenant_isolation policy', () => {
+    const raw = readFileSync(join(MIGRATIONS, '027_user_memory.sql'), 'utf8');
+    const sql = raw.replaceAll("''", "'");
+    expect(sql).toContain('ALTER TABLE memory_facts ENABLE ROW LEVEL SECURITY');
+    expect(sql).toContain('ALTER TABLE memory_facts FORCE ROW LEVEL SECURITY');
+    expect(sql).toContain('CREATE POLICY tenant_isolation ON memory_facts');
+    expect(sql).toContain("current_setting('app.tenant_id'");
+    // Both the read path (USING) and the write path (WITH CHECK) must be
+    // tenant-bound; a USING-only policy would let a caller write rows for
+    // another tenant.
+    expect(sql).toContain('USING (tenant_id');
+    expect(sql).toContain('WITH CHECK (tenant_id');
+    expect(sql).toContain('CREATE INDEX');
+    expect(sql).toContain('tenant_id, user_id');
   });
 });
