@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 
-const { query, tenantQuery } = vi.hoisted(() => ({ query: vi.fn(), tenantQuery: vi.fn() }));
+const { getDbMock, tenantOpMock, withTenantTxMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  const withTenantTxMock = vi.fn(async (_tenantId: string, cb: (s: any, db: any) => Promise<any>) => cb({}, await getDbMock()));
+  return { getDbMock, tenantOpMock, withTenantTxMock };
+});
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 const { authenticate } = vi.hoisted(() => ({ authenticate: vi.fn() }));
 const { testAuth } = vi.hoisted(() => ({
@@ -19,7 +24,11 @@ const { testAuth } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('../src/db/pool.js', () => ({ query, tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({
+  getDb: getDbMock,
+  tenantOp: tenantOpMock,
+  withTenantTx: withTenantTxMock,
+}));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
 vi.mock('../src/auth/identityProvider.js', () => ({ identityProvider: { authenticate } }));
 vi.mock('../src/auth/middleware.js', () => ({
@@ -34,10 +43,67 @@ import { authRoutes } from '../src/auth/routes.js';
 const TENANT = '22222222-2222-4222-8222-222222222222';
 const USER = '11111111-1111-4111-8111-111111111111';
 
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    const findChain = () => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    });
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => findChain()),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    for (const m of ['findOne', 'findOneAndUpdate', 'updateOne', 'updateMany', 'insertOne', 'deleteMany']) {
+      coll[m].mockReset();
+      if (m === 'findOne') coll[m].mockResolvedValue(null);
+      else if (m === 'findOneAndUpdate') coll[m].mockResolvedValue(null);
+      else if (m === 'updateOne' || m === 'updateMany') coll[m].mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+      else if (m === 'insertOne') coll[m].mockResolvedValue({ acknowledged: true });
+      else if (m === 'deleteMany') coll[m].mockResolvedValue({ deletedCount: 0 });
+    }
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+}
+
+// Helper: check if a filter queries the refresh-token history (via $or)
+function isHistoryQuery(filter: any): boolean {
+  if (!filter || typeof filter !== 'object') return false;
+  if (filter.previousRefreshTokenHashes !== undefined) return true;
+  if (Array.isArray(filter.$or)) {
+    return filter.$or.some((clause: any) => clause.previousRefreshTokenHashes !== undefined);
+  }
+  return false;
+}
+
 async function app() {
   const fastify = Fastify();
   await fastify.register(cookie);
-  // Auth routes install their own error handler expectations; keep default.
   fastify.setErrorHandler((error: any, _req, reply) => {
     const status = error.statusCode ?? 500;
     reply.status(status).send({ code: error.code ?? 'INTERNAL', message: error.message });
@@ -48,18 +114,19 @@ async function app() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetMocks();
   recordAudit.mockResolvedValue(undefined);
-  query.mockResolvedValue({ rows: [], rowCount: 0 });
-  tenantQuery.mockResolvedValue({ rows: [], rowCount: 0 });
   authenticate.mockResolvedValue(null);
 });
 
 describe('login lockout', () => {
   it('returns generic 401 for a locked account (no account-enumeration signal)', async () => {
-    query.mockImplementation(async (_sql: string) => ({
-      rows: [{ id: USER, failed_login_attempts: 5, locked_until: new Date(Date.now() + 60000).toISOString() }],
-      rowCount: 1,
-    }));
+    const usersColl = getMockCollection('users');
+    usersColl.findOne.mockResolvedValue({
+      _id: USER,
+      failedLoginAttempts: 5,
+      lockedUntil: new Date(Date.now() + 60000),
+    });
     const fastify = await app();
     const res = await fastify.inject({
       method: 'POST',
@@ -78,17 +145,19 @@ describe('login lockout', () => {
     await fastify.close();
   });
 
-  it('increments failures with a single atomic UPDATE on bad password', async () => {
-    const seen: string[] = [];
-    query.mockImplementation(async (sql: string) => {
-      seen.push(sql);
-      if (sql.startsWith('SELECT id, failed_login_attempts')) {
-        return { rows: [{ id: USER, failed_login_attempts: 4, locked_until: null }], rowCount: 1 };
-      }
-      if (sql.startsWith('UPDATE users')) {
-        return { rows: [{ failed_login_attempts: 5, locked_until: new Date(Date.now() + 300000).toISOString() }], rowCount: 1 };
-      }
-      return { rows: [], rowCount: 0 };
+  it('increments failures with a single atomic findOneAndUpdate on bad password', async () => {
+    const usersColl = getMockCollection('users');
+    // Lock state check: not locked, 4 prior failures
+    usersColl.findOne.mockResolvedValue({
+      _id: USER,
+      failedLoginAttempts: 4,
+      lockedUntil: null,
+    });
+    // Atomic increment returns the updated doc with 5 attempts
+    usersColl.findOneAndUpdate.mockResolvedValue({
+      _id: USER,
+      failedLoginAttempts: 5,
+      lockedUntil: new Date(Date.now() + 300000),
     });
     const fastify = await app();
     const res = await fastify.inject({
@@ -97,10 +166,14 @@ describe('login lockout', () => {
       payload: { email: 'user@example.test', password: 'wrong' },
     });
     expect(res.statusCode).toBe(401);
-    const update = seen.find((sql) => sql.startsWith('UPDATE users'))!;
-    // Read-modify-write happens inside the database, not in Node.
-    expect(update).toContain('failed_login_attempts = failed_login_attempts + 1');
-    expect(update).toContain('RETURNING failed_login_attempts');
+    // Read-modify-write happens inside the database via aggregation pipeline, not in Node.
+    expect(usersColl.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    const [filter, update, options] = usersColl.findOneAndUpdate.mock.calls[0];
+    expect(filter).toEqual({ _id: USER });
+    // Pipeline update with $add/$ifNull for atomic increment
+    expect(JSON.stringify(update)).toContain('$add');
+    expect(JSON.stringify(update)).toContain('failedLoginAttempts');
+    expect(options.returnDocument).toBe('after');
     // The 5th failure escalates to a lockout audit.
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
       reason: 'ACCOUNT_LOCKED',
@@ -110,6 +183,8 @@ describe('login lockout', () => {
   });
 
   it('gives unknown emails the same 401 without lockout bookkeeping', async () => {
+    const usersColl = getMockCollection('users');
+    usersColl.findOne.mockResolvedValue(null); // No lock state = unknown email
     const fastify = await app();
     const res = await fastify.inject({
       method: 'POST',
@@ -118,7 +193,7 @@ describe('login lockout', () => {
     });
     expect(res.statusCode).toBe(401);
     expect(res.json().code).toBe('INVALID_CREDENTIALS');
-    expect(query.mock.calls.some(([sql]: any[]) => (sql as string).startsWith('UPDATE users'))).toBe(false);
+    expect(usersColl.findOneAndUpdate).not.toHaveBeenCalled();
     await fastify.close();
   });
 });
@@ -127,12 +202,15 @@ describe('refresh-token reuse', () => {
   const cookieHeader = `enflite_refresh=${TENANT}.secrettoken`;
 
   it('revokes all sessions and audits when a superseded token is presented', async () => {
-    tenantQuery.mockImplementation(async (_tenant: string, sql: string) => {
-      if (sql.includes('FROM sessions s JOIN users u')) return { rows: [], rowCount: 0 };
-      if (sql.includes('previous_refresh_token_hashes')) {
-        return { rows: [{ id: 'sess-old', user_id: USER }], rowCount: 1 };
+    const sessionsColl = getMockCollection('sessions');
+    // Rotation fails (token not current) -> reuse detection finds it in history
+    sessionsColl.findOneAndUpdate.mockResolvedValue(null); // Rotation lost
+    sessionsColl.findOne.mockImplementation(async (filter: any) => {
+      // Reuse detection: query via $or with previousRefreshTokenHashes array containment
+      if (isHistoryQuery(filter)) {
+        return { _id: 'sess-old', userId: USER, tenantId: TENANT };
       }
-      return { rows: [], rowCount: 1 };
+      return null;
     });
     const fastify = await app();
     const res = await fastify.inject({
@@ -142,9 +220,11 @@ describe('refresh-token reuse', () => {
     });
     expect(res.statusCode).toBe(401);
     expect(res.json().code).toBe('REFRESH_TOKEN_REUSED');
-    const revoke = tenantQuery.mock.calls.find(([, sql]: any[]) =>
-      (sql as string).includes('SET revoked_at = NOW()') && (sql as string).includes('user_id = $2'));
-    expect(revoke).toBeDefined();
+    // All user sessions revoked
+    expect(sessionsColl.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: USER, tenantId: TENANT }),
+      expect.objectContaining({ $set: expect.objectContaining({ revokedAt: expect.any(Date) }) })
+    );
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
       action: 'SECURITY_REFRESH_TOKEN_REUSED',
       userId: USER,
@@ -153,24 +233,23 @@ describe('refresh-token reuse', () => {
   });
 
   it('routes a lost rotation race through reuse detection instead of a 500', async () => {
-    tenantQuery.mockImplementation(async (_tenant: string, sql: string) => {
-      if (sql.includes('FROM sessions s JOIN users u')) {
+    const sessionsColl = getMockCollection('sessions');
+    // Simulate losing the concurrent-rotation race: findOneAndUpdate returns
+    // null because the winner already rotated (conditional on old hash).
+    sessionsColl.findOneAndUpdate.mockResolvedValue(null);
+    sessionsColl.findOne.mockImplementation(async (filter: any) => {
+      if (isHistoryQuery(filter)) {
+        return { _id: 'sess-1', userId: USER, tenantId: TENANT };
+      }
+      // Session lookup for the refresh attempt
+      if (filter._id === 'sess-1' || filter.refreshTokenHash) {
         return {
-          rows: [{ id: USER, session_id: 'sess-1', tenant_id: TENANT, tenant_name: 'T', role_id: 'r1', role_name: 'User', is_active: true, clearance: 'INTERNAL' }],
-          rowCount: 1,
+          _id: 'sess-1', userId: USER, tenantId: TENANT,
+          refreshTokenHash: 'oldhash', revokedAt: null,
+          expiresAt: new Date(Date.now() + 3600000),
         };
       }
-      // Simulate losing the concurrent-rotation race: the conditional UPDATE
-      // matches zero rows because the winner already rotated.
-      if (sql.includes('SET refresh_token_hash = $1')) return { rows: [], rowCount: 0 };
-      if (sql.includes('previous_refresh_token_hashes')) {
-        return { rows: [{ id: 'sess-1', user_id: USER }], rowCount: 1 };
-      }
-      return { rows: [], rowCount: 1 };
-    });
-    query.mockImplementation(async (sql: string) => {
-      if (sql.includes('FROM permissions')) return { rows: [{ name: 'chat:create' }], rowCount: 1 };
-      return { rows: [], rowCount: 0 };
+      return null;
     });
     const fastify = await app();
     const res = await fastify.inject({
@@ -184,6 +263,9 @@ describe('refresh-token reuse', () => {
   });
 
   it('returns 401 INVALID_REFRESH_TOKEN for an unknown token', async () => {
+    const sessionsColl = getMockCollection('sessions');
+    sessionsColl.findOneAndUpdate.mockResolvedValue(null);
+    sessionsColl.findOne.mockResolvedValue(null); // Not in history either
     const fastify = await app();
     const res = await fastify.inject({
       method: 'POST',
@@ -195,31 +277,47 @@ describe('refresh-token reuse', () => {
     await fastify.close();
   });
 
-  it('queries the token history with the GIN-indexed containment operator', async () => {
-    const seen: string[] = [];
-    tenantQuery.mockImplementation(async (_tenant: string, sql: string) => {
-      seen.push(sql);
-      if (sql.includes('FROM sessions s JOIN users u')) return { rows: [], rowCount: 0 };
-      if (sql.includes('previous_refresh_token_hashes')) return { rows: [], rowCount: 0 };
-      return { rows: [], rowCount: 1 };
+  it('queries the token history with array containment (multikey-indexed)', async () => {
+    const sessionsColl = getMockCollection('sessions');
+    const seenFilters: any[] = [];
+    sessionsColl.findOne.mockImplementation(async (filter: any) => {
+      seenFilters.push(filter);
+      return null;
     });
+    sessionsColl.findOneAndUpdate.mockResolvedValue(null);
     const fastify = await app();
     await fastify.inject({ method: 'POST', url: '/auth/refresh', headers: { cookie: cookieHeader } });
-    const historyQuery = seen.find((sql) => sql.includes('previous_refresh_token_hashes'))!;
-    // Migration 012 GIN-indexes previous_refresh_token_hashes; `= ANY` would
-    // bypass it with a sequential scan, so reuse detection must use `@>`.
-    expect(historyQuery).toContain('@> ARRAY[$1]');
-    expect(historyQuery).not.toContain('= ANY');
+    const historyQuery = seenFilters.find((f) => isHistoryQuery(f));
+    expect(historyQuery).toBeDefined();
+    // MongoDB array containment via $or with equality on the array field; the
+    // previousRefreshTokenHashes field has a multikey index (migration 005).
+    // No SQL operators — the filter is a plain document with $or.
+    expect(historyQuery.$or).toBeDefined();
+    const historyClause = historyQuery.$or.find((c: any) => c.previousRefreshTokenHashes !== undefined);
+    expect(historyClause).toBeDefined();
+    expect(typeof historyClause.previousRefreshTokenHashes).toBe('string');
     await fastify.close();
   });
 });
 
 describe('session inventory', () => {
   it('lists sessions via GET /auth/sessions', async () => {
-    tenantQuery.mockResolvedValue({
-      rows: [{ id: '33333333-3333-4333-8333-333333333333', revoked: false }],
-      rowCount: 1,
-    });
+    const sessionsColl = getMockCollection('sessions');
+    const sessionDoc = {
+      _id: '33333333-3333-4333-8333-333333333333',
+      userId: USER,
+      tenantId: TENANT,
+      revokedAt: null,
+      createdAt: new Date(),
+      lastUsedAt: new Date(),
+      expiresAt: new Date(Date.now() + 3600000),
+    };
+    sessionsColl.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([sessionDoc]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
     const fastify = await app();
     const res = await fastify.inject({ method: 'GET', url: '/auth/sessions' });
     expect(res.statusCode).toBe(200);
@@ -228,12 +326,15 @@ describe('session inventory', () => {
   });
 
   it('revokes every session via POST /auth/logout/all', async () => {
+    const sessionsColl = getMockCollection('sessions');
+    sessionsColl.updateMany.mockResolvedValue({ acknowledged: true, modifiedCount: 3 });
     const fastify = await app();
     const res = await fastify.inject({ method: 'POST', url: '/auth/logout/all' });
     expect(res.statusCode).toBe(200);
-    const revokeAll = tenantQuery.mock.calls.find(([, sql]: any[]) =>
-      (sql as string).includes('SET revoked_at = NOW()') && (sql as string).includes('user_id = $2'));
-    expect(revokeAll?.[2]).toEqual([TENANT, USER]);
+    expect(sessionsColl.updateMany).toHaveBeenCalledWith(
+      { tenantId: TENANT, userId: USER, revokedAt: null },
+      expect.objectContaining({ $set: expect.objectContaining({ revokedAt: expect.any(Date) }) })
+    );
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'LOGOUT_ALL' }));
     await fastify.close();
   });

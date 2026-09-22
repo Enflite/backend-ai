@@ -1,78 +1,174 @@
-import { describe, expect, it } from 'vitest';
-import { isNonTransactionalMigration, splitStatements, computeMigrationDrift } from '../src/db/migrate.js';
+/**
+ * migrate.test.ts — MongoDB migration runner unit tests (ADR-014).
+ *
+ * Tests the migration runner logic: version tracking, idempotency,
+ * ordering, and the getAppliedVersions helper. Uses mocked MongoDB
+ * collections. VALIDATED IN CI with mocks; real MongoDB behavior
+ * REQUIRES REAL PRODUCTION INFRASTRUCTURE.
+ */
 
-describe('isNonTransactionalMigration', () => {
-  it('detects the header before any statement', () => {
-    expect(
-      isNonTransactionalMigration(
-        '-- migrate: non-transactional\nCREATE INDEX CONCURRENTLY IF NOT EXISTS x ON t (a);'
-      )
-    ).toBe(true);
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Migration } from '../src/db/migrate.js';
+
+const { mockCollection, getDbMock } = vi.hoisted(() => {
+  const mockCollection = {
+    createIndex: vi.fn(),
+    find: vi.fn(),
+    insertOne: vi.fn(),
+  };
+  const getDbMock = vi.fn(async () => ({
+    collection: vi.fn(() => mockCollection),
+  }));
+  return { mockCollection, getDbMock };
+});
+
+vi.mock('../src/db/mongo.js', () => ({
+  getDb: getDbMock,
+}));
+
+import { runMigrations, getAppliedVersions } from '../src/db/migrate.js';
+
+function mockFindCursor(docs: Array<{ version: string }>) {
+  return {
+    toArray: vi.fn().mockResolvedValue(docs),
+    sort: vi.fn().mockReturnThis(),
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockCollection.createIndex.mockResolvedValue(undefined);
+  mockCollection.insertOne.mockResolvedValue({ acknowledged: true });
+});
+
+describe('runMigrations', () => {
+  it('applies pending migrations in version order', async () => {
+    const appliedOrder: string[] = [];
+    const migrations: Migration[] = [
+      {
+        version: '002',
+        description: 'second',
+        up: async () => { appliedOrder.push('002'); },
+      },
+      {
+        version: '001',
+        description: 'first',
+        up: async () => { appliedOrder.push('001'); },
+      },
+      {
+        version: '003',
+        description: 'third',
+        up: async () => { appliedOrder.push('003'); },
+      },
+    ];
+
+    mockCollection.find.mockReturnValue(mockFindCursor([]));
+
+    await runMigrations(migrations);
+
+    expect(appliedOrder).toEqual(['001', '002', '003']);
+    expect(mockCollection.insertOne).toHaveBeenCalledTimes(3);
+    expect(mockCollection.insertOne).toHaveBeenCalledWith(
+      expect.objectContaining({ version: '001' })
+    );
   });
 
-  it('ignores a header that appears after a statement', () => {
-    expect(
-      isNonTransactionalMigration(
-        'CREATE TABLE t (a int);\n-- migrate: non-transactional'
-      )
-    ).toBe(false);
+  it('skips already-applied migrations (idempotent)', async () => {
+    const upMock = vi.fn();
+    const migrations: Migration[] = [
+      { version: '001', description: 'first', up: upMock },
+      { version: '002', description: 'second', up: upMock },
+    ];
+
+    mockCollection.find.mockReturnValue(
+      mockFindCursor([{ version: '001' }, { version: '002' }])
+    );
+
+    await runMigrations(migrations);
+
+    expect(upMock).not.toHaveBeenCalled();
+    expect(mockCollection.insertOne).not.toHaveBeenCalled();
   });
 
-  it('returns false for ordinary migrations', () => {
-    expect(isNonTransactionalMigration('CREATE INDEX x ON t (a);')).toBe(false);
+  it('applies only pending migrations when some are already applied', async () => {
+    const appliedOrder: string[] = [];
+    const migrations: Migration[] = [
+      {
+        version: '001',
+        description: 'first',
+        up: async () => { appliedOrder.push('001'); },
+      },
+      {
+        version: '002',
+        description: 'second',
+        up: async () => { appliedOrder.push('002'); },
+      },
+    ];
+
+    mockCollection.find.mockReturnValue(mockFindCursor([{ version: '001' }]));
+
+    await runMigrations(migrations);
+
+    expect(appliedOrder).toEqual(['002']);
+    expect(mockCollection.insertOne).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates the unique version index', async () => {
+    mockCollection.find.mockReturnValue(mockFindCursor([]));
+    await runMigrations([]);
+    expect(mockCollection.createIndex).toHaveBeenCalledWith(
+      { version: 1 },
+      { unique: true }
+    );
+  });
+
+  it('records appliedAt timestamp when applying', async () => {
+    mockCollection.find.mockReturnValue(mockFindCursor([]));
+    const migrations: Migration[] = [
+      { version: '001', description: 'test', up: async () => {} },
+    ];
+
+    await runMigrations(migrations);
+
+    expect(mockCollection.insertOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        _id: '001',
+        version: '001',
+        appliedAt: expect.any(Date),
+      })
+    );
   });
 });
 
-describe('splitStatements', () => {
-  it('splits simple statements', () => {
-    expect(splitStatements('SELECT 1;\nSELECT 2;')).toEqual(['SELECT 1;', 'SELECT 2;']);
-  });
+describe('getAppliedVersions', () => {
+  it('returns sorted version strings', async () => {
+    const cursor = {
+      toArray: vi.fn().mockResolvedValue([
+        { version: '001' },
+        { version: '002' },
+        { version: '010' },
+      ]),
+      sort: vi.fn().mockReturnThis(),
+    };
+    mockCollection.find.mockReturnValue(cursor);
 
-  it('ignores semicolons inside strings, quotes, and comments', () => {
-    const sql = `INSERT INTO t (a) VALUES ('semi;colon');\n-- trailing; comment\nSELECT "weird;ident" FROM t;`;
-    expect(splitStatements(sql)).toEqual([
-      `INSERT INTO t (a) VALUES ('semi;colon');`,
-      `-- trailing; comment\nSELECT "weird;ident" FROM t;`,
-    ]);
-  });
+    const versions = await getAppliedVersions();
 
-  it('handles doubled-quote escapes and dollar-quoted bodies', () => {
-    const sql = `INSERT INTO t (a) VALUES ('it''s; fine');\nCREATE FUNCTION f() RETURNS void AS $$ BEGIN RAISE NOTICE 'x;y'; END; $$ LANGUAGE plpgsql;`;
-    const parts = splitStatements(sql);
-    expect(parts).toHaveLength(2);
-    expect(parts[0]).toContain(`'it''s; fine'`);
-    expect(parts[1]).toContain(`RAISE NOTICE 'x;y'`);
-  });
-
-  it('keeps a CONCURRENTLY index build as one statement', () => {
-    const sql =
-      '-- migrate: non-transactional\nCREATE INDEX CONCURRENTLY IF NOT EXISTS idx_t_a ON t (a);';
-    expect(splitStatements(sql)).toHaveLength(1);
-  });
-});
-
-describe('computeMigrationDrift', () => {
-  it('reports pending files that were never applied', () => {
-    const drift = computeMigrationDrift(
-      ['001_init.sql', '002_seed.sql', '003_new.sql'],
-      ['001_init.sql', '002_seed.sql']
+    expect(versions).toEqual(['001', '002', '010']);
+    expect(mockCollection.find).toHaveBeenCalledWith(
+      {},
+      { projection: { version: 1 } }
     );
-    expect(drift.pending).toEqual(['003_new.sql']);
-    expect(drift.appliedButMissing).toEqual([]);
   });
 
-  it('flags versions applied in the database that have no file on disk', () => {
-    const drift = computeMigrationDrift(
-      ['001_init.sql'],
-      ['001_init.sql', '999_hand_applied.sql']
-    );
-    expect(drift.pending).toEqual([]);
-    expect(drift.appliedButMissing).toEqual(['999_hand_applied.sql']);
-  });
+  it('returns empty array when no migrations applied', async () => {
+    const cursor = {
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+    };
+    mockCollection.find.mockReturnValue(cursor);
 
-  it('is clean when disk and database agree', () => {
-    const drift = computeMigrationDrift(['001_init.sql'], ['001_init.sql']);
-    expect(drift.pending).toEqual([]);
-    expect(drift.appliedButMissing).toEqual([]);
+    const versions = await getAppliedVersions();
+    expect(versions).toEqual([]);
   });
 });

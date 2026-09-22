@@ -35,8 +35,16 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from 'jose';
 import { config, isAllowedOidcUrl } from '../config.js';
-import { query } from '../db/pool.js';
+import { getDb } from '../db/mongo.js';
 import { Errors } from '../errors.js';
+
+interface OidcAuthRequestDoc {
+  _id: string;
+  codeVerifier: string;
+  nonce: string | null;
+  createdAt: Date;
+  expiresAt: Date;
+}
 
 export interface OidcDiscovery {
   issuer: string;
@@ -181,11 +189,16 @@ export async function buildAuthorizeUrl(): Promise<{ url: string; state: string 
   const { verifier, challenge } = createPkcePair();
   const nonce = createOidcState();
   // Opportunistic cleanup of expired login attempts on each new one.
-  await query('DELETE FROM oidc_auth_requests WHERE expires_at < NOW()');
-  await query(
-    'INSERT INTO oidc_auth_requests (state, code_verifier, nonce, expires_at) VALUES ($1, $2, $3, NOW() + ($4 || \' milliseconds\')::interval)',
-    [state, verifier, nonce, AUTH_REQUEST_TTL_MS]
-  );
+  // oidc_auth_requests is a pre-auth table (no tenant yet): no tenantId filter.
+  const db = await getDb();
+  await db.collection<OidcAuthRequestDoc>('oidc_auth_requests').deleteMany({ expiresAt: { $lt: new Date() } });
+  await db.collection<OidcAuthRequestDoc>('oidc_auth_requests').insertOne({
+    _id: state,
+    codeVerifier: verifier,
+    nonce,
+    createdAt: new Date(),
+    expiresAt: new Date(Date.now() + AUTH_REQUEST_TTL_MS),
+  });
   const url = new URL(discovery.authorization_endpoint);
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('client_id', config.OIDC_CLIENT_ID!);
@@ -208,14 +221,15 @@ export interface ConsumedOidcState {
  * PKCE verifier and nonce, or null when the state is unknown or expired.
  */
 export async function consumeOidcState(state: string): Promise<ConsumedOidcState | null> {
-  const row = (
-    await query<{ code_verifier: string; nonce: string | null }>(
-      'DELETE FROM oidc_auth_requests WHERE state = $1 AND expires_at > NOW() RETURNING code_verifier, nonce',
-      [state]
-    )
-  ).rows[0];
-  if (!row || !row.nonce) return null;
-  return { verifier: row.code_verifier, nonce: row.nonce };
+  // Single-use: the document is deleted atomically; findOneAndDelete returns
+  // null when the state is unknown or expired.
+  const db = await getDb();
+  const doc = await db.collection<OidcAuthRequestDoc>('oidc_auth_requests').findOneAndDelete({
+    _id: state,
+    expiresAt: { $gt: new Date() },
+  });
+  if (!doc || !doc.nonce) return null;
+  return { verifier: doc.codeVerifier, nonce: doc.nonce };
 }
 
 export interface OidcTokenSet {
@@ -382,11 +396,12 @@ export function parseRoleMapping(): Record<string, string> {
  */
 export async function resolveInternalRole(groups: string[]): Promise<string | null> {
   const mapping = parseRoleMapping();
+  const db = await getDb();
   for (const group of groups) {
     const candidate = mapping[group];
     if (!candidate) continue;
-    const row = (await query<{ name: string }>('SELECT name FROM roles WHERE name = $1', [candidate])).rows[0];
-    if (row) return row.name;
+    const doc = await db.collection<{ _id: string; name: string }>('roles').findOne({ name: candidate }, { projection: { name: 1 } });
+    if (doc) return doc.name;
     // Mapped to a role that does not exist: fail closed, keep looking.
   }
   return null;

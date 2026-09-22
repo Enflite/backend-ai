@@ -2,19 +2,26 @@
  * store.ts — tenant-scoped user memory CRUD (memory_facts).
  *
  * Privacy model (see docs/adr/013-user-memory.md):
- * - Every operation binds BOTH tenant_id and user_id from the caller's auth
+ * - Every operation binds BOTH tenantId and userId from the caller's auth
  *   context. A user can only ever touch their own rows — cross-user and
  *   cross-tenant access does not exist in this module.
- * - RLS (`tenant_isolation`, migration 027) is defense in depth; the
- *   application scoping below is the primary enforcement (ADR-004).
+ * - Application-level tenantId filtering is the enforcement (ADR-004,
+ *   ADR-014); MongoDB has no RLS, so the { tenantId } filter on every
+ *   query is load-bearing.
  * - Write-side classification may not exceed the caller's clearance
  *   (assertClassificationAllowed, like conversations).
  * - Fact text is user data, not secrets: callers must never store
  *   credentials in memory facts (the injection path redacts secret-shaped
  *   spans as a guardrail — see inject.ts).
+ *
+ * Storage note: MongoDB documents use camelCase fields with the UUID in
+ * `_id` (ADR-014). The public MemoryFact interface keeps its original
+ * snake_case shape so existing consumers (inject.ts, tests) are unaffected;
+ * toMemoryFact maps between the two.
  */
 
-import { tenantQuery } from '../db/pool.js';
+import { randomUUID } from 'node:crypto';
+import { tenantOp } from '../db/mongo.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
 import { Classification } from '../authz/permissions.js';
 import { Errors } from '../errors.js';
@@ -37,14 +44,38 @@ export interface MemoryFact {
   updated_at: string;
 }
 
+/** MongoDB document shape for the `memory_facts` collection (ADR-014). */
+interface MemoryFactDoc {
+  _id: string;
+  tenantId: string;
+  userId: string;
+  fact: string;
+  category: MemoryCategory;
+  classification: Classification;
+  source: MemorySource;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+function toMemoryFact(doc: MemoryFactDoc): MemoryFact {
+  return {
+    id: doc._id,
+    tenant_id: doc.tenantId,
+    user_id: doc.userId,
+    fact: doc.fact,
+    category: doc.category,
+    classification: doc.classification,
+    source: doc.source,
+    created_at: doc.createdAt.toISOString(),
+    updated_at: doc.updatedAt.toISOString(),
+  };
+}
+
 export interface MemoryContext {
   tenantId: string;
   userId: string;
   clearance: Classification;
 }
-
-const SELECT_COLUMNS =
-  'id, tenant_id, user_id, fact, category, classification, source, created_at, updated_at';
 
 export interface CreateMemoryInput {
   fact: string;
@@ -61,32 +92,32 @@ export async function createMemory(
   const classification =
     input.classification ?? (ctx.clearance === 'PUBLIC' ? 'PUBLIC' : 'INTERNAL');
   assertClassificationAllowed(ctx.clearance, classification);
-  const result = await tenantQuery<MemoryFact>(
-    ctx.tenantId,
-    `INSERT INTO memory_facts (tenant_id, user_id, fact, category, classification, source)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING ${SELECT_COLUMNS}`,
-    [
-      ctx.tenantId,
-      ctx.userId,
-      input.fact,
-      input.category ?? 'fact',
-      classification,
-      input.source ?? 'user-stated',
-    ]
-  );
-  return result.rows[0]!;
+  const now = new Date();
+  const doc: MemoryFactDoc = {
+    _id: randomUUID(),
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    fact: input.fact,
+    category: input.category ?? 'fact',
+    classification,
+    source: input.source ?? 'user-stated',
+    createdAt: now,
+    updatedAt: now,
+  };
+  await tenantOp(ctx.tenantId, async (db) => {
+    await db.collection<MemoryFactDoc>('memory_facts').insertOne(doc);
+  });
+  return toMemoryFact(doc);
 }
 
 export async function getMemory(ctx: MemoryContext, id: string): Promise<MemoryFact> {
-  const result = await tenantQuery<MemoryFact>(
-    ctx.tenantId,
-    `SELECT ${SELECT_COLUMNS} FROM memory_facts WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
-    [id, ctx.tenantId, ctx.userId]
+  const doc = await tenantOp(ctx.tenantId, (db) =>
+    db
+      .collection<MemoryFactDoc>('memory_facts')
+      .findOne({ _id: id, tenantId: ctx.tenantId, userId: ctx.userId })
   );
-  const row = result.rows[0];
-  if (!row) throw Errors.notFound('MEMORY_NOT_FOUND', 'Memory not found');
-  return row;
+  if (!doc) throw Errors.notFound('MEMORY_NOT_FOUND', 'Memory not found');
+  return toMemoryFact(doc);
 }
 
 export interface ListMemoriesOptions {
@@ -101,20 +132,18 @@ export async function listMemories(
   options: ListMemoriesOptions = {}
 ): Promise<MemoryFact[]> {
   const { category, limit = 50, offset = 0 } = options;
-  const params: unknown[] = [ctx.tenantId, ctx.userId];
-  let where = 'tenant_id = $1 AND user_id = $2';
-  if (category) {
-    params.push(category);
-    where += ` AND category = $${params.length}`;
-  }
-  params.push(limit, offset);
-  const result = await tenantQuery<MemoryFact>(
-    ctx.tenantId,
-    `SELECT ${SELECT_COLUMNS} FROM memory_facts WHERE ${where}
-     ORDER BY updated_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
-    params
-  );
-  return result.rows;
+  const docs = await tenantOp(ctx.tenantId, (db) => {
+    const filter: Record<string, unknown> = { tenantId: ctx.tenantId, userId: ctx.userId };
+    if (category) filter.category = category;
+    return db
+      .collection<MemoryFactDoc>('memory_facts')
+      .find(filter)
+      .sort({ updatedAt: -1 })
+      .skip(offset)
+      .limit(limit)
+      .toArray();
+  });
+  return docs.map(toMemoryFact);
 }
 
 export interface UpdateMemoryInput {
@@ -131,43 +160,33 @@ export async function updateMemory(
   if (input.classification !== undefined) {
     assertClassificationAllowed(ctx.clearance, input.classification);
   }
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  if (input.fact !== undefined) {
-    params.push(input.fact);
-    sets.push(`fact = $${params.length}`);
-  }
-  if (input.category !== undefined) {
-    params.push(input.category);
-    sets.push(`category = $${params.length}`);
-  }
-  if (input.classification !== undefined) {
-    params.push(input.classification);
-    sets.push(`classification = $${params.length}`);
-  }
-  if (sets.length === 0) {
+  const set: Record<string, unknown> = {};
+  if (input.fact !== undefined) set.fact = input.fact;
+  if (input.category !== undefined) set.category = input.category;
+  if (input.classification !== undefined) set.classification = input.classification;
+  if (Object.keys(set).length === 0) {
     throw Errors.badRequest('INVALID_REQUEST', 'No fields to update');
   }
-  params.push(id, ctx.tenantId, ctx.userId);
-  const result = await tenantQuery<MemoryFact>(
-    ctx.tenantId,
-    `UPDATE memory_facts SET ${sets.join(', ')}, updated_at = NOW()
-     WHERE id = $${params.length - 2} AND tenant_id = $${params.length - 1} AND user_id = $${params.length}
-     RETURNING ${SELECT_COLUMNS}`,
-    params
+  set.updatedAt = new Date();
+  const doc = await tenantOp(ctx.tenantId, (db) =>
+    db.collection<MemoryFactDoc>('memory_facts').findOneAndUpdate(
+      { _id: id, tenantId: ctx.tenantId, userId: ctx.userId },
+      { $set: set },
+      { returnDocument: 'after' }
+    )
   );
-  const row = result.rows[0];
-  if (!row) throw Errors.notFound('MEMORY_NOT_FOUND', 'Memory not found');
-  return row;
+  if (!doc) throw Errors.notFound('MEMORY_NOT_FOUND', 'Memory not found');
+  return toMemoryFact(doc);
 }
 
 export async function deleteMemory(ctx: MemoryContext, id: string): Promise<void> {
-  const result = await tenantQuery(
-    ctx.tenantId,
-    'DELETE FROM memory_facts WHERE id = $1 AND tenant_id = $2 AND user_id = $3',
-    [id, ctx.tenantId, ctx.userId]
-  );
-  if (result.rowCount === 0) {
+  const deletedCount = await tenantOp(ctx.tenantId, async (db) => {
+    const result = await db
+      .collection<MemoryFactDoc>('memory_facts')
+      .deleteOne({ _id: id, tenantId: ctx.tenantId, userId: ctx.userId });
+    return result.deletedCount;
+  });
+  if (deletedCount === 0) {
     throw Errors.notFound('MEMORY_NOT_FOUND', 'Memory not found');
   }
 }

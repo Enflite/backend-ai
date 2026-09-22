@@ -1,4 +1,4 @@
-import { tenantQuery } from '../../db/pool.js';
+import { tenantOp } from '../../db/mongo.js';
 import { Errors } from '../../errors.js';
 import { Classification } from '../../authz/permissions.js';
 
@@ -8,56 +8,81 @@ export interface ApprovedModel {
   version: string;
   provider: string;
   endpoint: string;
-  model_identifier: string;
+  modelIdentifier: string;
   /** Lifecycle status; the gateway only serves ACTIVE and CANARY models. */
   status: 'ACTIVE' | 'CANARY';
   license: string | null;
   source: string | null;
   sha256: string | null;
-  context_window: number;
+  contextWindow: number;
   capabilities: Record<string, unknown>;
-  allowed_classifications: Classification[];
+  allowedClassifications: Classification[];
   deployment: Record<string, unknown>;
   /** Per-model inference timeout override (ms); null = server default. */
-  request_timeout_ms: number | null;
+  requestTimeoutMs: number | null;
   /** Passed to OpenAI-compatible providers; null = provider default. */
-  max_tokens: number | null;
+  maxTokens: number | null;
   /** Passed to OpenAI-compatible providers; null = provider default. */
   temperature: number | null;
   /** Fail over to this model (once, no chains) when the primary fails. */
-  fallback_model_id: string | null;
-  created_at: Date;
+  fallbackModelId: string | null;
+  createdAt: Date;
 }
 
-const MODEL_FIELDS = `m.id, m.name, m.version, m.provider, m.endpoint, m.model_identifier,
-  m.status, m.license, m.source, m.sha256, m.context_window, m.capabilities,
-  m.allowed_classifications, m.deployment, m.request_timeout_ms, m.max_tokens,
-  m.temperature, m.fallback_model_id, m.created_at`;
+/**
+ * MongoDB document shape for the `models` collection: camelCase fields,
+ * `_id` is the UUID string (ADR-014). `enabled` is storage-only — it is
+ * not part of the ApprovedModel view.
+ */
+type ModelDoc = Omit<ApprovedModel, 'id'> & { _id: string; enabled: boolean };
+
+/** MongoDB document shape for the `model_access` collection. */
+interface ModelAccessDoc {
+  _id: string;
+  tenantId: string;
+  modelId: string;
+  userId?: string;
+  roleId?: string;
+  createdAt: Date;
+}
+
+function toApprovedModel(doc: ModelDoc): ApprovedModel {
+  const { _id, enabled: _enabled, ...rest } = doc;
+  return { id: _id, ...rest };
+}
 
 export async function listApprovedModelsForUser(tenantId: string, userId: string, roleId: string): Promise<ApprovedModel[]> {
-  return (
-    await tenantQuery<ApprovedModel>(
-      tenantId,
-      `SELECT DISTINCT ${MODEL_FIELDS}
-       FROM models m JOIN model_access ma ON ma.model_id = m.id AND ma.tenant_id = $1
-       WHERE m.status IN ('ACTIVE', 'CANARY') AND m.enabled AND (ma.user_id = $2 OR ma.role_id = $3)
-       ORDER BY m.name ASC`,
-      [tenantId, userId, roleId]
-    )
-  ).rows;
+  return tenantOp(tenantId, async (db) => {
+    // A grant row is (tenantId, modelId) plus exactly one of userId/roleId.
+    const grants = await db
+      .collection<ModelAccessDoc>('model_access')
+      .find({ tenantId, $or: [{ userId }, { roleId }] })
+      .toArray();
+    const modelIds = [...new Set(grants.map((g) => g.modelId))];
+    if (modelIds.length === 0) return [];
+    const docs = await db
+      .collection<ModelDoc>('models')
+      .find({ _id: { $in: modelIds }, status: { $in: ['ACTIVE', 'CANARY'] }, enabled: true })
+      .sort({ name: 1 })
+      .toArray();
+    return docs.map(toApprovedModel);
+  });
 }
 
 export async function getApprovedModelForUser(modelId: string, tenantId: string, userId: string, roleId: string): Promise<ApprovedModel> {
-  const model = (
-    await tenantQuery<ApprovedModel>(
+  return tenantOp(tenantId, async (db) => {
+    const doc = await db.collection<ModelDoc>('models').findOne({ _id: modelId });
+    if (!doc || (doc.status !== 'ACTIVE' && doc.status !== 'CANARY') || !doc.enabled) {
+      throw Errors.forbidden('MODEL_NOT_APPROVED', 'Model is not approved for this user and tenant');
+    }
+    const grant = await db.collection<ModelAccessDoc>('model_access').findOne({
       tenantId,
-      `SELECT DISTINCT ${MODEL_FIELDS}
-       FROM models m JOIN model_access ma ON ma.model_id = m.id AND ma.tenant_id = $2
-       WHERE m.id = $1 AND m.status IN ('ACTIVE', 'CANARY') AND m.enabled
-         AND (ma.user_id = $3 OR ma.role_id = $4)`,
-      [modelId, tenantId, userId, roleId]
-    )
-  ).rows[0];
-  if (!model) throw Errors.forbidden('MODEL_NOT_APPROVED', 'Model is not approved for this user and tenant');
-  return model;
+      modelId,
+      $or: [{ userId }, { roleId }],
+    });
+    if (!grant) {
+      throw Errors.forbidden('MODEL_NOT_APPROVED', 'Model is not approved for this user and tenant');
+    }
+    return toApprovedModel(doc);
+  });
 }

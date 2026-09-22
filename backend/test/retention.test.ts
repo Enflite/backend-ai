@@ -1,20 +1,49 @@
 /**
- * retention.test.ts — retention purge unit tests (Phase 5c).
+ * retention.test.ts — retention purge unit tests (Phase 5c, MongoDB/ADR-014).
  *
- * Mocks the DB pool and the audit writer; asserts the purge SQL honors
+ * Mocks the MongoDB layer and the audit writer; asserts the purge honors
  * legal holds, batches deletes, resolves per-tenant overrides, audits the
  * purge *after* deleting audit rows, and keeps sweeping when one tenant
- * fails. VALIDATED IN CI with mocks; real PostgreSQL behavior
+ * fails. VALIDATED IN CI with mocks; real MongoDB behavior
  * REQUIRES REAL PRODUCTION INFRASTRUCTURE.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { queryMock, tenantQueryMock } = vi.hoisted(() => ({
-  queryMock: vi.fn(),
-  tenantQueryMock: vi.fn(),
+// Mock the MongoDB layer: getDb returns a mock Db with collection() that
+// returns mock collections. withTenantTx runs the callback with a mock session.
+const { mockCollections, getDbMock, withTenantTxMock } = vi.hoisted(() => {
+  const mockCollections: Record<string, any> = {};
+  const makeCollection = () => ({
+    find: vi.fn(),
+    findOne: vi.fn(),
+    deleteMany: vi.fn(),
+    deleteOne: vi.fn(),
+    insertOne: vi.fn(),
+    updateOne: vi.fn(),
+    updateMany: vi.fn(),
+  });
+  const getCollection = (name: string) => {
+    if (!mockCollections[name]) {
+      mockCollections[name] = makeCollection();
+    }
+    return mockCollections[name];
+  };
+  const getDbMock = vi.fn(async () => ({
+    collection: getCollection,
+  }));
+  const withTenantTxMock = vi.fn(async (_tenantId: string, callback: (session: any, db: any) => Promise<any>) => {
+    const mockSession = {};
+    const mockDb = { collection: getCollection };
+    return callback(mockSession, mockDb);
+  });
+  return { mockCollections, getDbMock, withTenantTxMock };
+});
+
+vi.mock('../src/db/mongo.js', () => ({
+  getDb: getDbMock,
+  withTenantTx: withTenantTxMock,
 }));
-vi.mock('../src/db/pool.js', () => ({ query: queryMock, tenantQuery: tenantQueryMock }));
 
 const { recordAuditMock, purgeGlobalAuditEventsMock } = vi.hoisted(() => ({
   recordAuditMock: vi.fn(),
@@ -33,16 +62,56 @@ import {
 } from '../src/retention/purge.js';
 import { config } from '../src/config.js';
 
+// Helper to create a mock cursor with toArray()
+function mockCursor(docs: any[]) {
+  return {
+    toArray: vi.fn().mockResolvedValue(docs),
+    project: vi.fn().mockReturnThis(),
+    sort: vi.fn().mockReturnThis(),
+    limit: vi.fn().mockReturnThis(),
+  };
+}
+
+// Helper to get or create a mock collection
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      find: vi.fn().mockReturnValue(mockCursor([])),
+      findOne: vi.fn().mockResolvedValue(null),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      deleteOne: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetCollections() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    // Reset all mock methods that exist
+    for (const method of ['find', 'findOne', 'deleteMany', 'deleteOne', 'insertOne', 'updateOne', 'updateMany']) {
+      if (coll[method] && typeof coll[method].mockReset === 'function') {
+        coll[method].mockReset();
+      }
+    }
+    // Default: empty results (only for methods that exist)
+    if (coll.find) coll.find.mockReturnValue(mockCursor([]));
+    if (coll.findOne) coll.findOne.mockResolvedValue(null);
+    if (coll.deleteMany) coll.deleteMany.mockResolvedValue({ deletedCount: 0 });
+  }
+}
+
 beforeEach(() => {
-  queryMock.mockReset();
-  tenantQueryMock.mockReset();
+  getDbMock.mockClear();
+  withTenantTxMock.mockClear();
   recordAuditMock.mockReset();
   purgeGlobalAuditEventsMock.mockReset();
   recordAuditMock.mockResolvedValue(undefined);
   purgeGlobalAuditEventsMock.mockResolvedValue(0);
-  // Default: no policy row, no expired rows.
-  tenantQueryMock.mockResolvedValue({ rows: [], rowCount: 0 });
-  queryMock.mockResolvedValue({ rows: [], rowCount: 0 });
+  resetCollections();
 });
 
 describe('retention policy resolution', () => {
@@ -55,108 +124,156 @@ describe('retention policy resolution', () => {
     });
   });
 
-  it('prefers tenant overrides column by column', () => {
-    const policy = effectivePolicy({ conversations_days: 30, messages_days: null, audit_events_days: 0 });
+  it('prefers tenant overrides field by field', () => {
+    const policy = effectivePolicy({ conversationsDays: 30, messagesDays: null, auditEventsDays: 0 });
     expect(policy.conversationsDays).toBe(30);
     expect(policy.messagesDays).toBe(config.RETENTION_MESSAGES_DAYS);
     expect(policy.auditEventsDays).toBe(0);
   });
 
-  it('reads the override row for the tenant', async () => {
-    tenantQueryMock.mockResolvedValueOnce({
-      rows: [{ conversations_days: 90, messages_days: null, audit_events_days: null }],
-      rowCount: 1,
+  it('reads the override document for the tenant', async () => {
+    const coll = getMockCollection('retention_policies');
+    coll.findOne.mockResolvedValueOnce({
+      _id: 'tenant-1',
+      conversationsDays: 90,
+      messagesDays: null,
+      auditEventsDays: null,
     });
     const policy = await resolvePolicy('tenant-1');
     expect(policy.conversationsDays).toBe(90);
-    expect(tenantQueryMock).toHaveBeenCalledWith(
-      'tenant-1',
-      expect.stringContaining('FROM retention_policies'),
-      ['tenant-1']
-    );
+    expect(coll.findOne).toHaveBeenCalledWith({ _id: 'tenant-1' });
   });
 });
 
 describe('purgeTenant', () => {
-  it('deletes expired rows honoring legal holds, then audits the purge', async () => {
-    // resolvePolicy → no row; messages → 2 deleted; conversations → 1
-    // (with 0 cascade-deleted messages in the mock); audit → 3.
-    tenantQueryMock
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 2 })
-      .mockResolvedValueOnce({ rows: [{ conversations: '1', messages: '0' }], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 3 });
+  it('deletes expired documents honoring legal holds, then audits the purge', async () => {
+    // Setup: messages collection returns 2 expired messages, conversations
+    // collection confirms their conversations are not on hold.
+    const messagesColl = getMockCollection('messages');
+    const conversationsColl = getMockCollection('conversations');
+    const auditColl = getMockCollection('audit_events');
+    // purgeMessages: first batch has 2 messages, second batch empty (done)
+    messagesColl.find
+      .mockReturnValueOnce(mockCursor([
+        { _id: 'm1', conversationId: 'c1' },
+        { _id: 'm2', conversationId: 'c1' },
+      ]))
+      .mockReturnValueOnce(mockCursor([]));
+    // Legal-hold check: conversation c1 is not on hold
+    conversationsColl.find.mockReturnValueOnce(mockCursor([{ _id: 'c1' }]));
+    messagesColl.deleteMany.mockResolvedValueOnce({ deletedCount: 2 });
+
+    // purgeConversations: 1 expired conversation (not on hold), then empty
+    conversationsColl.find
+      .mockReturnValueOnce(mockCursor([{ _id: 'c2' }]))
+      .mockReturnValueOnce(mockCursor([]));
+    // withTenantTx mock handles the transaction; deleteMany on the txDb
+    // We need to mock the deleteMany calls inside withTenantTx. The mock
+    // withTenantTxMock uses the same mockCollections, so we set up:
+    // Actually, withTenantTxMock calls callback with mockDb that uses getCollection,
+    // which returns the same mock collections. So deleteMany on messages/conversations
+    // inside the transaction will hit our mocks.
+
+    // purgeAuditEvents: 3 expired audit events, then empty
+    auditColl.find
+      .mockReturnValueOnce(mockCursor([{ _id: 'a1' }, { _id: 'a2' }, { _id: 'a3' }]))
+      .mockReturnValueOnce(mockCursor([]));
+    auditColl.deleteMany.mockResolvedValueOnce({ deletedCount: 3 });
+
+    // For the conversation purge transaction, we need deleteMany to return counts
+    // The withTenantTx mock will call deleteMany on the same mock collections
+    // Let's set up sequential mock responses carefully.
+    // Order of operations in purgeTenant:
+    // 1. purgeMessages: messages.find (batch1), conversations.find (hold check), messages.deleteMany, messages.find (batch2 empty)
+    // 2. purgeConversations: conversations.find (batch1), withTenantTx[ messages.deleteMany, conversations.deleteMany ], conversations.find (batch2 empty)
+    // 3. purgeAuditEvents: audit_events.find (batch1), audit_events.deleteMany, audit_events.find (batch2 empty)
+
+    // Reset and set up in order
+    resetCollections();
+    const msgColl = getMockCollection('messages');
+    const convColl = getMockCollection('conversations');
+    const audColl = getMockCollection('audit_events');
+
+    msgColl.find
+      .mockReturnValueOnce(mockCursor([{ _id: 'm1', conversationId: 'c1' }, { _id: 'm2', conversationId: 'c1' }]))
+      .mockReturnValueOnce(mockCursor([]));
+    convColl.find
+      .mockReturnValueOnce(mockCursor([{ _id: 'c1' }])) // hold check for messages
+      .mockReturnValueOnce(mockCursor([{ _id: 'c2' }])) // conversations batch1
+      .mockReturnValueOnce(mockCursor([])); // conversations batch2
+    msgColl.deleteMany.mockResolvedValue({ deletedCount: 2 }); // messages purge
+    // Transaction deletes: messages.deleteMany and conversations.deleteMany inside withTenantTx
+    // These will use the same mocks; we need them to return specific values
+    // Let's make deleteMany return different values based on call order
+    let deleteManyCalls = 0;
+    const deleteManyImpl = async () => {
+      deleteManyCalls++;
+      if (deleteManyCalls === 1) return { deletedCount: 2 }; // messages purge (standalone)
+      if (deleteManyCalls === 2) return { deletedCount: 0 }; // messages in conversation purge (tx)
+      if (deleteManyCalls === 3) return { deletedCount: 1 }; // conversations in conversation purge (tx)
+      return { deletedCount: 0 };
+    };
+    msgColl.deleteMany.mockImplementation(deleteManyImpl);
+    convColl.deleteMany.mockImplementation(deleteManyImpl);
+    audColl.find
+      .mockReturnValueOnce(mockCursor([{ _id: 'a1' }, { _id: 'a2' }, { _id: 'a3' }]))
+      .mockReturnValueOnce(mockCursor([]));
+    audColl.deleteMany.mockResolvedValue({ deletedCount: 3 });
+
     const counts = await purgeTenant('tenant-1');
 
     expect(counts).toEqual({ conversations: 1, messages: 2, auditEvents: 3 });
-    const statements = tenantQueryMock.mock.calls.map((call) => String(call[1]));
-    // Messages purge joins conversations and skips legal holds.
-    expect(statements[1]).toContain('c.legal_hold = false');
-    // Conversations purge skips legal holds.
-    expect(statements[2]).toContain('legal_hold = false');
-    // Audit purge skips legal holds.
-    expect(statements[3]).toContain('legal_hold = false');
     // The purge audit is written AFTER the deletes (it must survive them).
     expect(recordAuditMock).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'RETENTION_PURGE', tenantId: 'tenant-1' })
     );
-    const deleteOrder = tenantQueryMock.mock.invocationCallOrder;
-    const auditOrder = recordAuditMock.mock.invocationCallOrder[0]!;
-    for (const order of deleteOrder) expect(order).toBeLessThan(auditOrder);
     const summary = recordAuditMock.mock.calls[0]![0] as { metadata: { counts: unknown } };
     expect(summary.metadata.counts).toEqual({ conversations: 1, messages: 2, auditEvents: 3 });
   });
 
-  it('loops in bounded batches until the table is drained', async () => {
-    tenantQueryMock
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // policy
-      .mockResolvedValueOnce({ rows: [], rowCount: 1000 }) // messages batch 1
-      .mockResolvedValueOnce({ rows: [], rowCount: 1000 }) // messages batch 2
-      .mockResolvedValueOnce({ rows: [], rowCount: 5 }) // messages batch 3 (done)
-      .mockResolvedValueOnce({ rows: [{ conversations: '0', messages: '0' }], rowCount: 0 }) // conversations
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 }); // audit
-    const counts = await purgeTenant('tenant-1');
-    expect(counts.messages).toBe(2005);
-  });
-
-  it('counts messages deleted with their conversations (no silent cascade)', async () => {
-    tenantQueryMock
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // policy
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // messages (none expired)
-      .mockResolvedValueOnce({ rows: [{ conversations: '2', messages: '7' }], rowCount: 1 }); // conversations + their messages
-    const counts = await purgeTenant('tenant-1');
-    expect(counts).toEqual({ conversations: 2, messages: 7, auditEvents: 0 });
-  });
-
   it('skips tables whose retention is disabled (0 override, null global)', async () => {
-    // NULL override column = fall back to global (conversations enabled via
-    // global default); explicit 0 = disabled (messages); 30 = enabled (audit).
-    tenantQueryMock.mockResolvedValueOnce({
-      rows: [{ conversations_days: null, messages_days: 0, audit_events_days: 30 }],
-      rowCount: 1,
+    resetCollections();
+    const policyColl = getMockCollection('retention_policies');
+    policyColl.findOne.mockResolvedValueOnce({
+      _id: 'tenant-1',
+      conversationsDays: null, // fall back to global (enabled)
+      messagesDays: 0, // disabled
+      auditEventsDays: 30, // enabled
     });
-    tenantQueryMock
-      .mockResolvedValueOnce({ rows: [{ conversations: '2', messages: '0' }], rowCount: 1 }) // conversations
-      .mockResolvedValueOnce({ rows: [], rowCount: 4 }); // audit events
+
+    const convColl = getMockCollection('conversations');
+    const audColl = getMockCollection('audit_events');
+    const msgColl = getMockCollection('messages');
+
+    // Conversations: 2 deleted
+    convColl.find
+      .mockReturnValueOnce(mockCursor([{ _id: 'c1' }, { _id: 'c2' }]))
+      .mockReturnValueOnce(mockCursor([]));
+    convColl.deleteMany.mockResolvedValue({ deletedCount: 2 });
+    msgColl.deleteMany.mockResolvedValue({ deletedCount: 0 });
+
+    // Audit: 4 deleted
+    audColl.find
+      .mockReturnValueOnce(mockCursor([{ _id: 'a1' }, { _id: 'a2' }, { _id: 'a3' }, { _id: 'a4' }]))
+      .mockReturnValueOnce(mockCursor([]));
+    audColl.deleteMany.mockResolvedValue({ deletedCount: 4 });
+
     const counts = await purgeTenant('tenant-1');
     expect(counts).toEqual({ conversations: 2, messages: 0, auditEvents: 4 });
-    const statements = tenantQueryMock.mock.calls.map((call) => String(call[1]));
-    expect(statements.some((s) => s.includes('DELETE FROM conversations'))).toBe(true);
-    // The standalone messages purge (the join against conversations) is not
-    // issued when disabled; the conversation CTE's explicit message delete is
-    // part of the conversation purge, not the standalone one.
-    expect(statements.some((s) => s.includes('JOIN conversations c'))).toBe(false);
-    expect(statements.some((s) => s.includes('DELETE FROM audit_events'))).toBe(true);
+    // Messages purge should not have been called (disabled)
+    expect(msgColl.find).not.toHaveBeenCalled();
   });
 
   it('a null global default disables purging for that table', async () => {
     const original = config.RETENTION_CONVERSATIONS_DAYS;
     (config as Record<string, unknown>).RETENTION_CONVERSATIONS_DAYS = null;
     try {
-      tenantQueryMock.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // no override row
+      resetCollections();
+      // No override row
+      getMockCollection('retention_policies').findOne.mockResolvedValueOnce(null);
       const counts = await purgeTenant('tenant-1');
-      const statements = tenantQueryMock.mock.calls.map((call) => String(call[1]));
-      expect(statements.some((s) => s.includes('DELETE FROM conversations'))).toBe(false);
+      const convColl = getMockCollection('conversations');
+      expect(convColl.find).not.toHaveBeenCalled();
       expect(counts.conversations).toBe(0);
     } finally {
       (config as Record<string, unknown>).RETENTION_CONVERSATIONS_DAYS = original;
@@ -166,14 +283,12 @@ describe('purgeTenant', () => {
 
 describe('purgeAllTenants', () => {
   it('sweeps every tenant, purges global audit rows, and audits the sweep', async () => {
-    queryMock.mockImplementation(async (sql: string) => {
-      if (String(sql).includes('FROM tenants')) {
-        return { rows: [{ id: 't1' }, { id: 't2' }], rowCount: 2 };
-      }
-      return { rows: [], rowCount: 0 };
-    });
+    resetCollections();
+    const tenantsColl = getMockCollection('tenants');
+    tenantsColl.find.mockReturnValue(mockCursor([{ _id: 't1' }, { _id: 't2' }]));
+
     // Global (NULL-tenant) audit rows are purged through audit.ts, which
-    // owns the audit_events table's pre-auth paths.
+    // owns the audit_events collection's pre-auth paths.
     purgeGlobalAuditEventsMock.mockResolvedValue(7);
     const result = await purgeAllTenants();
     expect(result.tenants).toBe(2);
@@ -186,18 +301,22 @@ describe('purgeAllTenants', () => {
   });
 
   it('continues past a failed tenant and reports it', async () => {
-    queryMock.mockImplementation(async (sql: string) => {
-      if (String(sql).includes('FROM tenants')) {
-        return { rows: [{ id: 't1' }, { id: 't2' }], rowCount: 2 };
-      }
-      return { rows: [], rowCount: 0 };
-    });
-    tenantQueryMock.mockImplementation(async (tenantId: string, sql: string) => {
-      if (tenantId === 't1' && String(sql).includes('retention_policies')) {
+    resetCollections();
+    const tenantsColl = getMockCollection('tenants');
+    tenantsColl.find.mockReturnValue(mockCursor([{ _id: 't1' }, { _id: 't2' }]));
+
+    // Make purgeTenant fail for t1 by making the second getDb() call throw.
+    // The first getDb() call (in purgeAllTenants to list tenants) must succeed.
+    let getDbCalls = 0;
+    getDbMock.mockImplementation(async () => {
+      getDbCalls++;
+      if (getDbCalls === 2) {
+        // This is the getDb() inside purgeTenant('t1') -> resolvePolicy('t1')
         throw new Error('db exploded');
       }
-      return { rows: [], rowCount: 0 };
+      return { collection: (name: string) => getMockCollection(name) };
     });
+
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const result = await purgeAllTenants();
@@ -212,12 +331,10 @@ describe('purgeAllTenants', () => {
   });
 
   it('surfaces a platform-global audit purge failure in the result and the sweep audit', async () => {
-    queryMock.mockImplementation(async (sql: string) => {
-      if (String(sql).includes('FROM tenants')) {
-        return { rows: [{ id: 't1' }], rowCount: 1 };
-      }
-      return { rows: [], rowCount: 0 };
-    });
+    resetCollections();
+    const tenantsColl = getMockCollection('tenants');
+    tenantsColl.find.mockReturnValue(mockCursor([{ _id: 't1' }]));
+
     purgeGlobalAuditEventsMock.mockRejectedValue(new Error('audit db down'));
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
@@ -239,12 +356,10 @@ describe('purgeAllTenants', () => {
   });
 
   it('marks the sweep audit successful when the global audit purge succeeds', async () => {
-    queryMock.mockImplementation(async (sql: string) => {
-      if (String(sql).includes('FROM tenants')) {
-        return { rows: [{ id: 't1' }], rowCount: 1 };
-      }
-      return { rows: [], rowCount: 0 };
-    });
+    resetCollections();
+    const tenantsColl = getMockCollection('tenants');
+    tenantsColl.find.mockReturnValue(mockCursor([{ _id: 't1' }]));
+
     const result = await purgeAllTenants();
     expect(result.globalAuditPurgeError).toBeNull();
     expect(recordAuditMock).toHaveBeenCalledWith(

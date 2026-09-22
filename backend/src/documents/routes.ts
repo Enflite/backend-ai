@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { ClientSession, Db, MongoServerError } from 'mongodb';
 import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
 import { CLASSIFICATIONS, Classification, canAccessClassification, classificationRank } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
 import { resolveUploadClassification } from './uploadClassification.js';
-import { tenantQuery, withTenantTx } from '../db/pool.js';
+import { getDb, withTenantTx } from '../db/mongo.js';
 import { Errors } from '../errors.js';
 import { recordAudit } from '../audit/audit.js';
 import { s3Storage } from '../storage/storage.js';
@@ -27,9 +28,107 @@ function allowedClassifications(clearance: Classification): Classification[] {
   return CLASSIFICATIONS.filter((value) => value !== 'UNKNOWN' && canAccessClassification(clearance, value));
 }
 
-const selectDocument = `SELECT DISTINCT d.id, d.tenant_id, d.owner_id, d.filename, d.mime_type, d.size_bytes,
-  d.checksum_sha256, d.classification, d.status, d.error_code, d.created_at, d.updated_at
-  FROM documents d LEFT JOIN document_permissions dp ON dp.document_id = d.id AND dp.tenant_id = d.tenant_id`;
+/** Shape of the `documents` MongoDB documents (ADR-014). */
+interface DocumentDoc {
+  _id: string;
+  tenantId: string;
+  ownerId: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  checksumSha256: string;
+  objectKey: string;
+  classification: string;
+  status: string;
+  errorCode: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  deletedAt?: Date | null;
+}
+
+/** Shape of the `document_permissions` MongoDB documents (sparse principal convention). */
+interface DocumentPermissionDoc {
+  _id: string;
+  tenantId: string;
+  documentId: string;
+  canRead: boolean;
+  userId?: string;
+  roleId?: string;
+  departmentId?: string;
+  groupId?: string;
+}
+
+/** API shape: camelCase with `_id` surfaced as `id` (matches auth route conventions). */
+function toDocumentApi(doc: DocumentDoc): Record<string, unknown> {
+  return {
+    id: doc._id,
+    tenantId: doc.tenantId,
+    ownerId: doc.ownerId,
+    filename: doc.filename,
+    mimeType: doc.mimeType,
+    sizeBytes: doc.sizeBytes,
+    checksumSha256: doc.checksumSha256,
+    classification: doc.classification,
+    status: doc.status,
+    errorCode: doc.errorCode,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
+/**
+ * Owner-or-grant predicate pieces. MongoDB has no joins, so the old
+ * `document_permissions` LEFT JOIN + EXISTS membership subqueries become
+ * explicit lookups: the caller's department/group IDs are resolved first,
+ * then grants match on exactly one principal field (the sparse unique index
+ * convention: absent principal fields are omitted, never null).
+ */
+async function principalOrConditions(
+  db: Db,
+  userId: string,
+  roleId: string | null | undefined,
+  session?: ClientSession
+): Promise<Record<string, unknown>[]> {
+  const opts = session ? { session } : undefined;
+  const [deptRows, groupRows] = await Promise.all([
+    db.collection<{ departmentId: string }>('department_memberships')
+      .find({ userId }, { ...opts, projection: { departmentId: 1 } }).toArray(),
+    db.collection<{ groupId: string }>('security_group_memberships')
+      .find({ userId }, { ...opts, projection: { groupId: 1 } }).toArray(),
+  ]);
+  const or: Record<string, unknown>[] = [{ userId }];
+  // Guarded: an unguarded `{ roleId: null }` would match every grant whose
+  // roleId is absent (sparse convention), widening access.
+  if (roleId) or.push({ roleId });
+  const departmentIds = deptRows.map((row) => row.departmentId);
+  const groupIds = groupRows.map((row) => row.groupId);
+  if (departmentIds.length > 0) or.push({ departmentId: { $in: departmentIds } });
+  if (groupIds.length > 0) or.push({ groupId: { $in: groupIds } });
+  return or;
+}
+
+/** Document IDs the caller may read via an explicit grant (owner handled separately). */
+async function grantedDocumentIds(
+  db: Db,
+  tenantId: string,
+  userId: string,
+  roleId: string | null | undefined,
+  session?: ClientSession
+): Promise<string[]> {
+  const grants = await db.collection<{ documentId: string }>('document_permissions')
+    .find(
+      { tenantId, canRead: true, $or: await principalOrConditions(db, userId, roleId, session) },
+      { ...(session ? { session } : {}), projection: { documentId: 1 } }
+    ).toArray();
+  return [...new Set(grants.map((grant) => grant.documentId))];
+}
+
+function isChecksumDuplicate(error: unknown): boolean {
+  return error instanceof MongoServerError
+    && error.code === 11000
+    && !!error.keyPattern
+    && 'checksumSha256' in error.keyPattern;
+}
 
 export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post('/documents', {
@@ -55,33 +154,45 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
     const id = randomUUID();
     const objectKey = `${auth.tenantId}/${id}`;
     await s3Storage.put(objectKey, bytes, mimeType);
+    const now = new Date();
+    const document: DocumentDoc = {
+      _id: id,
+      tenantId: auth.tenantId,
+      ownerId: auth.userId,
+      filename,
+      mimeType,
+      sizeBytes: bytes.length,
+      checksumSha256: checksum,
+      objectKey,
+      classification,
+      status: 'PENDING',
+      errorCode: null,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    };
     let metadataCreated = false;
     try {
-      const document = (
-        await tenantQuery(
-          auth.tenantId,
-          `INSERT INTO documents (id, tenant_id, owner_id, filename, mime_type, size_bytes, checksum_sha256, object_key, classification)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-           RETURNING id, tenant_id, owner_id, filename, mime_type, size_bytes, checksum_sha256, classification, status, created_at, updated_at`,
-          [id, auth.tenantId, auth.userId, filename, mimeType, bytes.length, checksum, objectKey, classification]
-        )
-      ).rows[0];
+      const db = await getDb();
+      // UNIQUE (tenantId, checksumSha256): the same file was already uploaded.
+      // The unique index makes this insert the atomic duplicate check; a
+      // duplicate-key error below maps to DUPLICATE_DOCUMENT.
+      await db.collection<DocumentDoc>('documents').insertOne(document);
       metadataCreated = true;
       await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip, action: 'DOCUMENT_UPLOAD', resource: 'document', resourceId: id, classification });
       await enqueueIngestion({ documentId: id, tenantId: auth.tenantId, requestedBy: auth.userId, requestId: req.requestId });
-      return reply.status(201).send({ document });
+      return reply.status(201).send({ document: toDocumentApi(document) });
     } catch (error) {
-      if (error && typeof error === 'object' && (error as { code?: string }).code === '23505'
-        && typeof (error as { constraint?: string }).constraint === 'string'
-        && (error as { constraint?: string }).constraint!.includes('checksum')) {
-        // UNIQUE (tenant_id, checksum_sha256): the same file was already uploaded.
+      if (isChecksumDuplicate(error)) {
         await s3Storage.delete(objectKey).catch(() => undefined);
         throw Errors.conflict('DUPLICATE_DOCUMENT', 'This file has already been uploaded');
       }
       if (metadataCreated) {
-        await tenantQuery(auth.tenantId,
-          "UPDATE documents SET status = 'FAILED', error_code = 'QUEUE_UNAVAILABLE', updated_at = NOW() WHERE id = $1",
-          [id]);
+        const db = await getDb();
+        await db.collection<DocumentDoc>('documents').updateOne(
+          { _id: id, tenantId: auth.tenantId },
+          { $set: { status: 'FAILED', errorCode: 'QUEUE_UNAVAILABLE', updatedAt: new Date() } }
+        );
       } else {
         await s3Storage.delete(objectKey).catch(() => undefined);
       }
@@ -96,49 +207,38 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
       offset: z.coerce.number().int().min(0).default(0),
     }).safeParse(req.query);
     if (!pagination.success) throw Errors.badRequest('INVALID_PAGINATION', 'Invalid pagination parameters');
-    const result = await tenantQuery(
-      auth.tenantId,
-      `${selectDocument}
-       WHERE d.tenant_id = $1 AND d.deleted_at IS NULL AND d.classification = ANY($2::text[])
-         AND (d.owner_id = $3 OR (dp.can_read AND (
-           dp.user_id = $3 OR dp.role_id = $4
-           OR (dp.department_id IS NOT NULL AND EXISTS (
-             SELECT 1 FROM department_memberships dm WHERE dm.tenant_id = $1 AND dm.department_id = dp.department_id AND dm.user_id = $3
-           ))
-           OR (dp.group_id IS NOT NULL AND EXISTS (
-             SELECT 1 FROM security_group_memberships gm WHERE gm.tenant_id = $1 AND gm.group_id = dp.group_id AND gm.user_id = $3
-           ))
-         )))
-       ORDER BY d.created_at DESC LIMIT $5 OFFSET $6`,
-      [auth.tenantId, allowedClassifications(auth.clearance), auth.userId, auth.roleId, pagination.data.limit, pagination.data.offset]
-    );
-    return reply.send({ documents: result.rows, pagination: pagination.data });
+    const db = await getDb();
+    const grantedIds = await grantedDocumentIds(db, auth.tenantId, auth.userId, auth.roleId);
+    const documents = await db.collection<DocumentDoc>('documents')
+      .find({
+        tenantId: auth.tenantId,
+        deletedAt: null,
+        classification: { $in: allowedClassifications(auth.clearance) },
+        $or: [{ ownerId: auth.userId }, { _id: { $in: grantedIds } }],
+      })
+      .sort({ createdAt: -1 })
+      .skip(pagination.data.offset)
+      .limit(pagination.data.limit)
+      .toArray();
+    return reply.send({ documents: documents.map(toDocumentApi), pagination: pagination.data });
   });
 
   fastify.get('/documents/:id', { preHandler: [requireAuth, requirePermission('document:read')] }, async (req, reply) => {
     const auth = req.auth!;
     const parsed = idSchema.safeParse(req.params);
     if (!parsed.success) throw Errors.badRequest('INVALID_ID', 'Invalid document ID');
-    const document = (
-      await tenantQuery(
-        auth.tenantId,
-        `${selectDocument}
-         WHERE d.id = $1 AND d.tenant_id = $2 AND d.deleted_at IS NULL AND d.classification = ANY($3::text[])
-           AND (d.owner_id = $4 OR (dp.can_read AND (
-             dp.user_id = $4 OR dp.role_id = $5
-             OR (dp.department_id IS NOT NULL AND EXISTS (
-               SELECT 1 FROM department_memberships dm WHERE dm.tenant_id = $2 AND dm.department_id = dp.department_id AND dm.user_id = $4
-             ))
-             OR (dp.group_id IS NOT NULL AND EXISTS (
-               SELECT 1 FROM security_group_memberships gm WHERE gm.tenant_id = $2 AND gm.group_id = dp.group_id AND gm.user_id = $4
-             ))
-           )))`,
-        [parsed.data.id, auth.tenantId, allowedClassifications(auth.clearance), auth.userId, auth.roleId]
-      )
-    ).rows[0];
+    const db = await getDb();
+    const grantedIds = await grantedDocumentIds(db, auth.tenantId, auth.userId, auth.roleId);
+    const document = await db.collection<DocumentDoc>('documents').findOne({
+      _id: parsed.data.id,
+      tenantId: auth.tenantId,
+      deletedAt: null,
+      classification: { $in: allowedClassifications(auth.clearance) },
+      $or: [{ ownerId: auth.userId }, { _id: { $in: grantedIds } }],
+    });
     if (!document) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
     await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, action: 'DOCUMENT_ACCESS', resource: 'document', resourceId: parsed.data.id });
-    return reply.send({ document });
+    return reply.send({ document: toDocumentApi(document) });
   });
 
   fastify.post('/documents/:id/retry', {
@@ -147,11 +247,23 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
   }, async (req, reply) => {
     const parsed = idSchema.safeParse(req.params);
     if (!parsed.success) throw Errors.badRequest('INVALID_ID', 'Invalid document ID');
-    const owned = await tenantQuery(req.auth!.tenantId,
-      "SELECT 1 FROM documents WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL AND status IN ('FAILED', 'QUARANTINED') AND classification <> 'UNKNOWN'",
-      [parsed.data.id, req.auth!.userId]);
-    if (owned.rowCount !== 1) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
-    await tenantQuery(req.auth!.tenantId, "UPDATE documents SET status = 'PENDING', error_code = NULL, updated_at = NOW() WHERE id = $1", [parsed.data.id]);
+    const db = await getDb();
+    const owned = await db.collection<DocumentDoc>('documents').findOne(
+      {
+        _id: parsed.data.id,
+        tenantId: req.auth!.tenantId,
+        ownerId: req.auth!.userId,
+        deletedAt: null,
+        status: { $in: ['FAILED', 'QUARANTINED'] },
+        classification: { $ne: 'UNKNOWN' },
+      },
+      { projection: { _id: 1 } }
+    );
+    if (!owned) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
+    await db.collection<DocumentDoc>('documents').updateOne(
+      { _id: parsed.data.id, tenantId: req.auth!.tenantId },
+      { $set: { status: 'PENDING', errorCode: null, updatedAt: new Date() } }
+    );
     const jobId = await enqueueIngestion({ documentId: parsed.data.id, tenantId: req.auth!.tenantId,
       requestedBy: req.auth!.userId, requestId: req.requestId });
     return reply.status(202).send({ status: 'PENDING', jobId });
@@ -207,57 +319,64 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
     if (!parsedId.success || !parsedBody.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid classification request');
     const next = parsedBody.data.classification;
     assertClassificationAllowed(auth.clearance, next);
-    // Status guard, UPDATE, and chunk DELETE run in ONE transaction holding a
-    // row lock (SELECT ... FOR UPDATE). Concurrent relabels serialize on the
-    // lock: the second transaction re-evaluates the guard against the
-    // committed state, so it can never overwrite an in-flight reclassification
-    // or resurrect chunks of the previous label.
-    const reclassified = await withTenantTx(auth.tenantId, async (client) => {
-      const current = (
-        await client.query<{ classification: Classification; owner_id: string; has_grant: boolean }>(
-          `SELECT d.classification, d.owner_id,
-             EXISTS (
-               SELECT 1 FROM document_permissions dp
-               WHERE dp.document_id = d.id AND dp.tenant_id = d.tenant_id AND dp.can_read AND (
-                 dp.user_id = $3 OR dp.role_id = $4
-                 OR (dp.department_id IS NOT NULL AND EXISTS (
-                   SELECT 1 FROM department_memberships dm WHERE dm.tenant_id = $2 AND dm.department_id = dp.department_id AND dm.user_id = $3
-                 ))
-                 OR (dp.group_id IS NOT NULL AND EXISTS (
-                   SELECT 1 FROM security_group_memberships gm WHERE gm.tenant_id = $2 AND gm.group_id = dp.group_id AND gm.user_id = $3
-                 ))
-               )
-             ) AS has_grant
-           FROM documents d
-           WHERE d.id = $1 AND d.tenant_id = $2 AND d.deleted_at IS NULL AND d.status NOT IN ('PENDING', 'PROCESSING')
-           FOR UPDATE`,
-          [parsedId.data.id, auth.tenantId, auth.userId, auth.roleId])
-      ).rows[0];
+    // Status guard, UPDATE, and chunk DELETE run in ONE transaction. The
+    // update re-applies the status guard atomically (findOneAndUpdate with
+    // the guard in the filter): concurrent relabels serialize on the
+    // document — the second one finds status PENDING (set by the first) and
+    // fails closed instead of overwriting an in-flight reclassification or
+    // resurrecting chunks of the previous label.
+    const reclassified = await withTenantTx(auth.tenantId, async (session, db, tenantId) => {
+      const current = await db.collection<DocumentDoc>('documents').findOne(
+        {
+          _id: parsedId.data.id,
+          tenantId,
+          deletedAt: null,
+          status: { $nin: ['PENDING', 'PROCESSING'] },
+        },
+        { session, projection: { classification: 1, ownerId: 1 } }
+      );
       if (!current) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
+      const grant = await db.collection<DocumentPermissionDoc>('document_permissions').findOne(
+        {
+          tenantId,
+          documentId: parsedId.data.id,
+          canRead: true,
+          $or: await principalOrConditions(db, auth.userId, auth.roleId, session),
+        },
+        { session, projection: { _id: 1 } }
+      );
       // Only the owner, a caller holding an explicit document grant (the same
       // owner-or-grant predicate as the document GET route), or a tenant
       // manager may relabel a document: a classification grant alone must never
       // let a user who cannot read a document downgrade it to PUBLIC.
-      const mayRelabel = current.owner_id === auth.userId
-        || current.has_grant
+      const mayRelabel = current.ownerId === auth.userId
+        || grant !== null
         || auth.permissions.includes('tenant:manage');
       if (!mayRelabel) {
         throw Errors.forbidden('DOCUMENT_RECLASSIFY_FORBIDDEN', 'Only the document owner, a granted collaborator, or a tenant manager can change its classification');
       }
       // The caller must be cleared for the document's CURRENT label as well as the new one.
-      assertClassificationAllowed(auth.clearance, current.classification);
+      assertClassificationAllowed(auth.clearance, current.classification as Classification);
       // Downgrades require explicit confirmation so a single misclick can't declassify data.
-      if (classificationRank(next) < classificationRank(current.classification) && parsedBody.data.confirm !== true) {
+      if (classificationRank(next) < classificationRank(current.classification as Classification) && parsedBody.data.confirm !== true) {
         throw Errors.conflict('CONFIRMATION_REQUIRED', 'Classification downgrade requires explicit confirmation', { from: current.classification, to: next });
       }
-      const updated = await client.query(
-        `UPDATE documents SET classification = $3, status = 'PENDING', error_code = NULL, updated_at = NOW()
-         WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL AND status NOT IN ('PENDING', 'PROCESSING')
-         RETURNING id, classification, status`,
-        [parsedId.data.id, auth.tenantId, next]);
-      if (updated.rowCount !== 1) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
-      await client.query('DELETE FROM document_chunks WHERE document_id = $1', [parsedId.data.id]);
-      return { document: updated.rows[0], previousClassification: current.classification };
+      const updated = await db.collection<DocumentDoc>('documents').findOneAndUpdate(
+        {
+          _id: parsedId.data.id,
+          tenantId,
+          deletedAt: null,
+          status: { $nin: ['PENDING', 'PROCESSING'] },
+        },
+        { $set: { classification: next, status: 'PENDING', errorCode: null, updatedAt: new Date() } },
+        { session, returnDocument: 'after' }
+      );
+      if (!updated) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
+      await db.collection<{ _id: string; tenantId: string; documentId: string }>('document_chunks').deleteMany(
+        { tenantId, documentId: parsedId.data.id },
+        { session }
+      );
+      return { document: toDocumentApi(updated), previousClassification: current.classification };
     });
     // Fail-closed audit must not strand the document: capture an audit
     // failure, enqueue the ingestion job anyway (the document is PENDING and
@@ -282,12 +401,17 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
     const auth = req.auth!;
     const parsed = idSchema.safeParse(req.params);
     if (!parsed.success) throw Errors.badRequest('INVALID_ID', 'Invalid document ID');
-    const document = (
-      await tenantQuery<{ object_key: string }>(auth.tenantId, 'SELECT object_key FROM documents WHERE id = $1 AND tenant_id = $2 AND owner_id = $3 AND deleted_at IS NULL', [parsed.data.id, auth.tenantId, auth.userId])
-    ).rows[0];
+    const db = await getDb();
+    const document = await db.collection<DocumentDoc>('documents').findOne(
+      { _id: parsed.data.id, tenantId: auth.tenantId, ownerId: auth.userId, deletedAt: null },
+      { projection: { objectKey: 1 } }
+    );
     if (!document) throw Errors.notFound('DOCUMENT_NOT_FOUND', 'Document not found');
-    await tenantQuery(auth.tenantId, "UPDATE documents SET status = 'DELETED', deleted_at = NOW(), updated_at = NOW() WHERE id = $1", [parsed.data.id]);
-    await s3Storage.delete(document.object_key).catch((error) => {
+    await db.collection<DocumentDoc>('documents').updateOne(
+      { _id: parsed.data.id, tenantId: auth.tenantId },
+      { $set: { status: 'DELETED', deletedAt: new Date(), updatedAt: new Date() } }
+    );
+    await s3Storage.delete(document.objectKey).catch((error) => {
       req.log.error({ err: error, documentId: parsed.data.id }, 'Deleted document object cleanup failed');
     });
     await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, action: 'DOCUMENT_DELETE', resource: 'document', resourceId: parsed.data.id });

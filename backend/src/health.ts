@@ -1,6 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { PoolClient } from 'pg';
-import { pool } from './db/pool.js';
+import { getDb } from './db/mongo.js';
 import { config } from './config.js';
 import { s3Storage } from './storage/storage.js';
 
@@ -38,17 +37,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 async function checkDatabase(): Promise<DependencyCheck> {
   const started = Date.now();
   const timeoutMs = config.READY_CHECK_TIMEOUT_MS;
-  // Bounded server-side: statement_timeout cancels the probe query inside
-  // Postgres, so a timed-out probe never outlives the check on a pooled
-  // connection (a bare Promise.race would leave the backend running). A
-  // wedged connection — one that answers nothing at all — is destroyed
-  // rather than returned to the pool. A connect failure (pool exhaustion,
-  // database down) reports degraded instead of 500ing the whole route.
-  let client: PoolClient | undefined;
+  // Bounded: withTimeout races the ping against the timeout. A connect
+  // failure (database down, auth failure) reports degraded instead of
+  // 500ing the whole route.
   try {
-    client = await pool.connect();
-    await client.query('SELECT set_config($1, $2, false)', ['statement_timeout', String(timeoutMs)]);
-    await withTimeout(client.query('SELECT 1'), timeoutMs, 'database check');
+    const db = await getDb();
+    await withTimeout(db.command({ ping: 1 }), timeoutMs, 'database check');
     return { status: 'ok', critical: true, latencyMs: Date.now() - started };
   } catch (error) {
     return {
@@ -57,18 +51,6 @@ async function checkDatabase(): Promise<DependencyCheck> {
       latencyMs: Date.now() - started,
       detail: error instanceof Error ? error.message : 'unknown error',
     };
-  } finally {
-    if (client) {
-      let healthy = true;
-      try {
-        await client.query('SELECT set_config($1, $2, false)', ['statement_timeout', '0']);
-      } catch {
-        healthy = false;
-      }
-      // A truthy error destroys the client instead of returning a possibly
-      // wedged connection to the pool.
-      client.release(healthy ? undefined : new Error('readiness check connection wedged'));
-    }
   }
 }
 

@@ -11,11 +11,12 @@
  * fragment, never the query string.
  */
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { config, parseExpiresInToMs } from '../config.js';
-import { query, withTx } from '../db/pool.js';
+import { getDb, withTx } from '../db/mongo.js';
 import { Errors, AppError } from '../errors.js';
+import { Classification } from '../authz/permissions.js';
 import { recordAudit } from '../audit/audit.js';
 import { createSession, setRefreshCookie } from './sessions.js';
 import { buildAuth, MembershipRow } from './routes.js';
@@ -30,6 +31,34 @@ import {
 } from './oidc.js';
 
 const OIDC_RATE_LIMIT = { max: 10, timeWindow: '1 minute' } as const;
+
+// MongoDB document shapes (camelCase, UUID-string _id — ADR-014).
+interface UserDoc {
+  _id: string;
+  email: string;
+  passwordHash?: string;
+  displayName: string;
+  isActive: boolean;
+  clearance: Classification;
+  failedLoginAttempts?: number;
+  lockedUntil?: Date | null;
+  createdAt?: Date;
+}
+
+interface OidcIdentityDoc {
+  _id: string;
+  issuer: string;
+  subject: string;
+  userId: string;
+  createdAt?: Date;
+}
+
+interface MembershipDoc {
+  _id: string;
+  userId: string;
+  tenantId: string;
+  roleId: string;
+}
 
 /**
  * Short-lived browser-binding cookie for the OIDC login flow. The login
@@ -52,16 +81,31 @@ function failedLoginRedirect(reply: FastifyReply, code: string): void {
 }
 
 function isUniqueViolation(error: unknown): boolean {
-  return !!error && typeof error === 'object' && (error as { code?: unknown }).code === '23505';
+  // MongoDB duplicate-key error (unique index on (issuer, subject) or on
+  // users.email), replacing PostgreSQL's 23505.
+  return !!error && typeof error === 'object' && (error as { code?: unknown }).code === 11000;
 }
 
-async function findUserById(id: string): Promise<{ id: string; is_active: boolean } | undefined> {
-  return (await query<{ id: string; is_active: boolean }>('SELECT id, is_active FROM users WHERE id = $1', [id])).rows[0];
+function isEmailConflict(error: unknown): boolean {  // A users.email unique conflict means a *different* IdP identity is trying
+  // to provision with an email another account already owns. Identity is the
+  // (issuer, subject) pair — email is provisioning data and must never merge
+  // identities — so this fails closed rather than attaching to the existing
+  // account.
+  if (!error || typeof error !== 'object') return false;
+  const keyPattern = (error as { keyPattern?: Record<string, unknown> }).keyPattern;
+  const keyValue = (error as { keyValue?: Record<string, unknown> }).keyValue;
+  return !!(keyPattern && 'email' in keyPattern) || !!(keyValue && 'email' in keyValue);
 }
 
-function requireActive(user: { id: string; is_active: boolean } | undefined): string {
+async function findUserById(id: string): Promise<{ id: string; isActive: boolean } | undefined> {
+  const db = await getDb();
+  const doc = await db.collection<UserDoc>('users').findOne({ _id: id }, { projection: { isActive: 1 } });
+  return doc ? { id: doc._id, isActive: doc.isActive } : undefined;
+}
+
+function requireActive(user: { id: string; isActive: boolean } | undefined): string {
   if (!user) throw Errors.internal('OIDC identity points at a missing user', undefined, 'OIDC_ORPHAN_IDENTITY');
-  if (!user.is_active) throw Errors.forbidden('ACCOUNT_DISABLED', 'Account is disabled');
+  if (!user.isActive) throw Errors.forbidden('ACCOUNT_DISABLED', 'Account is disabled');
   return user.id;
 }
 
@@ -72,17 +116,17 @@ function requireActive(user: { id: string; is_active: boolean } | undefined): st
  * merge or split identities).
  */
 async function findOrProvisionUserId(issuer: string, claims: OidcClaims): Promise<string> {
-  const existing = (
-    await query<{ user_id: string }>('SELECT user_id FROM oidc_identities WHERE issuer = $1 AND subject = $2', [
-      issuer,
-      claims.sub,
-    ])
-  ).rows[0];
+  // oidc_identities is a pre-auth table (no tenant yet): no tenantId filter.
+  const db = await getDb();
+  const existing = await db.collection<OidcIdentityDoc>('oidc_identities').findOne(
+    { issuer, subject: claims.sub },
+    { projection: { userId: 1 } }
+  );
   if (existing) {
-    const user = await findUserById(existing.user_id);
+    const user = await findUserById(existing.userId);
     if (user) return requireActive(user);
-    // Stale mapping (the user row is gone): drop it and provision fresh.
-    await query('DELETE FROM oidc_identities WHERE issuer = $1 AND subject = $2', [issuer, claims.sub]);
+    // Stale mapping (the user document is gone): drop it and provision fresh.
+    await db.collection<OidcIdentityDoc>('oidc_identities').deleteOne({ issuer, subject: claims.sub });
   }
   // First login: auto-provision the user and the identity mapping in one
   // transaction. The password hash is a deliberately unusable marker —
@@ -90,62 +134,84 @@ async function findOrProvisionUserId(issuer: string, claims: OidcClaims): Promis
   // $argon2… hashes) — and the clearance is least-privilege.
   const email = claims.email!.toLowerCase();
   try {
-    return await withTx(async (client) => {
-      // Serialize concurrent first-logins for the same IdP identity: the
-      // loser waits here, then sees the winner's committed row below —
-      // no duplicate users, no failed logins.
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))', [issuer, claims.sub]);
-      const raced = (
-        await client.query<{ user_id: string }>(
-          'SELECT user_id FROM oidc_identities WHERE issuer = $1 AND subject = $2',
-          [issuer, claims.sub]
-        )
-      ).rows[0];
-      if (raced) return requireActive(await findUserById(raced.user_id));
-      const userId = (
-        await client.query<{ id: string }>(
-          `INSERT INTO users (email, password_hash, display_name, clearance, is_active)
-           VALUES ($1, $2, $3, $4, true) RETURNING id`,
-          [email, `oidc-managed-${randomBytes(16).toString('hex')}`, claims.name ?? email, config.OIDC_DEFAULT_CLEARANCE]
-        )
-      ).rows[0]!.id;
-      await client.query('INSERT INTO oidc_identities (issuer, subject, user_id) VALUES ($1, $2, $3)', [
-        issuer,
-        claims.sub,
-        userId,
-      ]);
+    return await withTx(async (session, txDb) => {
+      // Re-read inside the transaction: a concurrent first-login for the
+      // same IdP identity either commits first (we see the winner's row
+      // here) or hits the unique index on (issuer, subject) below, which
+      // the catch block turns into a re-read of the winner — no duplicate
+      // users, no failed logins. (PostgreSQL's advisory lock has no
+      // MongoDB equivalent; the unique index is the serialization point.)
+      const raced = await txDb.collection<OidcIdentityDoc>('oidc_identities').findOne(
+        { issuer, subject: claims.sub },
+        { projection: { userId: 1 }, session }
+      );
+      if (raced) return requireActive(await findUserById(raced.userId));
+      const userId = randomUUID();
+      await txDb.collection<UserDoc>('users').insertOne(
+        {
+          _id: userId,
+          email,
+          passwordHash: `oidc-managed-${randomBytes(16).toString('hex')}`,
+          displayName: claims.name ?? email,
+          clearance: config.OIDC_DEFAULT_CLEARANCE,
+          isActive: true,
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+          createdAt: new Date(),
+        },
+        { session }
+      );
+      await txDb.collection<OidcIdentityDoc>('oidc_identities').insertOne(
+        {
+          _id: randomUUID(),
+          issuer,
+          subject: claims.sub,
+          userId,
+          createdAt: new Date(),
+        },
+        { session }
+      );
       return userId;
     });
   } catch (error) {
-    // Backstop: if the advisory lock didn't cover the race (e.g. two
-    // app instances against databases without lock visibility — not the
-    // case for a single Postgres, but cheap to handle), the unique
-    // constraint on (issuer, subject) still prevents a duplicate
-    // identity: roll back and re-read the winner.
+    // Backstop: the unique index on (issuer, subject) prevents a duplicate
+    // identity even if two app instances race: roll back and re-read the
+    // winner.
     if (isUniqueViolation(error)) {
-      // A users.email unique conflict means a *different* IdP identity is
-      // trying to provision with an email another account already owns.
-      // Identity is the (issuer, subject) pair — email is provisioning data
-      // and must never merge identities — so this fails closed rather than
-      // attaching to the existing account.
-      if ((error as { constraint?: unknown }).constraint === 'users_email_key') {
+      if (isEmailConflict(error)) {
         throw Errors.conflict('OIDC_EMAIL_CONFLICT', 'Email is already associated with a different account');
       }
-      const winner = (
-        await query<{ user_id: string }>('SELECT user_id FROM oidc_identities WHERE issuer = $1 AND subject = $2', [
-          issuer,
-          claims.sub,
-        ])
-      ).rows[0];
-      if (winner) return requireActive(await findUserById(winner.user_id));
+      const winner = await db.collection<OidcIdentityDoc>('oidc_identities').findOne(
+        { issuer, subject: claims.sub },
+        { projection: { userId: 1 } }
+      );
+      if (winner) return requireActive(await findUserById(winner.userId));
     }
     throw error;
   }
 }
 
-const MEMBERSHIP_SQL = `SELECT m.tenant_id, t.name AS tenant_name, r.id AS role_id, r.name AS role_name
-   FROM memberships m JOIN tenants t ON t.id = m.tenant_id JOIN roles r ON r.id = m.role_id
-   WHERE m.user_id = $1 AND m.tenant_id = $2`;
+/**
+ * Resolves a user's membership in a tenant to the MembershipRow shape
+ * (membership + tenant name + role), replacing the memberships/tenants/
+ * roles join.
+ */
+async function membershipRowFor(userId: string, tenantId: string): Promise<MembershipRow | null> {
+  const db = await getDb();
+  const membership = await db.collection<MembershipDoc>('memberships').findOne({ userId, tenantId });
+  if (!membership) return null;
+  const [tenant, role] = await Promise.all([
+    db.collection<{ _id: string; name: string }>('tenants').findOne({ _id: tenantId }, { projection: { name: 1 } }),
+    db.collection<{ _id: string; name: string }>('roles').findOne({ _id: membership.roleId }, { projection: { name: 1 } }),
+  ]);
+  if (!tenant || !role) return null;
+  return {
+    tenantId: membership.tenantId,
+    tenantName: tenant.name,
+    roleId: membership.roleId,
+    roleName: role.name,
+  };
+}
 
 /**
  * Ensures the user is a member of the default SSO tenant. New SSO users get
@@ -153,17 +219,23 @@ const MEMBERSHIP_SQL = `SELECT m.tenant_id, t.name AS tenant_name, r.id AS role_
  * changes are never silently rewritten by a login).
  */
 async function ensureDefaultTenantMembership(userId: string, roleName: string): Promise<MembershipRow> {
-  const existing = (await query<MembershipRow>(MEMBERSHIP_SQL, [userId, config.OIDC_DEFAULT_TENANT_ID])).rows[0];
+  const db = await getDb();
+  // Required at boot when OIDC is enabled (config.ts), so the non-null
+  // assertion is safe here.
+  const tenantId = config.OIDC_DEFAULT_TENANT_ID!;
+  const existing = await membershipRowFor(userId, tenantId);
   if (existing) return existing;
-  const roleId = (await query<{ id: string }>('SELECT id FROM roles WHERE name = $1', [roleName])).rows[0]?.id;
-  if (roleId) {
-    await query('INSERT INTO memberships (user_id, tenant_id, role_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [
-      userId,
-      config.OIDC_DEFAULT_TENANT_ID,
-      roleId,
-    ]);
+  const role = await db.collection<{ _id: string; name: string }>('roles').findOne({ name: roleName }, { projection: { _id: 1 } });
+  if (role) {
+    // INSERT ... ON CONFLICT DO NOTHING → upsert with $setOnInsert, so a
+    // concurrent provisioner winning the race does not error.
+    await db.collection<MembershipDoc>('memberships').updateOne(
+      { userId, tenantId },
+      { $setOnInsert: { _id: randomUUID(), userId, tenantId, roleId: role._id, createdAt: new Date() } },
+      { upsert: true }
+    );
   }
-  const membership = (await query<MembershipRow>(MEMBERSHIP_SQL, [userId, config.OIDC_DEFAULT_TENANT_ID])).rows[0];
+  const membership = await membershipRowFor(userId, tenantId);
   if (!membership) throw Errors.internal('OIDC membership provisioning failed', undefined, 'OIDC_MEMBERSHIP_FAILED');
   return membership;
 }
@@ -255,19 +327,32 @@ export async function oidcRoutes(fastify: FastifyInstance): Promise<void> {
       // memberships only: existing memberships keep their admin-managed role.
       const mappedRole = await resolveInternalRole(groups);
       const userId = await findOrProvisionUserId(idClaims.issuer, claims);
+      const db = await getDb();
       const membership = await ensureDefaultTenantMembership(userId, mappedRole ?? 'User');
 
-      const user = (
-        await query('SELECT id, email, display_name, is_active, clearance FROM users WHERE id = $1', [userId])
-      ).rows[0]!;
-      const auth = await buildAuth(user, membership);
+      const user = await db.collection<UserDoc>('users').findOne(
+        { _id: userId },
+        { projection: { email: 1, displayName: 1, isActive: 1, clearance: 1 } }
+      );
+      if (!user) throw Errors.internal('OIDC identity points at a missing user', undefined, 'OIDC_ORPHAN_IDENTITY');
+      const auth = await buildAuth(
+        {
+          id: user._id,
+          email: user.email,
+          passwordHash: '',
+          displayName: user.displayName,
+          isActive: user.isActive,
+          clearance: user.clearance,
+        },
+        membership
+      );
       const session = await createSession(auth);
       setRefreshCookie(reply, session.refreshToken);
       await recordAudit({
         action: 'LOGIN',
         classification: 'INTERNAL',
         userId,
-        tenantId: membership.tenant_id,
+        tenantId: membership.tenantId,
         success: true,
         requestId: request.requestId,
         ip: request.ip,

@@ -9,38 +9,33 @@
 # COOKIE_SECURE=true, MALWARE_SCAN_MODE=http with MALWARE_SCANNER_ENDPOINT, an
 # explicit CORS_ORIGIN, and a high-entropy JWT_SECRET (>= 32 chars).
 services:
-  postgres:
-    # Pinned minor version (0.8.x on PostgreSQL 16). Do not use the floating
-    # :pg16 tag: filtered HNSW scans require vector >= 0.7.0 (iterative scan
-    # fix, pgvector 0.7.0), and an unpinned tag could silently change the
-    # extension version under a running database. After upgrading the image,
-    # run `ALTER EXTENSION vector UPDATE;` in each database.
-    image: pgvector/pgvector:0.8.4-pg16
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-ai}
+  mongodb:
+    # Local development MongoDB. For shared/staging/production, use MongoDB
+    # Atlas (mongodb+srv://) via the MONGODB_URI environment variable.
+    # Vector search ($vectorSearch) requires Atlas; the local container is
+    # for API/CRUD development only.
+    image: mongo:8.0
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:27017:27017"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ai"]
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.runCommand({ping:1})'"]
       interval: 5s
       timeout: 5s
       retries: 5
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - mongodata:/data/db
 
   backend:
     build:
       context: ./backend
       target: dev
     depends_on:
-      postgres:
+      mongodb:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-ai}
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017/enflite-ai}
       # Dev-only placeholder default. Override JWT_SECRET in any non-local
       # environment; the checked-in default must never be used beyond local dev.
       JWT_SECRET: ${JWT_SECRET:-dev-only-secret-do-not-use-in-production-min-32-chars}
@@ -104,6 +99,6 @@ services:
       - "8000:8000"
 
 volumes:
-  pgdata:
+  mongodata:
   objectdata:
   repodata:
