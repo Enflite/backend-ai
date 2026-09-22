@@ -658,16 +658,16 @@ describe('eval routes', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.provider).toBe('mock');
-    // Default corpus is the full 146-case suite (142 base + 4 repo-index
-    // coding cases); the 10 llm-judge cases run under the deterministic mock
-    // judge (judge mode default) — zero skips. saveCaseResult still persists
-    // one row per case.
-    expect(body.summary.total).toBe(146);
-    expect(body.summary.passed).toBe(146);
+    // Default corpus is the full 153-case suite (142 base + 4 repo-index
+    // coding cases + 7 agentic-ownership cases); the 10 llm-judge cases run
+    // under the deterministic mock judge (judge mode default) — zero skips.
+    // saveCaseResult still persists one row per case.
+    expect(body.summary.total).toBe(153);
+    expect(body.summary.passed).toBe(153);
     expect(body.summary.skipped).toBe(0);
     // One row per case, including judged ones.
-    expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(146);
-    expect(vi.mocked(finishRun)).toHaveBeenCalledWith('run-1', expect.objectContaining({ total: 146 }));
+    expect(vi.mocked(saveCaseResult).mock.calls).toHaveLength(153);
+    expect(vi.mocked(finishRun)).toHaveBeenCalledWith('run-1', expect.objectContaining({ total: 153 }));
     await app.close();
   });
 
