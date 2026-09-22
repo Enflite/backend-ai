@@ -88,9 +88,10 @@ export interface EvalCaseResult {
   details: unknown;
   latencyMs: number;
   /**
-   * True when the case did not run (currently: llm-judge cases with no judge
-   * model configured). Skipped cases are excluded from total/passed/failed,
-   * byCategory, byDimension, and p0Failed — they are reported, never gated.
+   * True when the case did not run (currently: llm-judge cases in
+   * EVAL_JUDGE_MODE=skip). Skipped cases are excluded from total/passed/
+   * failed, byCategory, byDimension, and p0Failed — they are reported, never
+   * gated.
    */
   skipped?: boolean;
 }
@@ -105,11 +106,14 @@ export interface EvalRunSummary {
   byCategory: Record<string, { passed: number; total: number }>;
   p0Failed: string[];
   /**
-   * Per-dimension pass-rate breakdown (charter §5). Computed only over cases
-   * that actually ran — skipped cases are excluded. A case with multiple
-   * dimensions contributes its verdict to each.
+   * Per-dimension pass-rate breakdown (charter §5). Computed only over
+   * deterministic-judge cases that actually ran — skipped cases are
+   * excluded, and so are llm-judge verdicts (mock or real): they are
+   * measurement instruments with error bars, reported separately, and never
+   * gate promotion on their own. A case with multiple dimensions
+   * contributes its verdict to each.
    */
   byDimension: Record<string, { passed: number; total: number }>;
-  /** Cases skipped without running (llm-judge without a judge model). */
+  /** Cases skipped without running (llm-judge in skip mode). */
   skipped: number;
 }

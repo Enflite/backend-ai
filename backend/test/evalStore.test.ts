@@ -123,6 +123,13 @@ describe('eval store', () => {
     expect(text).toContain('passed = false');
   });
 
+  it('getP0Failures excludes llm-judge verdicts: they never gate promotion', async () => {
+    vi.mocked(query).mockResolvedValue(rows([]));
+    await getP0Failures('run-1');
+    const [text] = vi.mocked(query).mock.calls[0]!;
+    expect(text).toContain("'llm-judge'");
+  });
+
   it('compareRuns reports deltas, regressions, and improvements', async () => {
     const resultsA = [
       { case_id: 'keep-pass', category: 'coding', passed: true },

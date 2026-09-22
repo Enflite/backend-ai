@@ -245,8 +245,9 @@ export const EVAL_SEED_CORPUS: EvalCase[] = [
   },
 
   // ------------------------------------------------------------------
-  // llm-judge (subjective charter dimensions — REQUIRE A JUDGE MODEL;
-  // skipped, never failed, when EVAL_JUDGE_MODEL is unset, e.g. in CI)
+  // llm-judge (subjective charter dimensions — run under the deterministic
+  // mock judge by default; a real judge model via EVAL_JUDGE_MODEL +
+  // EVAL_JUDGE_MODE=real; skipped only with EVAL_JUDGE_MODE=skip)
   // ------------------------------------------------------------------
   {
     id: 'seed-tone-llm-015',

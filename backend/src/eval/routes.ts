@@ -12,7 +12,7 @@ import { Errors } from '../errors.js';
 import { recordAudit } from '../audit/audit.js';
 import { EVAL_SEED_CORPUS } from './corpus.js';
 import { EVAL_CORPUS } from './cases/index.js';
-import { mockChatFn, runEval } from './runner.js';
+import { assertRealJudgeAllowed, mockChatFn, resolveJudgeMode, runEval } from './runner.js';
 import { gatewayChatFn } from './live.js';
 import {
   compareRuns,
@@ -47,7 +47,7 @@ const runBodySchema = z.object({
   severities: z.array(z.enum(['p0', 'p1', 'p2'])).optional(),
   dimensions: z.array(z.enum(QUALITY_DIMENSIONS as [QualityDimension, ...QualityDimension[]])).optional(),
   live: z.boolean().optional(),
-  // Seed-only smoke run (14 representative cases) instead of the full corpus.
+  // Seed-only smoke run (16 representative cases) instead of the full corpus.
   seed: z.boolean().optional(),
 });
 
@@ -88,13 +88,45 @@ export async function evalRoutes(fastify: FastifyInstance): Promise<void> {
     const chatFn = live
       ? gatewayChatFn(modelId, { tenantId: auth.tenantId, userId: auth.userId, roleId: auth.roleId })
       : mockChatFn(corpus);
-    // The judge model should differ from the candidate under eval —
-    // self-judging inflates scores. Only wired in live mode.
+    // Judge mode is env-driven on the HTTP surface (EVAL_JUDGE_MODE).
+    //  - mock (default): llm-judge cases run under the deterministic mock
+    //    judge — zero skips, CI-safe.
+    //  - real: llmJudge.ts via the platform gateway pointed at
+    //    EVAL_JUDGE_MODEL. NEVER RUNS IN CI — refused when CI=true unless
+    //    EVAL_JUDGE_ALLOW_CI=1. REQUIRES REAL INFRASTRUCTURE.
+    //  - skip: llm-judge cases are skipped (never failed).
+    const judgeMode = resolveJudgeMode();
     const judgeModel = process.env.EVAL_JUDGE_MODEL;
-    const judgeChat =
-      live && judgeModel
-        ? gatewayChatFn(judgeModel, { tenantId: auth.tenantId, userId: auth.userId, roleId: auth.roleId })
-        : undefined;
+    let judgeChat: ReturnType<typeof gatewayChatFn> | undefined;
+    if (judgeMode === 'real') {
+      try {
+        assertRealJudgeAllowed();
+      } catch (error) {
+        throw Errors.badRequest(
+          'EVAL_JUDGE_REAL_REFUSED',
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+      if (!judgeModel) {
+        throw Errors.badRequest(
+          'EVAL_JUDGE_NOT_CONFIGURED',
+          'EVAL_JUDGE_MODE=real requires EVAL_JUDGE_MODEL to be set to the judge model id'
+        );
+      }
+      if (!liveProvider) {
+        throw Errors.badRequest(
+          'EVAL_JUDGE_NO_PROVIDER',
+          'Real judge mode calls the platform gateway, so EVAL_LIVE_PROVIDER must be set'
+        );
+      }
+      // Note: the runner warns (once) if the judge model equals the
+      // candidate — self-judging inflates scores.
+      judgeChat = gatewayChatFn(judgeModel, {
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        roleId: auth.roleId,
+      });
+    }
 
     const runId = await createRun({ modelId, modelVersion: version, provider, createdBy: auth.userId });
     try {
@@ -105,6 +137,8 @@ export async function evalRoutes(fastify: FastifyInstance): Promise<void> {
         severities,
         dimensions,
         judgeChat,
+        judgeMode,
+        candidateModelId: modelId,
         onCaseResult: (result) => saveCaseResult(runId, result),
       });
       await finishRun(runId, summary);

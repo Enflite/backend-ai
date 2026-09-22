@@ -299,8 +299,8 @@ export function judgeResponse(
 
     default: {
       // 'llm-judge' is intentionally not a deterministic judge: it must be
-      // executed via runLlmJudge() in runner.ts, which skips (never fails)
-      // when no judge model is configured.
+      // executed via runLlmJudge() in runner.ts, which runs it under the
+      // configured judge mode (mock by default; skips only in skip mode).
       if ((spec as { kind: string }).kind === 'llm-judge') {
         return fail({
           reason: 'llm-judge cases must be executed via runLlmJudge, not judgeResponse',

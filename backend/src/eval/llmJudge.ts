@@ -18,7 +18,12 @@
  * Configuration (environment):
  *  - EVAL_JUDGE_MODEL: model id the judge calls go to (should differ from
  *    the candidate under eval — self-judging inflates scores). Unset = the
- *    runner SKIPS llm-judge cases instead of failing them.
+ *    runner uses the mock judge (EVAL_JUDGE_MODE default), not the skip path.
+ *  - EVAL_JUDGE_MODE: mock | real | skip. 'real' selects this LLM judge;
+ *    'mock' (the default when EVAL_JUDGE_MODEL is unset) selects the
+ *    deterministic mock in mockJudge.ts; 'skip' restores the old behavior of
+ *    skipping llm-judge cases. Real-judge mode NEVER RUNS IN CI — the runner
+ *    refuses it when CI=true unless EVAL_JUDGE_ALLOW_CI=1 is set explicitly.
  *
  * The reference implementation below calls the platform's own chat surface:
  * pass it a chat function (e.g. the runner's gatewayChatFn pointed at the
@@ -58,6 +63,15 @@ export interface LlmJudgeResponse {
 export type JudgeChatFn = (
   messages: Array<{ role: 'user'; content: string }>
 ) => Promise<{ content: string }>;
+
+/**
+ * A judge: scores one response against a rubric and returns a versioned
+ * verdict. Implemented by the real LLM judge (evaluateWithJudgeModel,
+ * below) and by the deterministic mock (mockJudge.ts
+ * evaluateWithMockJudge) — same interface, so the runner can swap them by
+ * judge mode without changing the verdict contract.
+ */
+export type JudgeFn = (request: LlmJudgeRequest) => Promise<LlmJudgeResponse>;
 
 /**
  * Versioned default rubrics, one per charter dimension. Bump the version
