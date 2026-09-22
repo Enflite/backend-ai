@@ -15,7 +15,9 @@ vi.mock('../src/ai/providers/factory.js', async (importOriginal) => {
 });
 vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
 
-import { gatewayStream, applyContextWindow, estimateTokens, SYSTEM_PROMPT } from '../src/ai/gateway/gateway.js';
+import { gatewayStream, applyContextWindow, estimateTokens, estimateMessagesTokens, SYSTEM_PROMPT } from '../src/ai/gateway/gateway.js';
+import { hashPromptPrefix } from '../src/ai/gateway/prefixCache.js';
+import { config } from '../src/config.js';
 
 function model(overrides: Record<string, unknown> = {}) {
   return {
@@ -252,6 +254,58 @@ describe('gateway telemetry', () => {
         metadata: expect.objectContaining({ usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } }),
       })
     );
+  });
+});
+
+describe('gateway prefix-cache telemetry', () => {
+  it('records prefixHash and promptTokens in telemetry and the MODEL_USED audit', async () => {
+    getApprovedModelForUser.mockResolvedValue(model());
+    streamChat.mockImplementation(async function* () {
+      yield { type: 'text', content: 'hi' };
+      yield { type: 'usage', usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } };
+    });
+    const telemetry: Record<string, unknown> = {};
+    const result = await gatewayStream({ ...baseInput, telemetry: telemetry as never });
+    await drain(result);
+    const sentMessages = streamChat.mock.calls[0]![0].messages as Array<{ role: string; content: string }>;
+    // The hash identifies exactly the system prompt that was sent.
+    expect(telemetry.prefixHash).toBe(hashPromptPrefix(String(sentMessages[0]!.content)));
+    expect(telemetry.prefixHash).toMatch(/^[0-9a-f]{64}$/);
+    // Heuristic prompt-token estimate over the full provider-bound messages.
+    expect(telemetry.promptTokens).toBe(estimateMessagesTokens(sentMessages as never));
+    expect(telemetry.promptTokens).toBeGreaterThan(0);
+    expect(recordAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'MODEL_USED',
+        success: true,
+        metadata: expect.objectContaining({
+          prefixHash: telemetry.prefixHash,
+          promptTokens: telemetry.promptTokens,
+        }),
+      })
+    );
+  });
+
+  it('omits prefix telemetry when PROMPT_CACHE_ENABLED is false', async () => {
+    const previous = config.PROMPT_CACHE_ENABLED;
+    config.PROMPT_CACHE_ENABLED = false;
+    try {
+      getApprovedModelForUser.mockResolvedValue(model());
+      streamChat.mockImplementation(async function* () {
+        yield { type: 'text', content: 'hi' };
+      });
+      const telemetry: Record<string, unknown> = {};
+      const result = await gatewayStream({ ...baseInput, telemetry: telemetry as never });
+      await drain(result);
+      expect(telemetry.prefixHash).toBeUndefined();
+      expect(telemetry.promptTokens).toBeUndefined();
+      const modelUsed = recordAudit.mock.calls.find((call) => call[0].action === 'MODEL_USED');
+      expect(modelUsed).toBeDefined();
+      expect(modelUsed![0].metadata).not.toHaveProperty('prefixHash');
+      expect(modelUsed![0].metadata).not.toHaveProperty('promptTokens');
+    } finally {
+      config.PROMPT_CACHE_ENABLED = previous;
+    }
   });
 });
 
