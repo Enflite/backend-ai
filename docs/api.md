@@ -77,6 +77,26 @@ On 401 the client performs one token-refresh retry before failing.
 | PATCH | `/conversations/:id` | auth + `conversation:update` | Rename / update metadata |
 | DELETE | `/conversations/:id` | auth + `conversation:delete` | Delete a conversation |
 
+## Memory
+
+| Method | Path | Auth / Permission | Purpose |
+|---|---|---|---|
+| GET | `/memory` | auth + `memory:read` | List the caller's facts (most-recent first; optional `category`, `limit`, `offset`) |
+| POST | `/memory` | auth + `memory:write` | Store a fact (`fact` 1–2000 chars, `category` ∈ `preference`/`fact`/`project`, optional `classification`/`source`; audited as `MEMORY_CREATE`) |
+| GET | `/memory/:id` | auth + `memory:read` | One fact (audited as `MEMORY_ACCESS`) |
+| PATCH | `/memory/:id` | auth + `memory:write` | Update fact text / category / classification (audited as `MEMORY_UPDATE`) |
+| DELETE | `/memory/:id` | auth + `memory:write` | Delete a fact (audited as `MEMORY_DELETE`) |
+
+Memories are strictly user-private: every query binds the caller's
+`tenant_id` **and** `user_id`, so a user can only ever see or touch their own
+facts — never another user's, even in the same tenant. Facts classified above
+the caller's clearance are rejected (`CLASSIFICATION_DENIED`); omitted
+classification defaults to the caller's clearance floor. Stored facts are
+injected into the assistant's system prompt as a delimited, untrusted-data
+`USER MEMORY` section (classification-filtered against the turn, secret
+spans redacted, token-budgeted); see `docs/assistant.md` § User memory and
+ADR-013.
+
 ## Documents & ingestion
 
 | Method | Path | Auth / Permission | Purpose |

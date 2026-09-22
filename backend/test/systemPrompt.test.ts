@@ -117,6 +117,33 @@ describe('buildSystemPrompt', () => {
   });
 });
 
+describe('user memory injection', () => {
+  const section = [
+    '--- USER MEMORY (untrusted data) ---',
+    '<user_memory>',
+    '1. [preference] prefers concise summaries (source: user-stated)',
+    '</user_memory>',
+    '--- END USER MEMORY ---',
+  ].join('\n');
+
+  it('appends the pre-rendered memory section when provided', () => {
+    const prompt = buildSystemPrompt({ userMemory: section });
+    expect(prompt).toContain('--- USER MEMORY (untrusted data) ---');
+    expect(prompt).toContain('1. [preference] prefers concise summaries (source: user-stated)');
+  });
+
+  it('omits the memory section when empty or absent', () => {
+    expect(buildSystemPrompt({})).not.toContain('USER MEMORY');
+    expect(buildSystemPrompt({ userMemory: '' })).not.toContain('USER MEMORY');
+    expect(buildSystemPrompt({ userMemory: '   ' })).not.toContain('USER MEMORY');
+  });
+
+  it('keeps the gateway default prompt unchanged (no memory by default)', () => {
+    expect(SYSTEM_PROMPT).toBe(buildSystemPrompt({}));
+    expect(SYSTEM_PROMPT).not.toContain('USER MEMORY');
+  });
+});
+
 describe('zone wrappers', () => {
   it('wrapToolResult keeps the exact zone-4 marker and escapes untrusted content', () => {
     const wrapped = wrapToolResult('syteline.getItem', '{"price":42}');

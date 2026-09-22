@@ -19,6 +19,7 @@ import { oidcRoutes } from './auth/oidcRoutes.js';
 import { auditRoutes } from './audit/routes.js';
 import { modelRoutes, modelAdminRoutes, modelArtifactRoutes } from './ai/gateway/routes.js';
 import { conversationRoutes } from './conversations/routes.js';
+import { memoryRoutes } from './memory/routes.js';
 import { chatRoutes, closeActiveSseStreams } from './chat/routes.js';
 import { documentRoutes } from './documents/routes.js';
 import { toolRoutes } from './tools/routes.js';
@@ -223,6 +224,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(modelAdminRoutes);
       await api.register(modelArtifactRoutes);
       await api.register(conversationRoutes);
+      await api.register(memoryRoutes);
       await api.register(chatRoutes);
       await api.register(documentRoutes);
       await api.register(toolRoutes);

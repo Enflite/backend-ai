@@ -67,6 +67,43 @@ inside zones 3–5 are never followed. Authorization is enforced by
 application code — never by asking the model to behave; a denied tool call
 is accepted and routed to the next-best path.
 
+## User memory
+
+**Source:** `backend/src/memory/` (`store.ts`, `inject.ts`, `routes.ts`);
+migration `027_user_memory.sql`.
+
+The assistant remembers facts and preferences across conversations — "prefers
+concise summaries", "works on Project Falcon" — stored per user in the
+`memory_facts` table (`fact`, `category` ∈ preference/fact/project,
+`classification`, `source` ∈ user-stated/inferred).
+
+**Privacy model.** Memories are strictly user-private: every row carries
+`tenant_id` + `user_id`, every query binds both from the caller's auth
+context (RLS `tenant_isolation` is defense in depth, per the repo's tenant
+isolation pattern), and no role — not even Security Admin — can read another
+user's facts. Users manage their own memories through the self-service API
+(`GET/POST /api/v1/memory`, `PATCH/DELETE /api/v1/memory/:id`; creates,
+updates, and deletes are audited), so they can always see and delete what the
+assistant remembers about them.
+
+**Injection.** Each chat turn, the route loads the caller's most recent facts
+and `buildUserMemoryInjection` renders them as a delimited `USER MEMORY`
+section appended to the system prompt. The section is labeled untrusted data
+— facts are context the model may use, never instructions it must follow —
+and three guards apply before anything reaches the model:
+
+1. **Classification filter** — a fact is injected only when the turn's request
+   classification admits it; `UNKNOWN` fails closed in both directions.
+2. **Secret scrub** — secret-shaped spans (API keys, bearer tokens, password
+   assignments, private keys) are redacted as `[redacted:secret]`. Credentials
+   must never be stored as memories; the scrub is the enforcement guardrail
+   on the injection path.
+3. **Token budget** — most-recent-first selection stops at 10 facts / ~2000
+   estimated tokens so memory can never crowd out the prompt or history.
+
+A memory lookup failure never fails the chat turn — the turn proceeds without
+the section. See ADR-013 for the full privacy design.
+
 ## Error recovery
 
 **Tool failures** (`backend/src/chat/toolRecovery.ts`,
