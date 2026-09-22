@@ -27,6 +27,7 @@ import { SYTELINE_DIAG_CASES } from './syteline.js';
 import { SYTELINE_KNOWLEDGE_CASES } from './sytelineKnowledge.js';
 import { RELIABILITY_CASES } from './reliability.js';
 import { PHASE6_CASES } from './phase6.js';
+import { OWNERSHIP_CASES } from './ownership.js';
 
 export type { EvalCase, EvalCategory, QualityDimension } from '../types.js';
 
@@ -57,4 +58,5 @@ export const EVAL_CORPUS: EvalCase[] = [
   ...SYTELINE_KNOWLEDGE_CASES,
   ...RELIABILITY_CASES,
   ...PHASE6_CASES,
+  ...OWNERSHIP_CASES,
 ];
