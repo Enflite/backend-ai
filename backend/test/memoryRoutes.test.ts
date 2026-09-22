@@ -1,28 +1,32 @@
 /**
  * memoryRoutes.test.ts — /api/v1/memory CRUD routes.
  *
- * WHAT THIS FILE PROVES (mocks, deterministic, no live Postgres):
+ * WHAT THIS FILE PROVES (mocks, deterministic, no live MongoDB):
  *  - Unauthenticated requests get 401 (requireAuth enforced).
  *  - Requests without the memory:* permission get 403 (real
  *    requirePermission, not a pass-through).
  *  - Every store call carries the caller's tenantId/userId: a caller in
- *    tenant A produces queries that can only touch tenant A rows.
+ *    tenant A produces queries that can only touch tenant A documents.
  *  - CRUD happy paths, validation rejections, and MEMORY_NOT_FOUND
  *    handling; security-relevant actions are audited.
  *
- * WHAT THIS FILE CANNOT PROVE — REQUIRES REAL POSTGRESQL:
- *  - Live RLS enforcement of the migration-027 tenant_isolation policy.
+ * WHAT THIS FILE CANNOT PROVE — REQUIRES REAL MONGODB ATLAS:
+ *  - Live enforcement of the mandatory tenantId filter on every query.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { getDbMock, tenantOpMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  return { getDbMock, tenantOpMock };
+});
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 const { currentAuth } = vi.hoisted(() => ({
   currentAuth: { value: null as any },
 }));
 
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
 vi.mock('../src/auth/middleware.js', () => ({
   requireAuth: (req: any, _reply: any, done: (err?: Error) => void) => {
@@ -60,6 +64,71 @@ function authFor(overrides: Partial<AuthContext> = {}): AuthContext {
   };
 }
 
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        skip: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      deleteOne: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    for (const m of ['findOne', 'findOneAndUpdate', 'updateOne', 'updateMany', 'insertOne', 'deleteOne', 'deleteMany']) {
+      coll[m].mockReset();
+      if (m === 'findOne') coll[m].mockResolvedValue(null);
+      else if (m === 'findOneAndUpdate') coll[m].mockResolvedValue(null);
+      else if (m === 'updateOne' || m === 'updateMany') coll[m].mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+      else if (m === 'insertOne') coll[m].mockResolvedValue({ acknowledged: true });
+      else if (m === 'deleteOne' || m === 'deleteMany') coll[m].mockResolvedValue({ deletedCount: 1 });
+    }
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+}
+
+function mkDoc(overrides: any = {}) {
+  return {
+    _id: 'm1',
+    tenantId: TENANT_A,
+    userId: USER_A1,
+    fact: 'prefers tea',
+    category: 'preference',
+    classification: 'INTERNAL',
+    source: 'user-stated',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+}
+
 async function app() {
   const fastify = Fastify();
   fastify.setErrorHandler((error: any, _req, reply) => {
@@ -74,6 +143,7 @@ async function app() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetMocks();
   recordAudit.mockResolvedValue(undefined);
   currentAuth.value = authFor();
 });
@@ -108,8 +178,6 @@ describe('auth', () => {
 
 describe('POST /memory', () => {
   it('creates a fact, scopes it to the caller, and audits it', async () => {
-    const row = { id: 'm1', tenant_id: TENANT_A, user_id: USER_A1, fact: 'prefers tea', category: 'preference', classification: 'INTERNAL', source: 'user-stated' };
-    tenantQuery.mockResolvedValue({ rows: [row] });
     const fastify = await app();
     const res = await fastify.inject({
       method: 'POST',
@@ -118,11 +186,17 @@ describe('POST /memory', () => {
     });
     expect(res.statusCode).toBe(201);
     expect(res.json().memory.fact).toBe('prefers tea');
-    const [, , params] = tenantQuery.mock.calls[0]!;
-    expect(params[0]).toBe(TENANT_A);
-    expect(params[1]).toBe(USER_A1);
+    const coll = getMockCollection('memory_facts');
+    const doc = coll.insertOne.mock.calls[0]![0];
+    expect(doc.tenantId).toBe(TENANT_A);
+    expect(doc.userId).toBe(USER_A1);
+    expect(doc.fact).toBe('prefers tea');
     expect(recordAudit).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'MEMORY_CREATE', resourceId: 'm1', tenantId: TENANT_A, userId: USER_A1 })
+      expect.objectContaining({ action: 'MEMORY_CREATE', tenantId: TENANT_A, userId: USER_A1 })
+    );
+    // resourceId is the generated _id
+    expect(recordAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: expect.any(String) })
     );
   });
 
@@ -134,7 +208,7 @@ describe('POST /memory', () => {
     expect(long.statusCode).toBe(400);
     const badCategory = await fastify.inject({ method: 'POST', url: '/api/v1/memory', payload: { fact: 'x', category: 'nope' } });
     expect(badCategory.statusCode).toBe(400);
-    expect(tenantQuery).not.toHaveBeenCalled();
+    expect(getMockCollection('memory_facts').insertOne).not.toHaveBeenCalled();
   });
 
   it('rejects classification above the caller clearance with 403', async () => {
@@ -158,19 +232,25 @@ describe('POST /memory', () => {
 
 describe('GET /memory', () => {
   it('lists only the caller’s facts (tenant+user scoped)', async () => {
-    tenantQuery.mockResolvedValue({ rows: [{ id: 'm1' }] });
+    const coll = getMockCollection('memory_facts');
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([mkDoc()]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
     const fastify = await app();
     const res = await fastify.inject({ method: 'GET', url: '/api/v1/memory?category=preference&limit=10' });
     expect(res.statusCode).toBe(200);
     expect(res.json().memories).toHaveLength(1);
-    const [, sql, params] = tenantQuery.mock.calls[0]!;
-    expect(sql).toMatch(/tenant_id = \$1[\s\S]*user_id = \$2/);
-    expect(params[0]).toBe(TENANT_A);
-    expect(params[1]).toBe(USER_A1);
+    const [filter] = coll.find.mock.calls[0]!;
+    expect(filter).toEqual({ tenantId: TENANT_A, userId: USER_A1, category: 'preference' });
   });
 
-  it('a tenant-B id is invisible: MEMORY_NOT_FOUND when rows are empty', async () => {
-    tenantQuery.mockResolvedValue({ rows: [], rowCount: 0 });
+  it('a tenant-B id is invisible: MEMORY_NOT_FOUND when document is null', async () => {
+    const coll = getMockCollection('memory_facts');
+    coll.findOne.mockResolvedValue(null);
     const fastify = await app();
     const res = await fastify.inject({
       method: 'GET',
@@ -178,16 +258,18 @@ describe('GET /memory', () => {
     });
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe('MEMORY_NOT_FOUND');
-    // The query the module issued was still scoped to tenant A — the id
-    // alone can never reach another tenant's row.
-    expect(tenantQuery.mock.calls[0]![2][1]).toBe(TENANT_A);
+    // The filter the module issued was still scoped to tenant A — the id
+    // alone can never reach another tenant's document.
+    const [filter] = coll.findOne.mock.calls[0]!;
+    expect(filter.tenantId).toBe(TENANT_A);
+    expect(filter.userId).toBe(USER_A1);
   });
 });
 
 describe('PATCH /memory/:id', () => {
   it('updates a fact and audits it', async () => {
-    const row = { id: 'm1', fact: 'prefers coffee', classification: 'INTERNAL' };
-    tenantQuery.mockResolvedValue({ rows: [row] });
+    const coll = getMockCollection('memory_facts');
+    coll.findOneAndUpdate.mockResolvedValue(mkDoc({ fact: 'prefers coffee' }));
     const fastify = await app();
     const res = await fastify.inject({
       method: 'PATCH',
@@ -202,7 +284,8 @@ describe('PATCH /memory/:id', () => {
   });
 
   it('returns 404 for another user’s fact', async () => {
-    tenantQuery.mockResolvedValue({ rows: [], rowCount: 0 });
+    const coll = getMockCollection('memory_facts');
+    coll.findOneAndUpdate.mockResolvedValue(null);
     const fastify = await app();
     const res = await fastify.inject({
       method: 'PATCH',
@@ -215,16 +298,20 @@ describe('PATCH /memory/:id', () => {
 
 describe('DELETE /memory/:id', () => {
   it('deletes a fact, returns 204, and audits it', async () => {
-    tenantQuery.mockResolvedValue({ rowCount: 1 });
+    const coll = getMockCollection('memory_facts');
+    coll.deleteOne.mockResolvedValue({ deletedCount: 1 });
     const fastify = await app();
     const res = await fastify.inject({
       method: 'DELETE',
       url: '/api/v1/memory/a1111111-1111-4111-8111-111111111111',
     });
     expect(res.statusCode).toBe(204);
-    const [, sql, params] = tenantQuery.mock.calls[0]!;
-    expect(sql).toContain('DELETE FROM memory_facts');
-    expect(params).toEqual(['a1111111-1111-4111-8111-111111111111', TENANT_A, USER_A1]);
+    const [filter] = coll.deleteOne.mock.calls[0]!;
+    expect(filter).toEqual({
+      _id: 'a1111111-1111-4111-8111-111111111111',
+      tenantId: TENANT_A,
+      userId: USER_A1,
+    });
     expect(recordAudit).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'MEMORY_DELETE', resource: 'memory' })
     );
@@ -235,13 +322,15 @@ describe('DELETE /memory/:id', () => {
 
   it('rejects cross-tenant delete: caller tenant is bound, not the target’s', async () => {
     currentAuth.value = authFor({ tenantId: TENANT_B });
-    tenantQuery.mockResolvedValue({ rowCount: 0 });
+    const coll = getMockCollection('memory_facts');
+    coll.deleteOne.mockResolvedValue({ deletedCount: 0 });
     const fastify = await app();
     const res = await fastify.inject({
       method: 'DELETE',
       url: '/api/v1/memory/a1111111-1111-4111-8111-111111111111',
     });
     expect(res.statusCode).toBe(404);
-    expect(tenantQuery.mock.calls[0]![2][1]).toBe(TENANT_B);
+    const [filter] = coll.deleteOne.mock.calls[0]!;
+    expect(filter.tenantId).toBe(TENANT_B);
   });
 });

@@ -2,12 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
 // Deterministic concurrency regression test for PATCH /documents/:id/classification.
-// The route wraps the status guard SELECT ... FOR UPDATE + UPDATE + chunk DELETE
+// The route wraps the status guard findOne + findOneAndUpdate + chunk deleteMany
 // in one transaction via withTenantTx. The mocked withTenantTx below emulates
-// Postgres row locking: concurrent transactions serialize on the document row,
-// and the guard is re-evaluated against committed state at lock acquisition,
-// so a second relabel issued while the first is in flight must lose (404)
-// instead of overwriting an in-flight reclassification or resurrecting chunks.
+// MongoDB transaction isolation: concurrent transactions serialize on the
+// document, and the guard is re-evaluated against committed state at lock
+// acquisition, so a second relabel issued while the first is in flight must
+// lose (404) instead of overwriting an in-flight reclassification or
+// resurrecting chunks.
 
 const events: string[] = [];
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
@@ -16,68 +17,109 @@ const { enqueueIngestion } = vi.hoisted(() => ({ enqueueIngestion: vi.fn() }));
 interface DocState {
   id: string;
   classification: string;
-  owner_id: string;
+  ownerId: string;
   status: string;
-  deleted_at: string | null;
+  deletedAt: string | null;
 }
 const docState: DocState = {
   id: '11111111-1111-4111-8111-111111111111',
   classification: 'INTERNAL',
-  owner_id: 'uploader-1',
+  ownerId: 'uploader-1',
   status: 'COMPLETED',
-  deleted_at: null,
+  deletedAt: null,
 };
 let chunkCount = 5;
 
 const { withTenantTx, txCalls } = vi.hoisted(() => {
-  // Fake row lock: each transaction queues behind the previous one, exactly
-  // like Postgres SELECT ... FOR UPDATE blocking on a locked row.
+  // Fake transaction isolation: each transaction queues behind the previous
+  // one, exactly like MongoDB write-conflict serialization on the document.
   let lockTail: Promise<void> = Promise.resolve();
-  const calls: Array<{ tenantId: string; queries: string[] }> = [];
-  const withTenantTx = vi.fn(async (tenantId: string, callback: (client: any) => Promise<any>) => {
+  const calls: Array<{ tenantId: string; operations: string[] }> = [];
+  const withTenantTx = vi.fn(async (tenantId: string, callback: (session: any, db: any, tenantId: string) => Promise<any>) => {
     events.push('tx-start');
     const acquired = lockTail;
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     lockTail = gate;
     await acquired;
-    const call = { tenantId, queries: [] as string[] };
+    const call = { tenantId, operations: [] as string[] };
     calls.push(call);
     try {
-      const client = {
-        query: async (text: string, params?: unknown[]) => {
-          call.queries.push(text);
-          if (text.includes('FOR UPDATE')) {
-            if (docState.deleted_at || docState.status === 'PENDING' || docState.status === 'PROCESSING') {
-              return { rows: [], rowCount: 0 };
-            }
+      const session = {};
+      const db = {
+        collection: (name: string) => {
+          if (name === 'documents') {
             return {
-              rows: [{ classification: docState.classification, owner_id: docState.owner_id, has_grant: false }],
-              rowCount: 1,
+              findOne: async (filter: any, _options?: any) => {
+                call.operations.push('findOne:documents');
+                // Status guard: PENDING/PROCESSING or deleted -> not found
+                if (docState.deletedAt) return null;
+                if (filter.status?.$nin?.includes(docState.status)) return null;
+                if (filter._id !== docState.id) return null;
+                return {
+                  _id: docState.id,
+                  classification: docState.classification,
+                  ownerId: docState.ownerId,
+                };
+              },
+              findOneAndUpdate: async (filter: any, update: any, _options?: any) => {
+                call.operations.push('findOneAndUpdate:documents');
+                // Atomic guard: only succeeds if status is not PENDING/PROCESSING
+                if (docState.deletedAt) return null;
+                if (filter.status?.$nin?.includes(docState.status)) return null;
+                if (filter._id !== docState.id) return null;
+                // Apply the update
+                if (update.$set?.classification) {
+                  docState.classification = update.$set.classification;
+                }
+                if (update.$set?.status) {
+                  docState.status = update.$set.status;
+                }
+                return {
+                  _id: docState.id,
+                  classification: docState.classification,
+                  status: docState.status,
+                  ownerId: docState.ownerId,
+                  filename: 'test.txt',
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                };
+              },
             };
           }
-          if (text.startsWith('UPDATE documents')) {
-            if (docState.status === 'PENDING' || docState.status === 'PROCESSING') {
-              return { rows: [], rowCount: 0 };
-            }
-            docState.classification = String(params![2]);
-            docState.status = 'PENDING';
+          if (name === 'document_permissions') {
             return {
-              rows: [{ id: docState.id, classification: docState.classification, status: 'PENDING' }],
-              rowCount: 1,
+              findOne: async (_filter: any, _options?: any) => {
+                call.operations.push('findOne:document_permissions');
+                // User is the owner; no grant needed
+                return null;
+              },
             };
           }
-          if (text.startsWith('DELETE FROM document_chunks')) {
-            chunkCount = 0;
-            return { rows: [], rowCount: 5 };
+          if (name === 'document_chunks') {
+            return {
+              deleteMany: async (_filter: any, _options?: any) => {
+                call.operations.push('deleteMany:document_chunks');
+                const deleted = chunkCount;
+                chunkCount = 0;
+                return { acknowledged: true, deletedCount: deleted };
+              },
+            };
           }
-          throw new Error(`unexpected SQL: ${text}`);
+          if (name === 'department_memberships' || name === 'security_group_memberships') {
+            return {
+              find: () => ({
+                toArray: async () => [],
+              }),
+            };
+          }
+          throw new Error(`unexpected collection: ${name}`);
         },
       };
       // Hold the lock briefly so the second request is guaranteed to queue
-      // behind this one (simulating the UPDATE+DELETE work inside the tx).
+      // behind this one (simulating the update+delete work inside the tx).
       await new Promise((resolve) => setTimeout(resolve, 20));
-      const result = await callback(client);
+      const result = await callback(session, db, tenantId);
       events.push('tx-end');
       return result;
     } finally {
@@ -87,7 +129,7 @@ const { withTenantTx, txCalls } = vi.hoisted(() => {
   return { withTenantTx, txCalls: calls };
 });
 
-vi.mock('../src/db/pool.js', () => ({ query: vi.fn(), tenantQuery: vi.fn(), withTenantTx }));
+vi.mock('../src/db/mongo.js', () => ({ withTenantTx }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
 vi.mock('../src/documents/queue.js', () => ({
   enqueueIngestion: (...args: unknown[]) => {
@@ -140,7 +182,7 @@ beforeEach(() => {
   // Reset the fake database.
   docState.classification = 'INTERNAL';
   docState.status = 'COMPLETED';
-  docState.deleted_at = null;
+  docState.deletedAt = null;
   chunkCount = 5;
 });
 
@@ -183,15 +225,18 @@ describe('PATCH /documents/:id/classification concurrency', () => {
       payload: { classification: 'CONFIDENTIAL' },
     });
     expect(res.statusCode).toBe(202);
-    // One transaction, all three statements on the same client, in order.
+    // One transaction, all operations on the same db, in order.
     expect(withTenantTx).toHaveBeenCalledTimes(1);
     expect(withTenantTx.mock.calls[0]![0]).toBe('22222222-2222-4222-8222-222222222222');
     expect(txCalls).toHaveLength(1);
-    const queries = txCalls[0]!.queries;
-    expect(queries).toHaveLength(3);
-    expect(queries[0]).toContain('FOR UPDATE');
-    expect(queries[1]).toMatch(/^UPDATE documents/);
-    expect(queries[2]).toMatch(/^DELETE FROM document_chunks/);
+    const operations = txCalls[0]!.operations;
+    // Guard findOne, grant-check findOne, atomic findOneAndUpdate, chunk deleteMany.
+    expect(operations).toEqual([
+      'findOne:documents',
+      'findOne:document_permissions',
+      'findOneAndUpdate:documents',
+      'deleteMany:document_chunks',
+    ]);
     // Enqueue happens only after the transaction resolved (never inside it).
     expect(events).toEqual(['tx-start', 'tx-end', 'audit', 'enqueue']);
     await fastify.close();

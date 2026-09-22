@@ -1,25 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
-const { query, withTx, withTenantTx } = vi.hoisted(() => {
-  const query = vi.fn();
-  // Emulate withTx: the callback runs against a client whose query delegates
-  // to the shared query mock, so per-call mockResolvedValue sequencing keeps
-  // working and the single-transaction structure stays observable.
-  const withTx = vi.fn(async (callback: (client: { query: typeof query }) => Promise<unknown>) =>
-    callback({ query }));
-  // withTenantTx is the same shape with the tenant bound first; the callback
-  // still runs against the shared query mock.
-  const withTenantTx = vi.fn(async (_tenantId: string, callback: (client: { query: typeof query }) => Promise<unknown>) =>
-    callback({ query }));
-  return { query, withTx, withTenantTx };
+const { getDbMock, tenantOpMock, withTxMock, withTenantTxMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  const withTxMock = vi.fn(async (cb: (session: any, db: any) => Promise<any>) => cb({}, await getDbMock()));
+  const withTenantTxMock = vi.fn(async (_tenantId: string, cb: (session: any, db: any) => Promise<any>) => cb({}, await getDbMock()));
+  return { getDbMock, tenantOpMock, withTxMock, withTenantTxMock };
 });
 const { recordAudit, recordAuditInTx } = vi.hoisted(() => ({ recordAudit: vi.fn(), recordAuditInTx: vi.fn() }));
 const { getPromotionGate } = vi.hoisted(() => ({ getPromotionGate: vi.fn() }));
 // Mutable so each test can act as an AI Admin or an unprivileged user.
 const authState = { permissions: ['model:manage', 'model:use'] as string[] };
 
-vi.mock('../src/db/pool.js', () => ({ query, tenantQuery: query, withTx, withTenantTx }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock, withTx: withTxMock, withTenantTx: withTenantTxMock }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit, recordAuditInTx }));
 vi.mock('../src/eval/compare.js', () => ({ getPromotionGate }));
 vi.mock('../src/auth/middleware.js', () => ({
@@ -46,29 +40,86 @@ import { AppError } from '../src/errors.js';
 import { config } from '../src/config.js';
 
 const MODEL_ID = '55555555-5555-4555-8555-555555555555';
+const TENANT = '22222222-2222-4222-8222-222222222222';
 
-function modelRow(overrides: Record<string, unknown> = {}) {
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true, insertedId: 'new-id' }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      aggregate: vi.fn().mockReturnValue({ toArray: vi.fn().mockResolvedValue([]) }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset();
+    coll.findOne.mockResolvedValue(null);
+    coll.findOneAndUpdate.mockReset();
+    coll.findOneAndUpdate.mockResolvedValue(null);
+    coll.updateOne.mockReset();
+    coll.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    coll.updateMany.mockReset();
+    coll.insertOne.mockReset();
+    coll.insertOne.mockResolvedValue({ acknowledged: true, insertedId: 'new-id' });
+    coll.deleteMany.mockReset();
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+  tenantOpMock.mockReset();
+  tenantOpMock.mockImplementation(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  withTxMock.mockReset();
+  withTxMock.mockImplementation(async (cb: (session: any, db: any) => Promise<any>) => cb({}, await getDbMock()));
+  withTenantTxMock.mockReset();
+  withTenantTxMock.mockImplementation(async (_tenantId: string, cb: (session: any, db: any) => Promise<any>) => cb({}, await getDbMock()));
+}
+
+function modelDoc(overrides: Record<string, unknown> = {}) {
   return {
-    id: MODEL_ID,
+    _id: MODEL_ID,
     name: 'meta-llama/Meta-Llama-3.1-8B-Instruct',
     version: '1.0',
     provider: 'vllm',
     endpoint: 'http://vllm:8000/v1',
-    model_identifier: 'meta-llama/Meta-Llama-3.1-8B-Instruct',
+    modelIdentifier: 'meta-llama/Meta-Llama-3.1-8B-Instruct',
     status: 'ACTIVE',
     license: 'llama3.1',
     source: 'meta',
     sha256: null,
-    context_window: 131072,
+    contextWindow: 131072,
     capabilities: { chat: true },
-    allowed_classifications: ['PUBLIC', 'INTERNAL'],
+    allowedClassifications: ['PUBLIC', 'INTERNAL'],
     deployment: {},
-    request_timeout_ms: null,
-    max_tokens: null,
+    requestTimeoutMs: null,
+    maxTokens: null,
     temperature: null,
-    fallback_model_id: null,
+    fallbackModelId: null,
     enabled: true,
-    created_at: new Date('2026-01-01T00:00:00Z'),
+    createdAt: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
   };
 }
@@ -88,6 +139,7 @@ async function app() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetMocks();
   authState.permissions = ['model:manage', 'model:use'];
   recordAudit.mockResolvedValue(undefined);
   recordAuditInTx.mockResolvedValue(undefined);
@@ -95,7 +147,13 @@ beforeEach(() => {
 
 describe('GET /admin/models', () => {
   it('returns full registry detail to a model:manage holder', async () => {
-    query.mockResolvedValue({ rows: [modelRow()], rowCount: 1 });
+    const modelsColl = getMockCollection('models');
+    modelsColl.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([modelDoc()]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
     const fastify = await app();
     const res = await fastify.inject({ method: 'GET', url: '/admin/models' });
     expect(res.statusCode).toBe(200);
@@ -114,8 +172,7 @@ describe('GET /admin/models', () => {
       createdAt: '2026-01-01T00:00:00.000Z',
     });
     // Models are platform-level: no tenant scoping in the query.
-    expect(String(query.mock.calls[0]![0])).toContain('FROM models');
-    expect(String(query.mock.calls[0]![0])).not.toContain('tenant_id');
+    expect(modelsColl.find).toHaveBeenCalledWith({});
     await fastify.close();
   });
 
@@ -134,9 +191,10 @@ describe('GET /admin/models', () => {
 
 describe('PATCH /admin/models/:id', () => {
   it('toggles enabled and audits MODEL_ENABLED_CHANGED with previous/new values', async () => {
-    query
-      .mockResolvedValueOnce({ rows: [{ id: MODEL_ID, enabled: true }], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [modelRow({ enabled: false })], rowCount: 1 });
+    const modelsColl = getMockCollection('models');
+    modelsColl.findOne.mockResolvedValue({ _id: MODEL_ID, enabled: true });
+    modelsColl.findOneAndUpdate.mockResolvedValue(modelDoc({ enabled: false }));
+
     const fastify = await app();
     const res = await fastify.inject({
       method: 'PATCH',
@@ -145,13 +203,16 @@ describe('PATCH /admin/models/:id', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().model.enabled).toBe(false);
-    expect(query.mock.calls[1]![0]).toMatch(/UPDATE models SET enabled/);
-    expect(query.mock.calls[1]![1]).toEqual([MODEL_ID, false]);
+    expect(modelsColl.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: MODEL_ID },
+      { $set: { enabled: false } },
+      expect.objectContaining({ returnDocument: 'after' })
+    );
     // The update and its audit event commit in ONE transaction: withTx wraps
     // both, and the audit goes through the transactional insert.
-    expect(withTx).toHaveBeenCalledTimes(1);
+    expect(withTxMock).toHaveBeenCalledTimes(1);
     expect(recordAuditInTx).toHaveBeenCalledWith(
-      expect.objectContaining({ query: expect.any(Function) }),
+      expect.anything(),
       expect.objectContaining({
         action: 'MODEL_ENABLED_CHANGED',
         resource: 'model',
@@ -165,9 +226,9 @@ describe('PATCH /admin/models/:id', () => {
   });
 
   it('fails the toggle when the audit insert fails (fail-closed, atomic)', async () => {
-    query
-      .mockResolvedValueOnce({ rows: [{ id: MODEL_ID, enabled: true }], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [modelRow({ enabled: false })], rowCount: 1 });
+    const modelsColl = getMockCollection('models');
+    modelsColl.findOne.mockResolvedValue({ _id: MODEL_ID, enabled: true });
+    modelsColl.findOneAndUpdate.mockResolvedValue(modelDoc({ enabled: false }));
     // A fail-closed audit failure inside the transaction must surface as 503
     // instead of a 200 with a silently unaudited model change; the withTx
     // wrapper rolls the UPDATE back in production.
@@ -180,12 +241,13 @@ describe('PATCH /admin/models/:id', () => {
     });
     expect(res.statusCode).toBe(503);
     expect(res.json().error.code).toBe('AUDIT_PERSISTENCE_FAILED');
-    expect(withTx).toHaveBeenCalledTimes(1);
+    expect(withTxMock).toHaveBeenCalledTimes(1);
     await fastify.close();
   });
 
   it('returns 404 for an unknown model', async () => {
-    query.mockResolvedValue({ rows: [], rowCount: 0 });
+    const modelsColl = getMockCollection('models');
+    modelsColl.findOne.mockResolvedValue(null);
     const fastify = await app();
     const res = await fastify.inject({
       method: 'PATCH',
@@ -195,8 +257,8 @@ describe('PATCH /admin/models/:id', () => {
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe('MODEL_NOT_FOUND');
     // No mutation attempted after the miss.
-    expect(query).toHaveBeenCalledTimes(1);
-    expect(withTx).not.toHaveBeenCalled();
+    expect(modelsColl.findOne).toHaveBeenCalledTimes(1);
+    expect(withTxMock).not.toHaveBeenCalled();
     expect(recordAuditInTx).not.toHaveBeenCalled();
     expect(recordAudit).not.toHaveBeenCalled();
     await fastify.close();
@@ -216,7 +278,7 @@ describe('PATCH /admin/models/:id', () => {
       payload: { enabled: false, endpoint: 'http://evil.example/v1' },
     });
     expect(badBody.statusCode).toBe(400);
-    expect(query).not.toHaveBeenCalled();
+    expect(getMockCollection('models').findOne).not.toHaveBeenCalled();
     await fastify.close();
   });
 
@@ -229,7 +291,7 @@ describe('PATCH /admin/models/:id', () => {
       payload: { enabled: false },
     });
     expect(res.statusCode).toBe(403);
-    expect(query).not.toHaveBeenCalled();
+    expect(getMockCollection('models').findOne).not.toHaveBeenCalled();
     await fastify.close();
   });
 });
@@ -254,14 +316,30 @@ describe('POST /admin/models (registration)', () => {
   }
 
   it('registers a model at REGISTERED: it serves no traffic until promoted', async () => {
-    query.mockResolvedValue({ rows: [modelRow({ status: 'REGISTERED', name: 'test/new-model' })], rowCount: 1 });
+    const modelsColl = getMockCollection('models');
+    const createdDoc = modelDoc({ status: 'REGISTERED', name: 'test/new-model' });
+    // withTx callback does insertOne; we capture the doc via the mock
+    modelsColl.insertOne.mockImplementation(async (doc: any) => {
+      // Simulate the doc being created
+      return { acknowledged: true, insertedId: doc._id };
+    });
+    // The route returns the created doc; we need withTx to return it
+    withTxMock.mockImplementation(async (cb: (session: any, db: any) => Promise<any>) => {
+      const db = await getDbMock();
+      const session = {};
+      // Run the callback but intercept the return - the callback returns the doc
+      const result = await cb(session, db);
+      return result;
+    });
+
     const fastify = await app();
     const res = await fastify.inject({ method: 'POST', url: '/admin/models', payload: registrationBody() });
     expect(res.statusCode).toBe(201);
     expect(res.json().model).toMatchObject({ name: 'test/new-model', status: 'REGISTERED' });
-    const insertSql = query.mock.calls[0]![0] as string;
-    expect(insertSql).toMatch(/INSERT INTO models/);
-    expect(insertSql).toMatch(/'REGISTERED'/);
+    expect(modelsColl.insertOne).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'test/new-model', status: 'REGISTERED' }),
+      expect.objectContaining({ session: expect.anything() })
+    );
     expect(recordAuditInTx).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ action: 'MODEL_REGISTERED', resource: 'model' })
@@ -270,7 +348,8 @@ describe('POST /admin/models (registration)', () => {
   });
 
   it('rejects duplicate model names with 409', async () => {
-    query.mockRejectedValue(Object.assign(new Error('duplicate'), { code: '23505' }));
+    const modelsColl = getMockCollection('models');
+    modelsColl.insertOne.mockRejectedValue(Object.assign(new Error('duplicate'), { code: 11000 }));
     const fastify = await app();
     const res = await fastify.inject({ method: 'POST', url: '/admin/models', payload: registrationBody() });
     expect(res.statusCode).toBe(400);
@@ -285,7 +364,7 @@ describe('POST /admin/models (registration)', () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('MODEL_PROVIDER_UNSUPPORTED');
-    expect(query).not.toHaveBeenCalled();
+    expect(getMockCollection('models').insertOne).not.toHaveBeenCalled();
     await fastify.close();
   });
 
@@ -296,7 +375,7 @@ describe('POST /admin/models (registration)', () => {
     });
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe('MODEL_ENDPOINT_DENIED');
-    expect(query).not.toHaveBeenCalled();
+    expect(getMockCollection('models').insertOne).not.toHaveBeenCalled();
     await fastify.close();
   });
 
@@ -307,7 +386,7 @@ describe('POST /admin/models (registration)', () => {
     });
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe('MODEL_SOURCE_DENIED');
-    expect(query).not.toHaveBeenCalled();
+    expect(getMockCollection('models').insertOne).not.toHaveBeenCalled();
     await fastify.close();
   });
 
@@ -318,7 +397,7 @@ describe('POST /admin/models (registration)', () => {
       payload: registrationBody({ allowedClassifications: ['UNKNOWN'] }),
     });
     expect(res.statusCode).toBe(400);
-    expect(query).not.toHaveBeenCalled();
+    expect(getMockCollection('models').insertOne).not.toHaveBeenCalled();
     await fastify.close();
   });
 
@@ -327,16 +406,17 @@ describe('POST /admin/models (registration)', () => {
     const fastify = await app();
     const res = await fastify.inject({ method: 'POST', url: '/admin/models', payload: registrationBody() });
     expect(res.statusCode).toBe(403);
-    expect(query).not.toHaveBeenCalled();
+    expect(getMockCollection('models').insertOne).not.toHaveBeenCalled();
     await fastify.close();
   });
 });
 
 describe('POST /admin/models/:id/transition', () => {
   it('walks a legal transition and returns from/to status', async () => {
-    query
-      .mockResolvedValueOnce({ rows: [modelRow({ status: 'REGISTERED' })], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [modelRow({ status: 'DOWNLOADING' })], rowCount: 1 });
+    const modelsColl = getMockCollection('models');
+    modelsColl.findOne.mockResolvedValue(modelDoc({ status: 'REGISTERED' }));
+    modelsColl.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+
     const fastify = await app();
     const res = await fastify.inject({
       method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'DOWNLOADING' },
@@ -347,22 +427,25 @@ describe('POST /admin/models/:id/transition', () => {
   });
 
   it('rejects an illegal jump without touching the model row again', async () => {
-    query.mockResolvedValueOnce({ rows: [modelRow({ status: 'REGISTERED' })], rowCount: 1 });
+    const modelsColl = getMockCollection('models');
+    modelsColl.findOne.mockResolvedValue(modelDoc({ status: 'REGISTERED' }));
     const fastify = await app();
     const res = await fastify.inject({
       method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'ACTIVE' },
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('MODEL_TRANSITION_INVALID');
-    expect(query).toHaveBeenCalledTimes(1);
+    expect(modelsColl.findOne).toHaveBeenCalledTimes(1);
+    expect(modelsColl.updateOne).not.toHaveBeenCalled();
     await fastify.close();
   });
 
   it('approves only when the eval promotion gate passes', async () => {
     getPromotionGate.mockResolvedValueOnce({ eligible: true, latestRunId: 'run-1' });
-    query
-      .mockResolvedValueOnce({ rows: [modelRow({ status: 'PENDING_APPROVAL' })], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [modelRow({ status: 'APPROVED' })], rowCount: 1 });
+    const modelsColl = getMockCollection('models');
+    modelsColl.findOne.mockResolvedValue(modelDoc({ status: 'PENDING_APPROVAL' }));
+    modelsColl.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+
     const fastify = await app();
     const res = await fastify.inject({
       method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'APPROVED' },
@@ -374,7 +457,8 @@ describe('POST /admin/models/:id/transition', () => {
 
   it('blocks approval when required evals fail — there is no override', async () => {
     getPromotionGate.mockResolvedValueOnce({ eligible: false, reason: 'P0 failures: 1', latestRunId: null });
-    query.mockResolvedValueOnce({ rows: [modelRow({ status: 'PENDING_APPROVAL' })], rowCount: 1 });
+    const modelsColl = getMockCollection('models');
+    modelsColl.findOne.mockResolvedValue(modelDoc({ status: 'PENDING_APPROVAL' }));
     const fastify = await app();
     const res = await fastify.inject({
       method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'APPROVED' },
@@ -385,7 +469,8 @@ describe('POST /admin/models/:id/transition', () => {
   });
 
   it('returns 404 for an unknown model', async () => {
-    query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    const modelsColl = getMockCollection('models');
+    modelsColl.findOne.mockResolvedValue(null);
     const fastify = await app();
     const res = await fastify.inject({
       method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'DOWNLOADING' },
@@ -404,17 +489,28 @@ describe('POST /admin/models/:id/transition', () => {
       method: 'POST', url: `/admin/models/${MODEL_ID}/transition`, payload: { status: 'BOGUS' },
     });
     expect(badStatus.statusCode).toBe(400);
-    expect(query).not.toHaveBeenCalled();
+    expect(getMockCollection('models').findOne).not.toHaveBeenCalled();
     await fastify.close();
   });
 });
 
 describe('/admin/serving-defaults', () => {
   it('lists the tenant serving defaults', async () => {
-    query.mockResolvedValue({
-      rows: [{ tenantId: '22222222-2222-4222-8222-222222222222', capability: 'chat', modelId: MODEL_ID, updatedBy: 'admin-1', updatedAt: new Date() }],
-      rowCount: 1,
-    });
+    const defaultsColl = getMockCollection('model_serving_defaults');
+    const doc = {
+      _id: `${TENANT}:chat`,
+      tenantId: TENANT,
+      capability: 'chat',
+      modelId: MODEL_ID,
+      updatedBy: 'admin-1',
+      updatedAt: new Date(),
+    };
+    defaultsColl.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([doc]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
     const fastify = await app();
     const res = await fastify.inject({ method: 'GET', url: '/admin/serving-defaults' });
     expect(res.statusCode).toBe(200);
@@ -423,12 +519,20 @@ describe('/admin/serving-defaults', () => {
   });
 
   it('sets a default for a servable model and audits it', async () => {
-    query
-      .mockResolvedValueOnce({ rows: [modelRow({ status: 'ACTIVE' })], rowCount: 1 })
-      .mockResolvedValueOnce({
-        rows: [{ tenantId: '22222222-2222-4222-8222-222222222222', capability: 'chat', modelId: MODEL_ID, updatedBy: 'admin-1', updatedAt: new Date() }],
-        rowCount: 1,
-      });
+    const modelsColl = getMockCollection('models');
+    const defaultsColl = getMockCollection('model_serving_defaults');
+    modelsColl.findOne.mockResolvedValue(modelDoc({ status: 'ACTIVE' }));
+    const upsertedDoc = {
+      _id: `${TENANT}:chat`,
+      tenantId: TENANT,
+      capability: 'chat',
+      modelId: MODEL_ID,
+      updatedBy: 'admin-1',
+      updatedAt: new Date(),
+    };
+    defaultsColl.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    defaultsColl.findOne.mockResolvedValue(upsertedDoc);
+
     const fastify = await app();
     const res = await fastify.inject({
       method: 'PUT', url: '/admin/serving-defaults/chat', payload: { modelId: MODEL_ID },
@@ -443,7 +547,8 @@ describe('/admin/serving-defaults', () => {
   });
 
   it('refuses defaults pointing at non-servable models', async () => {
-    query.mockResolvedValueOnce({ rows: [modelRow({ status: 'APPROVED' })], rowCount: 1 });
+    const modelsColl = getMockCollection('models');
+    modelsColl.findOne.mockResolvedValue(modelDoc({ status: 'APPROVED' }));
     const fastify = await app();
     const res = await fastify.inject({
       method: 'PUT', url: '/admin/serving-defaults/chat', payload: { modelId: MODEL_ID },
@@ -455,14 +560,25 @@ describe('/admin/serving-defaults', () => {
 });
 
 describe('/admin/routing-policies', () => {
-  const tenantId = '22222222-2222-4222-8222-222222222222';
-  const policyRow = {
-    tenantId, capability: 'syteline', strategy: 'latency', fallbackToChat: true,
-    updatedBy: 'admin-1', updatedAt: new Date('2026-09-01T00:00:00Z'),
+  const tenantId = TENANT;
+  const policyDoc = {
+    _id: `${tenantId}:syteline`,
+    tenantId,
+    capability: 'syteline',
+    strategy: 'latency',
+    fallbackToChat: true,
+    updatedBy: 'admin-1',
+    updatedAt: new Date('2026-09-01T00:00:00Z'),
   };
 
   it('lists the tenant routing policies', async () => {
-    query.mockResolvedValue({ rows: [policyRow], rowCount: 1 });
+    const policiesColl = getMockCollection('model_routing_policies');
+    policiesColl.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([policyDoc]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
     const fastify = await app();
     const res = await fastify.inject({ method: 'GET', url: '/admin/routing-policies' });
     expect(res.statusCode).toBe(200);
@@ -472,7 +588,8 @@ describe('/admin/routing-policies', () => {
   });
 
   it('returns the platform default for an unconfigured capability', async () => {
-    query.mockResolvedValue({ rows: [], rowCount: 0 });
+    const policiesColl = getMockCollection('model_routing_policies');
+    policiesColl.findOne.mockResolvedValue(null);
     const fastify = await app();
     const res = await fastify.inject({ method: 'GET', url: '/admin/routing-policies/coding' });
     expect(res.statusCode).toBe(200);
@@ -491,9 +608,11 @@ describe('/admin/routing-policies', () => {
   });
 
   it('sets a policy and audits it', async () => {
-    query.mockResolvedValue({
-      rows: [{ ...policyRow, strategy: 'cost', fallbackToChat: false }], rowCount: 1,
-    });
+    const policiesColl = getMockCollection('model_routing_policies');
+    const updatedDoc = { ...policyDoc, strategy: 'cost', fallbackToChat: false };
+    policiesColl.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    policiesColl.findOne.mockResolvedValue(updatedDoc);
+
     const fastify = await app();
     const res = await fastify.inject({
       method: 'PUT', url: '/admin/routing-policies/syteline',

@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { getDbMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  return { getDbMock };
+});
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock }));
 // recordAudit is mocked to keep tests DB-free; the real sanitizeReason is kept
 // so tests can assert sanitized server-side diagnostics end-to-end.
 vi.mock('../src/audit/audit.js', async (importOriginal) => ({
@@ -34,13 +37,39 @@ const auth = {
 const sytelineTool = toolRegistry.find((tool) => tool.name === 'syteline.getItem')!;
 const originalExecute = sytelineTool.execute;
 
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true, insertedId: 'exec-1' }),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+    };
+  }
+  return mockCollections[name];
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   sytelineTool.execute = originalExecute;
-  tenantQuery.mockImplementation(async (_tenant: string, sql: string) => {
-    if (sql.includes('INSERT INTO tool_executions')) return { rows: [{ id: 'exec-1' }] };
-    return { rows: [] };
-  });
+  // Reset mock collections
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset();
+    coll.findOne.mockResolvedValue(null);
+    coll.insertOne.mockReset();
+    coll.insertOne.mockResolvedValue({ acknowledged: true, insertedId: 'exec-1' });
+    coll.updateOne.mockReset();
+    coll.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    coll.updateMany.mockReset();
+    coll.updateMany.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
   recordAudit.mockResolvedValue(undefined);
 });
 
@@ -113,8 +142,14 @@ describe('runToolCall', () => {
       success: false,
       reason: 'Tool arguments are not valid JSON',
     }));
-    const insert = tenantQuery.mock.calls.find((call) => (call[1] as string).includes('INSERT INTO tool_executions'));
-    expect(insert?.[1]).toContain("'DENIED'");
+    const toolExecColl = getMockCollection('tool_executions');
+    expect(toolExecColl.insertOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'DENIED',
+        authorizationDecision: 'DENIED',
+        errorCode: 'INVALID_TOOL_ARGUMENTS',
+      })
+    );
   });
 
   it('audits denials with the request correlation ID', async () => {
@@ -132,8 +167,13 @@ describe('runToolCall', () => {
       requestId: 'req-9',
       success: false,
     }));
-    const insert = tenantQuery.mock.calls.find((call) => (call[1] as string).includes('INSERT INTO tool_executions'));
-    expect(insert?.[1]).toContain("'DENIED'");
+    const toolExecColl = getMockCollection('tool_executions');
+    expect(toolExecColl.insertOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'DENIED',
+        authorizationDecision: 'DENIED',
+      })
+    );
   });
 
   it('truncates huge tool outputs and returns a structured marker, not partial JSON', async () => {
@@ -227,8 +267,11 @@ describe('runToolCall', () => {
         signal: new AbortController().signal,
       });
       expect(result.ok).toBe(false);
-      const update = tenantQuery.mock.calls.find((call) => (call[1] as string).includes("status = 'FAILED'"));
-      expect(update).toBeDefined();
+      const toolExecColl = getMockCollection('tool_executions');
+      expect(toolExecColl.updateOne).toHaveBeenCalledWith(
+        expect.objectContaining({ _id: 'exec-1' }),
+        expect.objectContaining({ $set: expect.objectContaining({ status: 'FAILED' }) })
+      );
     } finally {
       config.AI_TOOL_TIMEOUT_MS = originalTimeout;
     }
@@ -247,8 +290,11 @@ describe('runToolCall', () => {
       signal: new AbortController().signal,
     });
     expect(result).toMatchObject({ ok: false, errorCode: 'TOOL_EXECUTION_FAILED' });
-    const update = tenantQuery.mock.calls.find((call) => (call[1] as string).includes("status = 'FAILED'"));
-    expect(update).toBeDefined();
+    const toolExecColl = getMockCollection('tool_executions');
+    expect(toolExecColl.updateOne).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: 'exec-1' }),
+      expect.objectContaining({ $set: expect.objectContaining({ status: 'FAILED' }) })
+    );
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'TOOL_EXECUTION', success: false }));
   });
 });
@@ -283,8 +329,11 @@ describe('tool timeout hardening', () => {
       // The abort signal still fired for cooperative adapters.
       await new Promise((resolve) => setTimeout(resolve, 25));
       expect(aborted).toBe(true);
-      const update = tenantQuery.mock.calls.find((call) => (call[1] as string).includes("status = 'FAILED'"));
-      expect(update).toBeDefined();
+      const toolExecColl = getMockCollection('tool_executions');
+      expect(toolExecColl.updateOne).toHaveBeenCalledWith(
+        expect.objectContaining({ _id: 'exec-1' }),
+        expect.objectContaining({ $set: expect.objectContaining({ status: 'FAILED' }) })
+      );
       expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
         action: 'TOOL_EXECUTION',
         success: false,

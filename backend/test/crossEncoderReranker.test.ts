@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Mock the DB and embedding provider exactly like retrievalSecurity.test.ts so
-// the end-to-end test below runs retrieveAuthorizedContext without Postgres.
-const { withTenant } = vi.hoisted(() => ({ withTenant: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ tenantQuery: vi.fn(), withTenant }));
+// Mock the DB and embedding provider so the end-to-end test below runs
+// retrieveAuthorizedContext without MongoDB.
+const { getDbMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  return { getDbMock };
+});
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock }));
 
 const { embed } = vi.hoisted(() => ({ embed: vi.fn() }));
 vi.mock('../src/documents/ingestion.js', () => ({
@@ -290,38 +293,81 @@ const auth = {
   permissions: ['chat:create'] as Permission[],
 };
 
-function chunkRow(chunkId: string, vectorScore: string) {
+function chunkDoc(chunkId: string, vectorScore: number) {
   return {
-    chunk_id: chunkId,
+    _id: chunkId,
     content: `canonical content of ${chunkId}`,
+    documentId: `doc-${chunkId}`,
+    classification: 'INTERNAL',
     page: null,
     section: null,
-    source_location: null,
-    document_id: `doc-${chunkId}`,
-    filename: `${chunkId}.txt`,
-    vector_score: vectorScore,
+    sourceLocation: null,
+    vectorScore,
   };
 }
 
-const fakeClient = {
-  query: vi.fn(async (text: string) => {
-    if (text.startsWith('SET LOCAL')) return { rows: [] };
-    return { rows: fakeClient.rows };
-  }),
-  rows: [] as Record<string, unknown>[],
-};
+// Mock collections for the end-to-end retrieval tests
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      aggregate: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+      })),
+    };
+  }
+  return mockCollections[name];
+}
+
+let e2eChunkDocs: any[] = [];
+let e2eDocumentDocs: any[] = [];
+
+function setupE2ERetrieval(chunks: any[]) {
+  e2eChunkDocs = chunks;
+  const docIds = [...new Set(chunks.map((c) => c.documentId))];
+  e2eDocumentDocs = docIds.map((docId) => ({
+    _id: docId,
+    filename: `${docId}.txt`,
+    classification: 'INTERNAL',
+  }));
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+  for (const name of ['document_permissions', 'department_memberships', 'security_group_memberships']) {
+    getMockCollection(name).find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+  }
+  getMockCollection('documents').find.mockImplementation(() => ({
+    toArray: vi.fn().mockResolvedValue(e2eDocumentDocs),
+    sort: vi.fn().mockReturnThis(),
+    limit: vi.fn().mockReturnThis(),
+    project: vi.fn().mockReturnThis(),
+  }));
+  getMockCollection('document_chunks').aggregate.mockImplementation(() => ({
+    toArray: vi.fn().mockResolvedValue(e2eChunkDocs),
+  }));
+}
 
 describe('cross-encoder reranker through retrieval: cannot widen access', () => {
   beforeEach(() => {
-    fakeClient.rows = [];
+    e2eChunkDocs = [];
+    e2eDocumentDocs = [];
     embed.mockResolvedValue([[0.1, 0.2, 0.3]]);
-    withTenant.mockImplementation(async (_tenantId: string, callback: (client: unknown) => Promise<unknown>) =>
-      callback(fakeClient)
-    );
+    setupE2ERetrieval([]);
   });
 
   it('emits exactly the authorized chunk set, reordered, against a hostile endpoint', async () => {
-    fakeClient.rows = [chunkRow('a', '0.9'), chunkRow('b', '0.8'), chunkRow('c', '0.7')];
+    setupE2ERetrieval([chunkDoc('a', 0.9), chunkDoc('b', 0.8), chunkDoc('c', 0.7)]);
     const { fetchImpl } = capturingFetch(
       okResponse({
         results: [
@@ -345,7 +391,7 @@ describe('cross-encoder reranker through retrieval: cannot widen access', () => 
   });
 
   it('falls back to hybrid order through retrieval when the endpoint is down', async () => {
-    fakeClient.rows = [chunkRow('a', '0.9'), chunkRow('b', '0.8')];
+    setupE2ERetrieval([chunkDoc('a', 0.9), chunkDoc('b', 0.8)]);
     const { fetchImpl } = capturingFetch(failingResponse(503));
     setReranker(createCrossEncoderReranker({ url: ALLOWED_URL, fetchImpl }));
     const result = await retrieveAuthorizedContext(auth, 'query');

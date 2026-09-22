@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+const { getDbMock, tenantOpMock, withTenantTxMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  const withTenantTxMock = vi.fn(async (_tenantId: string, cb: (s: any, db: any) => Promise<any>) => cb({}, await getDbMock()));
+  return { getDbMock, tenantOpMock, withTenantTxMock };
+});
+vi.mock('../src/db/mongo.js', () => ({
+  getDb: getDbMock,
+  tenantOp: tenantOpMock,
+  withTenantTx: withTenantTxMock,
+}));
 
 import { ingestDocument, chunkText, IngestionCanceledError } from '../src/documents/ingestion.js';
 import { OpenAICompatibleEmbeddingProvider } from '../src/ai/providers/openaiEmbeddings.js';
@@ -9,6 +18,49 @@ import type { EmbeddingProvider } from '../src/documents/ingestion.js';
 import { config } from '../src/config.js';
 
 const DIMENSIONS = 2;
+
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockReturnValue({ toArray: vi.fn().mockResolvedValue([]) }),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      insertMany: vi.fn().mockResolvedValue({ acknowledged: true }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      aggregate: vi.fn().mockReturnValue({ toArray: vi.fn().mockResolvedValue([]) }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    for (const m of ['findOne', 'findOneAndUpdate', 'updateOne', 'updateMany', 'insertOne', 'insertMany', 'deleteMany']) {
+      coll[m].mockReset();
+    }
+    coll.find.mockReset();
+    coll.find.mockReturnValue({ toArray: vi.fn().mockResolvedValue([]) });
+    coll.aggregate.mockReset();
+    coll.aggregate.mockReturnValue({ toArray: vi.fn().mockResolvedValue([]) });
+    coll.findOne.mockResolvedValue(null);
+    coll.findOneAndUpdate.mockResolvedValue(null);
+    coll.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    coll.insertMany.mockResolvedValue({ acknowledged: true });
+    coll.deleteMany.mockResolvedValue({ deletedCount: 0 });
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+  tenantOpMock.mockReset();
+  tenantOpMock.mockImplementation(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+}
 
 function fakeDependencies(overrides: Partial<{
   vectors: number[][];
@@ -33,18 +85,33 @@ function fakeDependencies(overrides: Partial<{
 }
 
 function mockDocumentRow() {
-  tenantQuery.mockImplementation(async (...args: any[]) => {
-    // Vitest teardown may invoke the implementation with no arguments; ignore.
-    const sql = (args[1] ?? '') as string;
-    if (sql.includes('UPDATE documents SET status = \'PROCESSING\'')) {
-      return { rows: [{ object_key: 'k', mime_type: 'text/plain', classification: 'INTERNAL' }], rowCount: 1 };
-    }
-    return { rows: [], rowCount: 0 };
+  // ingestDocument starts by atomically transitioning the document to
+  // PROCESSING via findOneAndUpdate, returning the document (or null if not found).
+  const documentsColl = getMockCollection('documents');
+  documentsColl.findOneAndUpdate.mockResolvedValue({
+    _id: 'd1',
+    tenantId: 't1',
+    objectKey: 'k',
+    mimeType: 'text/plain',
+    classification: 'INTERNAL',
   });
 }
 
+function findFailedUpdate(errorCode?: string) {
+  const documentsColl = getMockCollection('documents');
+  return documentsColl.updateOne.mock.calls.find(([filter, update]: any[]) => {
+    const set = update?.$set ?? {};
+    return set.status === 'FAILED' && (errorCode === undefined || set.errorCode === errorCode);
+  });
+}
+
+function chunkInsertCalls() {
+  const chunksColl = getMockCollection('document_chunks');
+  return chunksColl.insertMany.mock.calls;
+}
+
 describe('ingestion embedding validation', () => {
-  beforeEach(() => tenantQuery.mockReset());
+  beforeEach(() => resetMocks());
 
   it('rejects non-finite embedding values instead of storing them', async () => {
     mockDocumentRow();
@@ -52,14 +119,10 @@ describe('ingestion embedding validation', () => {
     await expect(ingestDocument('d1', 't1', deps as any)).rejects.toMatchObject({
       code: 'INVALID_EMBEDDING_RESPONSE',
     });
-    const failedUpdate = tenantQuery.mock.calls.find(([, sql]: any[]) =>
-      (sql as string).includes('UPDATE documents SET status = \'FAILED\'')
-    );
-    expect(failedUpdate).toBeTruthy();
-    // No chunk rows were written.
-    expect(
-      tenantQuery.mock.calls.some(([, sql]: any[]) => (sql as string).includes('INSERT INTO document_chunks'))
-    ).toBe(false);
+    // The document is marked FAILED.
+    expect(findFailedUpdate()).toBeTruthy();
+    // No chunk documents were written.
+    expect(chunkInsertCalls().length).toBe(0);
   });
 
   it('rejects wrong-dimension vectors', async () => {
@@ -159,12 +222,11 @@ describe('chunkText argument validation', () => {
     expect(chunks.every((c) => c.length <= 100)).toBe(true);
   });
 });
-  beforeEach(() => tenantQuery.mockReset());
 
 describe('ingestion chunk insert batching', () => {
-  beforeEach(() => tenantQuery.mockReset());
+  beforeEach(() => resetMocks());
 
-  it('writes chunks with multi-row inserts instead of one transaction per chunk', async () => {
+  it('writes chunks with batched insertMany instead of one write per chunk', async () => {
     mockDocumentRow();
     // ~250 chunks of max-size text (1600 chars each).
     const text = 'w'.repeat(1600);
@@ -183,25 +245,30 @@ describe('ingestion chunk insert batching', () => {
     };
     const result = await ingestDocument('d1', 't1', deps as any);
     expect(result).toBe('READY');
-    const inserts = tenantQuery.mock.calls.filter(([, sql]: any[]) =>
-      (sql as string).includes('INSERT INTO document_chunks')
-    );
-    // 250 chunks in batches of 200 -> 2 statements, not 250.
+    const inserts = chunkInsertCalls();
+    // 250 chunks in batches of 200 -> 2 insertMany calls, not 250.
     expect(inserts.length).toBe(2);
-    const [, firstSql, firstParams] = inserts[0]!;
-    expect((firstSql as string).match(/\(\$/g)).toHaveLength(200);
-    expect((firstParams as unknown[]).length).toBe(200 * 12);
-    const [, secondSql] = inserts[1]!;
-    expect((secondSql as string).match(/\(\$/g)).toHaveLength(50);
+    const firstDocs = inserts[0][0] as any[];
+    const secondDocs = inserts[1][0] as any[];
+    expect(firstDocs).toHaveLength(200);
+    expect(secondDocs).toHaveLength(50);
     // Chunk indexes are continuous across batches.
-    const allParams = inserts.flatMap(([, , params]: any[]) => params as unknown[]);
-    const indexes = allParams.filter((_: unknown, i: number) => i % 12 === 2);
-    expect(indexes).toEqual(Array.from({ length: 250 }, (_, i) => i));
+    const allDocs = [...firstDocs, ...secondDocs];
+    expect(allDocs.map((d) => d.chunkIndex)).toEqual(Array.from({ length: 250 }, (_, i) => i));
+    // Each chunk doc carries the MongoDB provenance fields.
+    expect(firstDocs[0]).toMatchObject({
+      documentId: 'd1',
+      tenantId: 't1',
+      embeddingModel: 'test-model',
+      embeddingVersion: '1',
+      embeddingDimensions: DIMENSIONS,
+    });
+    expect(firstDocs[0].embedding).toEqual([0.1, 0.2]);
   });
 });
 
 describe('ingestion cancellation hooks', () => {
-  beforeEach(() => tenantQuery.mockReset());
+  beforeEach(() => resetMocks());
 
   it('aborts between pipeline stages when shouldCancel fires', async () => {
     mockDocumentRow();
@@ -215,14 +282,9 @@ describe('ingestion cancellation hooks', () => {
     expect(deps.scanner.scan).toHaveBeenCalled();
     expect(deps.extractor).not.toHaveBeenCalled();
     // The document is left FAILED/INGESTION_CANCELED, never stranded in PROCESSING.
-    const canceledUpdate = tenantQuery.mock.calls.find(([, sql]: any[]) =>
-      (sql as string).includes("error_code = 'INGESTION_CANCELED'")
-    );
-    expect(canceledUpdate).toBeTruthy();
+    expect(findFailedUpdate('INGESTION_CANCELED')).toBeTruthy();
     // No chunks were written: the store stage was never reached.
-    expect(
-      tenantQuery.mock.calls.some(([, sql]: any[]) => (sql as string).includes('INSERT INTO document_chunks'))
-    ).toBe(false);
+    expect(chunkInsertCalls().length).toBe(0);
   });
 
   it('runs to completion when shouldCancel never fires', async () => {

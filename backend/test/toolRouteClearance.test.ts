@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { getDbMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  return { getDbMock };
+});
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
 vi.mock('../src/auth/middleware.js', () => ({
   requireAuth: (req: any, _reply: any, done: () => void) => {
@@ -33,6 +36,19 @@ import { AppError } from '../src/errors.js';
 const tool = toolRegistry.find((entry) => entry.name === 'syteline.getItem')!;
 const originalExecute = tool.execute;
 
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true, insertedId: 'exec-1' }),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+    };
+  }
+  return mockCollections[name];
+}
+
 async function app() {
   const fastify = Fastify();
   fastify.setErrorHandler((error: any, _req, reply) => {
@@ -49,10 +65,20 @@ beforeEach(() => {
   vi.clearAllMocks();
   tool.execute = originalExecute;
   recordAudit.mockResolvedValue(undefined);
-  tenantQuery.mockImplementation(async (_tenant: string, sql: string) => {
-    if (sql.includes('INSERT INTO tool_executions')) return { rows: [{ id: 'exec-1' }], rowCount: 1 };
-    return { rows: [], rowCount: 0 };
-  });
+  // Reset mock collections
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset();
+    coll.findOne.mockResolvedValue(null);
+    coll.insertOne.mockReset();
+    coll.insertOne.mockResolvedValue({ acknowledged: true, insertedId: 'exec-1' });
+    coll.updateOne.mockReset();
+    coll.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
 });
 
 describe('POST /tools/:name/execute clearance enforcement', () => {
@@ -75,6 +101,15 @@ describe('POST /tools/:name/execute clearance enforcement', () => {
       success: false,
       classification: 'CUI',
     }));
+    // The denial is still persisted to tool_executions
+    const toolExecColl = getMockCollection('tool_executions');
+    expect(toolExecColl.insertOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolName: 'syteline.getItem',
+        authorizationDecision: 'DENIED',
+        status: 'DENIED',
+      })
+    );
     await fastify.close();
   });
 

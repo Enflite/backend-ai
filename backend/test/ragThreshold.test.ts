@@ -1,8 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { tenantQuery, withTenant } = vi.hoisted(() => ({ tenantQuery: vi.fn(), withTenant: vi.fn() }));
+const { getDbMock, tenantOpMock, withTenantTxMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  const withTenantTxMock = vi.fn(async (_tenantId: string, cb: (s: any, db: any) => Promise<any>) => cb({}, await getDbMock()));
+  return { getDbMock, tenantOpMock, withTenantTxMock };
+});
 const embedMock = vi.hoisted(() => vi.fn());
-vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenant }));
+vi.mock('../src/db/mongo.js', () => ({
+  getDb: getDbMock,
+  tenantOp: tenantOpMock,
+  withTenantTx: withTenantTxMock,
+}));
 vi.mock('../src/documents/ingestion.js', () => ({
   internalEmbeddingProvider: () => ({
     model: 'embedding-test', version: '1', dimensions: 2,
@@ -20,28 +29,87 @@ const auth: AuthContext = {
   email: 'user@example.test', displayName: 'User', roleName: 'User', clearance: 'INTERNAL', permissions: ['document:read'],
 };
 
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      insertMany: vi.fn().mockResolvedValue({ acknowledged: true }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      aggregate: vi.fn().mockImplementation(() => ({ toArray: vi.fn().mockResolvedValue([]) })),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetDbMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset(); coll.findOne.mockResolvedValue(null);
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    coll.aggregate.mockReset();
+    coll.aggregate.mockImplementation(() => ({ toArray: vi.fn().mockResolvedValue([]) }));
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+}
+
+// Chunk row in the MongoDB aggregate output shape.
 const row = {
-  chunk_id: 'c1', content: 'the quick brown fox jumps over the lazy dog', page: null, section: null,
-  source_location: null, document_id: 'd1', filename: 'doc.md', vector_score: '0.9',
+  _id: 'c1',
+  content: 'the quick brown fox jumps over the lazy dog',
+  documentId: 'd1',
+  classification: 'INTERNAL',
+  page: null,
+  section: null,
+  sourceLocation: null,
+  vectorScore: 0.9,
 };
 
-const fakeClient = {
-  query: vi.fn(async (sql: string) => {
-    if (typeof sql === 'string' && sql.startsWith('SET LOCAL')) return { rows: [] };
-    return { rows: fakeClient.rows };
-  }),
-  rows: [row] as Record<string, unknown>[],
-};
+let chunkRows: Record<string, unknown>[] = [row];
 
 describe('retrieval similarity threshold', () => {
   beforeEach(() => {
-    tenantQuery.mockReset();
-    withTenant.mockReset();
+    resetDbMocks();
     embedMock.mockReset();
     embedMock.mockResolvedValue([[0.1, 0.2]]);
     config.RAG_SIMILARITY_THRESHOLD = 0;
-    fakeClient.rows = [row];
-    withTenant.mockImplementation(async (_tenantId: string, callback: (client: unknown) => Promise<unknown>) => callback(fakeClient));
+    chunkRows = [row];
+
+    // Authorized document for the chunk.
+    const docsColl = getMockCollection('documents');
+    docsColl.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([
+        { _id: 'd1', filename: 'doc.md', classification: 'INTERNAL' },
+      ]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+
+    const chunksColl = getMockCollection('document_chunks');
+    chunksColl.aggregate.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue(chunkRows),
+    }));
   });
 
   it('excludes below-threshold chunks from model context', async () => {
@@ -64,6 +132,7 @@ describe('retrieval similarity threshold', () => {
   it('rejects non-finite query embeddings instead of querying with them', async () => {
     embedMock.mockResolvedValue([[NaN, 0.2]]);
     await expect(retrieveAuthorizedContext(auth, 'question')).rejects.toThrow('invalid query vector');
-    expect(tenantQuery).not.toHaveBeenCalled();
+    // No database query runs when the embedding is invalid: getDb is never called.
+    expect(getDbMock).not.toHaveBeenCalled();
   });
 });

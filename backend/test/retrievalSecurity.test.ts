@@ -145,10 +145,10 @@ beforeEach(() => {
 function setupRetrieval(chunks: any[]) {
   chunkDocs = chunks;
   const docIds = [...new Set(chunks.map((c) => c.documentId))];
-  documentDocs = docIds.map((docId, i) => docEntry({
+  documentDocs = docIds.map((docId) => docEntry({
     _id: docId,
-    filename: chunks.find((c) => c.documentId === docId)?.filename ?? `doc-${i}.txt`,
-    // filename is on the doc; chunk docs don't have it in MongoDB shape
+    // Default test document is doc-1 -> doc.txt; others get a derived name.
+    filename: docId === 'doc-1' ? 'doc.txt' : `${docId}.txt`,
   }));
   // Re-wire documents collection with the new docs
   const docs = getMockCollection('documents');

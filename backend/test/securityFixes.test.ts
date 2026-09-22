@@ -1,17 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
-const { tenantQuery, withTenantTx } = vi.hoisted(() => ({
-  tenantQuery: vi.fn(),
-  // Mirror withTenantTx: run the callback with a client whose query() delegates
-  // to the tenantQuery mock so SQL-text dispatch keeps working.
-  withTenantTx: vi.fn(async (tenantId: string, callback: (client: any) => Promise<any>) =>
-    callback({ query: (text: string, params?: any) => tenantQuery(tenantId, text, params) })),
-}));
+const { getDbMock, tenantOpMock, withTenantTxMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  // Mirror withTenantTx: run the callback with (session, db, tenantId)
+  const withTenantTxMock = vi.fn(async (tenantId: string, callback: (session: any, db: any, tenantId: string) => Promise<any>) =>
+    callback({}, await getDbMock(), tenantId));
+  return { getDbMock, tenantOpMock, withTenantTxMock };
+});
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 const { enqueueIngestion } = vi.hoisted(() => ({ enqueueIngestion: vi.fn() }));
 
-vi.mock('../src/db/pool.js', () => ({ tenantQuery, withTenantTx }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock, withTenantTx: withTenantTxMock }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit }));
 vi.mock('../src/documents/queue.js', () => ({ enqueueIngestion }));
 
@@ -43,16 +44,114 @@ import { AppError } from '../src/errors.js';
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
 
 const DOC_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const TENANT = '22222222-2222-4222-8222-222222222222';
+
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        skip: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      deleteOne: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetMocks() {
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    for (const m of ['findOne', 'findOneAndUpdate', 'updateOne', 'updateMany', 'insertOne', 'deleteOne', 'deleteMany']) {
+      coll[m].mockReset();
+      if (m === 'findOne') coll[m].mockResolvedValue(null);
+      else if (m === 'findOneAndUpdate') coll[m].mockResolvedValue(null);
+      else if (m === 'updateOne' || m === 'updateMany') coll[m].mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+      else if (m === 'insertOne') coll[m].mockResolvedValue({ acknowledged: true });
+      else if (m === 'deleteOne' || m === 'deleteMany') coll[m].mockResolvedValue({ deletedCount: 1 });
+    }
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+  withTenantTxMock.mockClear();
+  withTenantTxMock.mockImplementation(async (tenantId: string, callback: (session: any, db: any, tenantId: string) => Promise<any>) =>
+    callback({}, await getDbMock(), tenantId));
+}
+
+function mkDoc(overrides: any = {}) {
+  return {
+    _id: DOC_ID,
+    tenantId: TENANT,
+    ownerId: 'owner-1',
+    classification: 'CONFIDENTIAL',
+    status: 'READY',
+    deletedAt: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+}
 
 function mockDocLookup(classification: string, ownerId: string, hasGrant = false) {
-  tenantQuery.mockImplementation(async (_tenantId: string, text: string) => {
-    if (text.startsWith('SELECT d.classification, d.owner_id')) {
-      return { rowCount: 1, rows: [{ classification, owner_id: ownerId, has_grant: hasGrant }] };
+  const docsColl = getMockCollection('documents');
+  const permsColl = getMockCollection('document_permissions');
+
+  // Current document lookup
+  docsColl.findOne.mockImplementation(async (filter: any) => {
+    if (filter._id === DOC_ID) {
+      return mkDoc({ classification, ownerId });
     }
-    if (text.startsWith('UPDATE documents SET classification')) {
-      return { rowCount: 1, rows: [{ id: DOC_ID, classification: 'PUBLIC', status: 'PENDING' }] };
+    return null;
+  });
+
+  // Grant check: return a grant document if hasGrant is true
+  permsColl.findOne.mockImplementation(async (filter: any) => {
+    if (filter.documentId === DOC_ID && hasGrant) {
+      return { _id: 'grant-1', tenantId: TENANT, documentId: DOC_ID };
     }
-    return { rowCount: 0, rows: [] };
+    return null;
+  });
+
+  // principalOrConditions: department_memberships and security_group_memberships return empty
+  getMockCollection('department_memberships').find.mockImplementation(() => ({
+    toArray: vi.fn().mockResolvedValue([]),
+    sort: vi.fn().mockReturnThis(),
+    limit: vi.fn().mockReturnThis(),
+    skip: vi.fn().mockReturnThis(),
+    project: vi.fn().mockReturnThis(),
+  }));
+  getMockCollection('security_group_memberships').find.mockImplementation(() => ({
+    toArray: vi.fn().mockResolvedValue([]),
+    sort: vi.fn().mockReturnThis(),
+    limit: vi.fn().mockReturnThis(),
+    skip: vi.fn().mockReturnThis(),
+    project: vi.fn().mockReturnThis(),
+  }));
+
+  // Update returns the updated document
+  docsColl.findOneAndUpdate.mockImplementation(async (filter: any, update: any) => {
+    return mkDoc({ classification: update.$set.classification, ownerId, status: 'PENDING' });
   });
 }
 
@@ -60,6 +159,7 @@ let app: ReturnType<typeof Fastify>;
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  resetMocks();
   testAuth.current = {
     userId: 'owner-1',
     tenantId: '22222222-2222-4222-8222-222222222222',
@@ -115,11 +215,17 @@ describe('PATCH /documents/:id/classification authorization', () => {
       url: `/documents/${DOC_ID}/classification`,
       payload: { classification: 'PUBLIC', confirm: true },
     });
-    const lookup = tenantQuery.mock.calls.find(([, text]: any[]) =>
-      (text as string).startsWith('SELECT d.classification, d.owner_id'));
+    const permsColl = getMockCollection('document_permissions');
+    const lookup = permsColl.findOne.mock.calls.find(([filter]: any[]) =>
+      filter.documentId === DOC_ID);
     expect(lookup).toBeDefined();
-    // user_id and role_id are bound for the document_permissions grant predicate.
-    expect(lookup![2]).toEqual(expect.arrayContaining(['collaborator-1', testAuth.current.roleId]));
+    // The grant check includes tenantId and the principal $or conditions
+    // containing the caller's userId.
+    const [filter] = lookup!;
+    expect(filter.tenantId).toBe(TENANT);
+    expect(filter.documentId).toBe(DOC_ID);
+    expect(filter.canRead).toBe(true);
+    expect(JSON.stringify(filter.$or)).toContain('collaborator-1');
   });
 
   it('allows reclassification by a tenant manager who is not the owner', async () => {
@@ -177,11 +283,42 @@ describe('PATCH /documents/:id/classification authorization', () => {
 
 describe('list pagination', () => {
   it('passes bounded limit/offset to the documents query', async () => {
-    tenantQuery.mockResolvedValue({ rows: [] });
+    const docsColl = getMockCollection('documents');
+    docsColl.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    // grantedDocumentIds needs these
+    getMockCollection('document_permissions').find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    getMockCollection('department_memberships').find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    getMockCollection('security_group_memberships').find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+
     const response = await app.inject({ method: 'GET', url: '/documents?limit=10&offset=20' });
     expect(response.statusCode).toBe(200);
-    const params = tenantQuery.mock.calls[0]![2] as unknown[];
-    expect(params.slice(-2)).toEqual([10, 20]);
+    const chain = docsColl.find.mock.results[0]!.value;
+    expect(chain.skip).toHaveBeenCalledWith(20);
+    expect(chain.limit).toHaveBeenCalledWith(10);
     expect(response.json().pagination).toEqual({ limit: 10, offset: 20 });
   });
 

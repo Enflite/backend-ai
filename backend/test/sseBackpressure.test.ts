@@ -116,7 +116,11 @@ describe('createSseSender', () => {
 // as a clean completion, and never with the legacy in-content marker.
 // ---------------------------------------------------------------------------
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { getDbMock, tenantOpMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  return { getDbMock, tenantOpMock };
+});
 const { listApprovedModelsForUser, getApprovedModelForUser } = vi.hoisted(() => ({
   listApprovedModelsForUser: vi.fn(),
   getApprovedModelForUser: vi.fn(),
@@ -139,7 +143,7 @@ const { currentAuth } = vi.hoisted(() => ({
 }));
 
 const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock }));
 vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
@@ -166,31 +170,76 @@ const testModel = {
   version: '1',
   provider: 'vllm',
   endpoint: 'http://localhost:8000/v1',
-  model_identifier: 'test-model',
+  modelIdentifier: 'test-model',
   status: 'ACTIVE',
-  context_window: 8192,
+  contextWindow: 8192,
   capabilities: {},
-  allowed_classifications: ['PUBLIC', 'INTERNAL'],
+  allowedClassifications: ['PUBLIC', 'INTERNAL'],
   deployment: {},
-  request_timeout_ms: null,
-  max_tokens: null,
+  requestTimeoutMs: null,
+  maxTokens: null,
   temperature: null,
-  fallback_model_id: null,
+  fallbackModelId: null,
 };
 
-const assistantInserts: unknown[][] = [];
+const assistantInserts: any[] = [];
+
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        skip: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true }),
+      deleteOne: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    };
+  }
+  return mockCollections[name];
+}
 
 function mockDb() {
   assistantInserts.length = 0;
-  tenantQuery.mockImplementation(async (_tenantId: string, sql: string, params?: unknown[]) => {
-    if (sql.includes('INSERT INTO conversations')) return { rows: [{ id: 'conv-1' }] };
-    if (sql.includes('FROM messages')) return { rows: [] };
-    if (sql.includes('INSERT INTO messages')) {
-      if (sql.includes("'assistant'")) assistantInserts.push(params ?? []);
-      return { rows: [] };
+  // Reset all collections
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset();
+    coll.findOne.mockResolvedValue(null);
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    coll.insertOne.mockReset();
+    coll.insertOne.mockResolvedValue({ acknowledged: true });
+    coll.updateOne.mockReset();
+    coll.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+
+  // Capture assistant message inserts
+  const messagesColl = getMockCollection('messages');
+  messagesColl.insertOne.mockImplementation(async (doc: any) => {
+    if (doc.role === 'assistant') {
+      assistantInserts.push(doc);
     }
-    if (sql.includes('UPDATE conversations')) return { rows: [] };
-    throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
+    return { acknowledged: true, insertedId: doc._id };
   });
 }
 
@@ -296,10 +345,11 @@ describe('chat SSE disconnect handling', () => {
 
       // …and the partial turn must persist as interrupted metadata — never
       // as a clean completion, and never with the legacy in-content marker.
+      // In MongoDB, metadata is a native subdocument (not a JSON string).
       await waitFor(() => assistantInserts.length > 0, 10_000, 'assistant message insert');
-      const params = assistantInserts[0]!;
-      const content = params[2] as string;
-      const metadata = JSON.parse(params[6] as string) as Record<string, unknown>;
+      const doc = assistantInserts[0]!;
+      const content = doc.content as string;
+      const metadata = doc.metadata as Record<string, unknown>;
       expect(content).toContain('partial answer');
       expect(content).not.toContain('never arrives');
       expect(content).not.toContain('[incomplete:');

@@ -13,7 +13,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { getDbMock, tenantOpMock, withTenantTxMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  const tenantOpMock = vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock()));
+  const withTenantTxMock = vi.fn(async (_tenantId: string, cb: (s: any, db: any) => Promise<any>) => cb({}, await getDbMock()));
+  return { getDbMock, tenantOpMock, withTenantTxMock };
+});
 const { listApprovedModelsForUser, getApprovedModelForUser } = vi.hoisted(() => ({
   listApprovedModelsForUser: vi.fn(),
   getApprovedModelForUser: vi.fn(),
@@ -36,7 +41,11 @@ const { currentAuth } = vi.hoisted(() => ({
 }));
 const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: vi.fn() }));
 
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({
+  getDb: getDbMock,
+  tenantOp: tenantOpMock,
+  withTenantTx: withTenantTxMock,
+}));
 vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
@@ -64,37 +73,83 @@ const testModel = {
   version: '1',
   provider: 'vllm',
   endpoint: 'http://localhost:8000/v1',
-  model_identifier: 'test-model',
+  modelIdentifier: 'test-model',
   status: 'ACTIVE',
-  context_window: 8192,
+  contextWindow: 8192,
   capabilities: {},
-  allowed_classifications: ['PUBLIC', 'INTERNAL'],
+  allowedClassifications: ['PUBLIC', 'INTERNAL'],
   deployment: {},
-  request_timeout_ms: null,
-  max_tokens: null,
+  requestTimeoutMs: null,
+  maxTokens: null,
   temperature: null,
-  fallback_model_id: null,
+  fallbackModelId: null,
 };
 
-/** Assistant INSERT params captured so tests can assert on persisted text. */
-let persistedAssistantMessages: Array<{ content: string; metadata: string }> = [];
+/** Assistant message docs captured so tests can assert on persisted text. */
+let persistedAssistantMessages: Array<{ content: string; metadata: any }> = [];
 
-function mockDb() {
+// Mock collections registry
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      find: vi.fn().mockImplementation(() => ({
+        toArray: vi.fn().mockResolvedValue([]),
+        sort: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        project: vi.fn().mockReturnThis(),
+      })),
+      findOneAndUpdate: vi.fn().mockResolvedValue(null),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 }),
+      insertOne: vi.fn().mockImplementation(async (doc: any) => {
+        // Capture assistant messages for DLP assertions (content + metadata
+        // are stored as native fields — no JSON.stringify, ADR-014).
+        if (name === 'messages' && doc.role === 'assistant') {
+          persistedAssistantMessages.push({ content: doc.content, metadata: doc.metadata });
+        }
+        return { acknowledged: true, insertedId: doc._id ?? 'mock-id' };
+      }),
+      deleteMany: vi.fn().mockResolvedValue({ deletedCount: 0 }),
+    };
+  }
+  return mockCollections[name];
+}
+
+function resetDbMocks() {
   persistedAssistantMessages = [];
-  tenantQuery.mockImplementation(async (_tenantId: string, sql: string, params?: unknown[]) => {
-    if (sql.includes('INSERT INTO conversations')) return { rows: [{ id: 'conv-1' }] };
-    if (sql.includes('FROM messages')) return { rows: [] };
-    if (sql.includes("INSERT INTO messages") && sql.includes("'assistant'")) {
-      persistedAssistantMessages.push({
-        content: String(params?.[2] ?? ''),
-        metadata: String(params?.[6] ?? ''),
-      });
-      return { rows: [] };
-    }
-    if (sql.includes('INSERT INTO messages')) return { rows: [] };
-    if (sql.includes('UPDATE conversations')) return { rows: [] };
-    throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
-  });
+  for (const name of Object.keys(mockCollections)) {
+    const coll = mockCollections[name];
+    coll.findOne.mockReset();
+    coll.findOne.mockResolvedValue(null);
+    coll.find.mockReset();
+    coll.find.mockImplementation(() => ({
+      toArray: vi.fn().mockResolvedValue([]),
+      sort: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      project: vi.fn().mockReturnThis(),
+    }));
+    coll.findOneAndUpdate.mockReset();
+    coll.findOneAndUpdate.mockResolvedValue(null);
+    coll.updateOne.mockReset();
+    coll.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    coll.updateMany.mockReset();
+    coll.updateMany.mockResolvedValue({ acknowledged: true, modifiedCount: 0 });
+    coll.insertOne.mockReset();
+    coll.insertOne.mockImplementation(async (doc: any) => {
+      if (name === 'messages' && doc.role === 'assistant') {
+        persistedAssistantMessages.push({ content: doc.content, metadata: doc.metadata });
+      }
+      return { acknowledged: true, insertedId: doc._id ?? 'mock-id' };
+    });
+    coll.deleteMany.mockReset();
+    coll.deleteMany.mockResolvedValue({ deletedCount: 0 });
+  }
+  getDbMock.mockReset();
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
 }
 
 function sseFrames(res: { rawPayload: Buffer }): string[] {
@@ -114,7 +169,7 @@ function streamedText(frames: string[]): string {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockDb();
+  resetDbMocks();
   listApprovedModelsForUser.mockResolvedValue([testModel]);
   getApprovedModelForUser.mockResolvedValue(testModel);
   resolveCapabilityModel.mockResolvedValue({
@@ -216,7 +271,8 @@ describe('chat DLP outbound boundary', () => {
     expect(persistedAssistantMessages).toHaveLength(1);
     expect(persistedAssistantMessages[0]!.content).toBe('Partial');
     expect(persistedAssistantMessages[0]!.content).not.toContain('123-45-67');
-    // The turn is marked interrupted, not completed.
-    expect(persistedAssistantMessages[0]!.metadata).toContain('"stream_status":"interrupted"');
+    // The turn is marked interrupted, not completed (metadata is a native
+    // subdocument in MongoDB — no JSON.stringify, ADR-014).
+    expect(persistedAssistantMessages[0]!.metadata).toMatchObject({ stream_status: 'interrupted' });
   });
 });

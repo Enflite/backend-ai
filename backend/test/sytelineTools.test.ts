@@ -19,9 +19,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { tenantQuery } = vi.hoisted(() => ({ tenantQuery: vi.fn() }));
+const { getDbMock } = vi.hoisted(() => {
+  const getDbMock = vi.fn();
+  return { getDbMock };
+});
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
-vi.mock('../src/db/pool.js', () => ({ tenantQuery }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock }));
 vi.mock('../src/audit/audit.js', () => ({
   recordAudit,
   sanitizeReason: (reason?: string | null) => reason ?? null,
@@ -46,13 +49,34 @@ const SYTELINE_TOOLS = [
   'syteline.getCustomer',
 ];
 
-function mockToolExecutions() {
-  tenantQuery.mockImplementation(async (_tenantId: string, sql: string) => {
-    if (sql.includes('INSERT INTO tool_executions')) return { rows: [{ id: 'exec-1' }] };
-    if (sql.includes('UPDATE tool_executions')) return { rows: [] };
-    throw new Error(`unexpected query: ${sql.slice(0, 80)}`);
-  });
+// Mock collections registry for tool_executions
+const mockCollections: Record<string, any> = {};
+function getMockCollection(name: string) {
+  if (!mockCollections[name]) {
+    mockCollections[name] = {
+      findOne: vi.fn().mockResolvedValue(null),
+      insertOne: vi.fn().mockResolvedValue({ acknowledged: true, insertedId: 'exec-1' }),
+      updateOne: vi.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 }),
+    };
+  }
+  return mockCollections[name];
 }
+
+function mockToolExecutions() {
+  const toolExecColl = getMockCollection('tool_executions');
+  toolExecColl.insertOne.mockResolvedValue({ acknowledged: true, insertedId: 'exec-1' });
+  toolExecColl.updateOne.mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+}
+
+beforeEach(() => {
+  // Ensure getDb is mocked for tool execution tests
+  getDbMock.mockImplementation(async () => ({
+    collection: (name: string) => getMockCollection(name),
+  }));
+});
 
 const authWithSyteLine = () =>
   authFor(USER_A1, TENANT_A, {

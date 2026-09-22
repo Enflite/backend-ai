@@ -6,14 +6,13 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import Fastify from 'fastify';
 
-// The DB pool is stubbed per test: readiness is about check logic and HTTP
-// mapping, not about a live database.
-const { poolQuery, poolConnect, clientRelease } = vi.hoisted(() => ({
-  poolQuery: vi.fn(),
-  poolConnect: vi.fn(),
-  clientRelease: vi.fn(),
+// The MongoDB client is stubbed per test: readiness is about check logic and
+// HTTP mapping, not about a live database.
+const { getDbMock, dbCommand } = vi.hoisted(() => ({
+  getDbMock: vi.fn(),
+  dbCommand: vi.fn(),
 }));
-vi.mock('../src/db/pool.js', () => ({ query: poolQuery, pool: { connect: poolConnect } }));
+vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock }));
 
 import { config } from '../src/config.js';
 import {
@@ -34,14 +33,12 @@ afterEach(() => {
 });
 
 beforeEach(() => {
-  poolQuery.mockReset();
-  poolQuery.mockResolvedValue({ rows: [{ '?column?': 1 }] });
-  poolConnect.mockReset();
-  clientRelease.mockReset();
-  // The readiness database check uses a dedicated pooled client (bounded
-  // server-side via statement_timeout); stub connect() to hand it the
-  // stubbed query fn.
-  poolConnect.mockResolvedValue({ query: poolQuery, release: clientRelease });
+  dbCommand.mockReset();
+  dbCommand.mockResolvedValue({ ok: 1 });
+  getDbMock.mockReset();
+  // The readiness database check calls db.command({ ping: 1 }); stub getDb()
+  // to hand it the stubbed command fn.
+  getDbMock.mockResolvedValue({ command: dbCommand });
 });
 
 describe('metrics registry', () => {
@@ -157,6 +154,7 @@ describe('/ready dependency checks', () => {
     expect(report.checks.database.status).toBe('ok');
     expect(report.checks.database.critical).toBe(true);
     expect(report.checks.database.latencyMs).toBeGreaterThanOrEqual(0);
+    expect(dbCommand).toHaveBeenCalledWith({ ping: 1 });
     // No OBJECT_STORAGE_ENDPOINT / EMBEDDING_BASE_URL in the test env.
     expect(report.checks.objectStorage.status).toBe('not_configured');
     expect(report.checks.objectStorage.critical).toBe(false);
@@ -165,7 +163,7 @@ describe('/ready dependency checks', () => {
   });
 
   it('marks the report degraded when a critical dependency is down', async () => {
-    poolQuery.mockRejectedValue(new Error('connection refused'));
+    dbCommand.mockRejectedValue(new Error('connection refused'));
     const report = await runReadinessChecks();
     expect(report.status).toBe('degraded');
     expect(report.checks.database.status).toBe('unavailable');
@@ -187,7 +185,7 @@ describe('/ready dependency checks', () => {
   });
 
   it('GET /ready returns 503 when a critical dependency is down', async () => {
-    poolQuery.mockRejectedValue(new Error('connection refused'));
+    dbCommand.mockRejectedValue(new Error('connection refused'));
     const app = Fastify();
     await app.register(healthRoutes);
     const res = await app.inject({ method: 'GET', url: '/ready' });
@@ -199,7 +197,8 @@ describe('/ready dependency checks', () => {
   it('GET /ready never exposes raw dependency errors publicly', async () => {
     // The probe is unauthenticated: connection strings and SDK internals in
     // raw error messages must stay server-side (logged), not in the body.
-    poolQuery.mockRejectedValue(new Error('connect postgres://db.internal:5432 refused'));
+    // (Updated for MongoDB: the error mentions the MongoDB host, not postgres.)
+    dbCommand.mockRejectedValue(new Error('connect mongodb://db.internal:27017 refused'));
     const app = Fastify();
     await app.register(healthRoutes);
     const res = await app.inject({ method: 'GET', url: '/ready' });
@@ -211,8 +210,8 @@ describe('/ready dependency checks', () => {
     await app.close();
   });
 
-  it('GET /ready reports degraded rather than 500ing when the pool is exhausted', async () => {
-    poolConnect.mockRejectedValueOnce(new Error('pool exhausted'));
+  it('GET /ready reports degraded rather than 500ing when getDb fails', async () => {
+    getDbMock.mockRejectedValueOnce(new Error('connection pool exhausted'));
     const app = Fastify();
     await app.register(healthRoutes);
     const res = await app.inject({ method: 'GET', url: '/ready' });
