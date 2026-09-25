@@ -45,6 +45,9 @@ export const PERMISSIONS = [
   'retention:manage',
   'memory:read',
   'memory:write',
+  'feedback:submit',
+  'feedback:curate',
+  'finetune:manage',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -63,6 +66,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'repo:read',
     'memory:read',
     'memory:write',
+    'feedback:submit',
   ],
   Admin: PERMISSIONS,
   'Security Admin': [
@@ -78,6 +82,8 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'model:use',
     'tool:use',
     'syteline:read',
+    'feedback:curate',
+    'finetune:manage',
     'repo:read',
     'repo:manage',
     'chat:create',
@@ -98,6 +104,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'repo:read',
     'memory:read',
     'memory:write',
+    'feedback:submit',
   ],
   'Read Only': ['conversation:read', 'document:read', 'memory:read'],
 };

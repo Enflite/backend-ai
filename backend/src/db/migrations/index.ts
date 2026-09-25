@@ -17,6 +17,10 @@
  *  - 004_eval_oidc     → 016, 020, 023
  *  - 005_repos_memory  → 021 (retention_policies), 026, 027
  *
+ * 006_learning_flywheel is new (ADR-015): not a port — feedback,
+ * finetune_datasets and finetune_jobs collections plus the
+ * feedback:submit / feedback:curate / finetune:manage permission seeds.
+ *
  * Atlas Vector Search indexes (document_chunks.embedding,
  * repo_code_chunks.embedding) are NOT created here — the MongoDB driver
  * cannot provision them. See backend/src/db/createVectorIndexes.ts.
@@ -28,6 +32,7 @@ import { migration002 } from './002_platform.js';
 import { migration003 } from './003_documents_rag.js';
 import { migration004 } from './004_eval_oidc.js';
 import { migration005 } from './005_repos_memory.js';
+import { migration006 } from './006_learning_flywheel.js';
 
 export const migrations: Migration[] = [
   migration001,
@@ -35,4 +40,5 @@ export const migrations: Migration[] = [
   migration003,
   migration004,
   migration005,
+  migration006,
 ];

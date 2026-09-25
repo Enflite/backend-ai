@@ -26,6 +26,7 @@ import { toolRoutes } from './tools/routes.js';
 import { repoRoutes } from './repos/routes.js';
 import { evalRoutes } from './eval/routes.js';
 import { retentionRoutes } from './retention/routes.js';
+import { learningRoutes } from './learning/routes.js';
 import { startRetentionScheduler, stopRetentionScheduler } from './retention/scheduler.js';
 import { recoverIngestionJobs } from './documents/queue.js';
 import { closeDb } from './db/mongo.js';
@@ -231,6 +232,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(repoRoutes);
       await api.register(evalRoutes);
       await api.register(retentionRoutes);
+      await api.register(learningRoutes);
     },
     { prefix: '/api/v1' }
   );

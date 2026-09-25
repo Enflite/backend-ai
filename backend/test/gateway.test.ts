@@ -26,20 +26,20 @@ function model(overrides: Record<string, unknown> = {}) {
     version: '1',
     provider: 'vllm',
     endpoint: 'http://localhost:8000/v1',
-    model_identifier: 'primary-model',
+    modelIdentifier: 'primary-model',
     status: 'ACTIVE',
     license: null,
     source: null,
     sha256: null,
-    context_window: 8192,
+    contextWindow: 8192,
     capabilities: {},
-    allowed_classifications: ['PUBLIC', 'INTERNAL'],
+    allowedClassifications: ['PUBLIC', 'INTERNAL'],
     deployment: {},
-    request_timeout_ms: null,
-    max_tokens: null,
+    requestTimeoutMs: null,
+    maxTokens: null,
     temperature: null,
-    fallback_model_id: null,
-    created_at: new Date(),
+    fallbackModelId: null,
+    createdAt: new Date(),
     ...overrides,
   };
 }
@@ -76,7 +76,7 @@ describe('gateway authorization', () => {
   });
 
   it('rejects classifications the model is not approved for', async () => {
-    getApprovedModelForUser.mockResolvedValue(model({ allowed_classifications: ['PUBLIC'] }));
+    getApprovedModelForUser.mockResolvedValue(model({ allowedClassifications: ['PUBLIC'] }));
     await expect(gatewayStream({ ...baseInput, classification: 'INTERNAL' })).rejects.toMatchObject({
       code: 'MODEL_CLASSIFICATION_DENIED',
     });
@@ -106,7 +106,7 @@ describe('gateway authorization', () => {
 
   it('passes per-model timeout, maxTokens, and temperature to the provider', async () => {
     getApprovedModelForUser.mockResolvedValue(
-      model({ request_timeout_ms: 5000, max_tokens: 512, temperature: 0.3 })
+      model({ requestTimeoutMs: 5000, maxTokens: 512, temperature: 0.3 })
     );
     streamChat.mockImplementation(async function* () {
       yield { type: 'text', content: 'hi' };
@@ -140,8 +140,8 @@ describe('gateway authorization', () => {
 
 describe('gateway failover', () => {
   it('fails over once to an approved fallback and audits MODEL_FAILOVER', async () => {
-    const primary = model({ id: 'model-primary', fallback_model_id: 'model-fallback' });
-    const fallback = model({ id: 'model-fallback', name: 'Fallback', fallback_model_id: null });
+    const primary = model({ id: 'model-primary', fallbackModelId: 'model-fallback' });
+    const fallback = model({ id: 'model-fallback', name: 'Fallback', fallbackModelId: null });
     getApprovedModelForUser.mockImplementation(async (id: string) => (id === 'model-fallback' ? fallback : primary));
     streamChat
       .mockImplementationOnce(async function* () {
@@ -163,8 +163,8 @@ describe('gateway failover', () => {
   });
 
   it('does not fail over after the primary already produced visible output', async () => {
-    const primary = model({ id: 'model-primary', fallback_model_id: 'model-fallback' });
-    const fallback = model({ id: 'model-fallback', name: 'Fallback', fallback_model_id: null });
+    const primary = model({ id: 'model-primary', fallbackModelId: 'model-fallback' });
+    const fallback = model({ id: 'model-fallback', name: 'Fallback', fallbackModelId: null });
     getApprovedModelForUser.mockImplementation(async (id: string) => (id === 'model-fallback' ? fallback : primary));
     streamChat.mockImplementationOnce(async function* () {
       yield { type: 'text', content: 'partial answer' };
@@ -179,7 +179,7 @@ describe('gateway failover', () => {
   });
 
   it('does not fail over on caller cancellation', async () => {
-    const primary = model({ id: 'model-primary', fallback_model_id: 'model-fallback' });
+    const primary = model({ id: 'model-primary', fallbackModelId: 'model-fallback' });
     getApprovedModelForUser.mockResolvedValue(primary);
     streamChat.mockImplementationOnce(async function* () {
       throw new Error('The operation was aborted');
@@ -197,7 +197,7 @@ describe('gateway failover', () => {
   });
 
   it('never fails over on authorization rejections', async () => {
-    const primary = model({ fallback_model_id: 'model-fallback' });
+    const primary = model({ fallbackModelId: 'model-fallback' });
     getApprovedModelForUser.mockResolvedValue(primary);
     streamChat.mockImplementation(async function* () {
       throw Errors.forbidden('MODEL_CLASSIFICATION_DENIED', 'nope');
@@ -208,7 +208,7 @@ describe('gateway failover', () => {
   });
 
   it('does not fail over when the fallback is not approved for the user', async () => {
-    const primary = model({ fallback_model_id: 'model-fallback' });
+    const primary = model({ fallbackModelId: 'model-fallback' });
     getApprovedModelForUser.mockImplementation(async (id: string) => {
       if (id === 'model-fallback') throw Errors.forbidden('MODEL_NOT_APPROVED', 'no');
       return primary;
@@ -222,8 +222,8 @@ describe('gateway failover', () => {
   });
 
   it('surfaces the error when the fallback also fails (no chains)', async () => {
-    const primary = model({ id: 'model-primary', fallback_model_id: 'model-fallback' });
-    const fallback = model({ id: 'model-fallback', fallback_model_id: 'model-other' });
+    const primary = model({ id: 'model-primary', fallbackModelId: 'model-fallback' });
+    const fallback = model({ id: 'model-fallback', fallbackModelId: 'model-other' });
     getApprovedModelForUser.mockImplementation(async (id: string) => (id === 'model-fallback' ? fallback : primary));
     streamChat.mockImplementation(async function* () {
       throw new Error('down');

@@ -343,21 +343,21 @@ describe('oidc routes', () => {
     expect(location.split('#')[0]).not.toContain('access_token');
     // Identity was keyed by the verified issuer+subject, not by email.
     const oidcIdentities = getMockCollection('oidc_identities');
-    const identityLookup = oidcIdentities.findOne.mock.calls.find(([filter]) =>
-      filter.issuer && filter.subject
+    const identityLookup = oidcIdentities.findOne.mock.calls.find(
+      ([filter]: [Record<string, unknown>]) => filter.issuer && filter.subject
     );
-    expect(identityLookup?.[0]).toEqual(
-      { issuer: 'https://idp.example.com', subject: 'idp-sub-1' },
-      expect.anything()
-    );
+    expect(identityLookup?.[0]).toMatchObject({
+      issuer: 'https://idp.example.com',
+      subject: 'idp-sub-1',
+    });
     // Nonce from the authorization request was verified against the ID token.
     expect(oidcCore.verifyIdToken).toHaveBeenCalledWith('id-token', 'nonce-1');
     // The user and identity were provisioned in the transaction.
     const users = getMockCollection('users');
-    expect(users.insertOne).toHaveBeenCalledWith(
+    expect(users.insertOne.mock.calls).toContainEqual([
       expect.objectContaining({ email: 'jake@example.com' }),
-      expect.objectContaining({ session: expect.anything() })
-    );
+      expect.objectContaining({ session: expect.anything() }),
+    ]);
     expect(oidcIdentities.insertOne).toHaveBeenCalledWith(
       expect.objectContaining({ issuer: 'https://idp.example.com', subject: 'idp-sub-1' }),
       expect.objectContaining({ session: expect.anything() })

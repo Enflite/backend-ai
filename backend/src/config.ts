@@ -299,6 +299,20 @@ const envSchema = z.object({
   DEV_AUTH_ENABLED: z
     .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
     .default(false),
+  // Learning flywheel — fine-tuning provider toggle (ADR-015).
+  //   disabled (default): training endpoints fail closed; the kill switch.
+  //   external: submit jobs to a 3rd-party fine-tuning service (testing path).
+  //   local:    enqueue jobs for self-hosted GPU workers (finetune_jobs queue).
+  FINETUNE_PROVIDER: z.enum(['disabled', 'external', 'local']).default('disabled'),
+  // Base URL of the 3rd-party fine-tuning API (OpenAI-compatible dialect:
+  // POST /v1/files, POST /v1/fine_tuning/jobs, GET /v1/fine_tuning/jobs/{id}).
+  FINETUNE_API_BASE_URL: z.string().url().optional(),
+  FINETUNE_API_KEY: z.string().optional().default(''),
+  // Egress allowlist for the external provider: the base URL's origin must be
+  // listed here or the provider refuses to construct (same posture as
+  // AI_PROVIDER_ALLOWED_ORIGINS). Deliberately default-empty: enabling
+  // `external` requires an explicit opt-in.
+  FINETUNE_ALLOWED_ORIGINS: z.string().default(''),
 });
 
 const parsed = envSchema.safeParse(process.env);
