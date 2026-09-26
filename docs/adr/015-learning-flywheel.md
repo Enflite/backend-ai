@@ -13,8 +13,8 @@ with a flywheel that can train against a 3rd-party GPU service for testing
 and toggle to self-hosted machines via a feature flag / env variable.
 
 Training a foundation model from scratch is out of scope and would be
-wasteful: the platform orchestrates foundation models (vLLM prod, Ollama dev,
-ADR-007). "Learning" here means the data flywheel around them: capture
+wasteful: the platform orchestrates foundation models (Ollama primary,
+vLLM high-throughput option, ADR-007). "Learning" here means the data flywheel around them: capture
 signal, curate it, fine-tune (LoRA/QLoRA-class), eval-gate, promote.
 
 ## Decision
@@ -57,6 +57,13 @@ Training never auto-promotes. A succeeded job registers the artifact in the
 `models` collection with status `DRAFT`; serving it requires the existing
 eval-gated promotion flow (ADR-008). The promotion gate is what makes the
 flywheel safe: a bad fine-tune cannot reach users without passing evals.
+
+**Serving a fine-tuned model (Ollama).** The training artifact is a GGUF
+(or weights convertible to one). Serve it through the primary inference
+provider with a Modelfile — `ollama create <name> -f Modelfile` — then
+register `<name>` as a normal `ollama`-provider model and walk the standard
+lifecycle (`REGISTERED → … → ACTIVE`). No application code changes are
+needed: the gateway already speaks Ollama. See `docs/inference.md` §4.
 
 ## Alternatives considered
 

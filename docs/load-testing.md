@@ -122,7 +122,7 @@ The smoke test validates the harness, not capacity. For a staging
 capacity run:
 
 1. **Environment:** deploy the staging stack (Postgres 16 + pgvector,
-   S3-compatible storage, real vLLM/OpenAI-compatible provider, malware
+   S3-compatible storage, real Ollama and/or vLLM/OpenAI-compatible provider, malware
    scanner in `http` mode). Run migrations.
 2. **Baseline first:** run the smoke scenario against staging to confirm
    the harness and observability work there (`/metrics` scrape, `/ready`

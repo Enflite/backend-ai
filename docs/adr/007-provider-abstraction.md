@@ -1,6 +1,11 @@
 # ADR-007: Provider abstraction — Ollama for dev only, vLLM for production
 
-**Status:** Accepted
+**Status:** Accepted → **partially superseded** (2026-09-26): the provider
+abstraction stands, but Ollama is now the *primary* inference provider
+(chat + embeddings, Windows-native) with no dev-only gate — the gateway's
+approval/allowlist/classification checks are the authorization boundary.
+vLLM remains as the high-throughput Linux option. The `ALLOW_DEV_PROVIDERS`
+switch no longer gates inference; it only gates local model artifact pulls.
 
 ## Context
 

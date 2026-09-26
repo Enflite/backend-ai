@@ -1,14 +1,13 @@
 /**
- * providers/ollama.ts — Ollama provider for LOCAL DEVELOPMENT.
+ * providers/ollama.ts — Ollama provider, the PRIMARY inference provider.
  *
- * DEV-ONLY. Ollama is a convenience for running models on a developer
- * workstation. It is NOT a security boundary and must never serve
- * production traffic: the factory refuses to construct this provider
- * unless ALLOW_DEV_PROVIDERS is explicitly enabled, and the gateway
- * additionally rejects `ollama`-backed models outside development.
- *
- * Like every provider, this class is constructed with explicit connection
- * parameters and never reads process env.
+ * Ollama runs natively on Windows with GPU support, which is why it is the
+ * default chat and embedding path for this platform. Like every provider,
+ * this class is constructed with explicit connection parameters and never
+ * reads process env. Authorization (model approval, endpoint allowlist,
+ * classification policy) happens in the gateway BEFORE the factory
+ * constructs this provider — the provider binary itself is not a security
+ * boundary.
  */
 import { randomUUID } from 'node:crypto';
 import type {

@@ -52,7 +52,9 @@ const envSchema = z.object({
     )
     .default(process.env.NODE_ENV === 'production'),
   VLLM_API_KEY: z.string().optional().default(''),
-  AI_PROVIDER_ALLOWED_ORIGINS: z.string().default('http://localhost:8000,http://vllm:8000'),
+  AI_PROVIDER_ALLOWED_ORIGINS: z
+    .string()
+    .default('http://localhost:8000,http://vllm:8000,http://localhost:11434,http://ollama:11434'),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(120000),
   // Prompt prefix caching (vLLM automatic prefix caching): when true, chat
   // turns assemble the system prompt through the deterministic prefix-cache
@@ -105,16 +107,29 @@ const envSchema = z.object({
   EMBEDDING_MODEL_VERSION: z.string().default('1'),
   EMBEDDING_API_KEY: z.string().optional().default(''),
   EMBEDDING_DIMENSIONS: z.coerce.number().int().min(1).max(4096).default(1536),
-  // Which embedding backend the factory resolves. 'openai-compatible' is the
-  // production path (vLLM /v1/embeddings or another approved endpoint);
-  // 'ollama' is local-dev only and additionally requires ALLOW_DEV_PROVIDERS.
-  EMBEDDING_PROVIDER: z.enum(['openai-compatible', 'ollama']).default('openai-compatible'),
+  // Which embedding backend the factory resolves. 'ollama' is the default
+  // (primary inference provider, Windows-native); 'openai-compatible' is
+  // the high-throughput path (vLLM /v1/embeddings or another approved
+  // endpoint).
+  //
+  // PINNED-DIMENSION WARNING: the embedding model name/version/dimensions
+  // are stored on every document_chunks row. Switching the embedding
+  // provider or model on an existing deployment INVALIDATES the existing
+  // index — you must re-ingest (re-embed) all documents afterwards, or
+  // retrieval will compare vectors from different embedding spaces.
+  EMBEDDING_PROVIDER: z.enum(['openai-compatible', 'ollama']).default('ollama'),
   EMBEDDING_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(30000),
   // ---------------------------------------------------------------------------
-  // Local-dev inference (Ollama). DEV ONLY: ALLOW_DEV_PROVIDERS must be
-  // explicitly enabled, and the gateway still refuses ollama-backed models
-  // unless the server is a dev server. Ollama is a workstation convenience,
-  // never a security boundary and never a production path.
+  // Primary inference (Ollama). Ollama is the default chat AND embedding
+  // provider: it runs natively on Windows with GPU support. The gateway
+  // authorizes every model call (approval, endpoint allowlist,
+  // classification policy) before the factory constructs a provider, so no
+  // dev-only gate is needed here.
+  //
+  // DEPRECATED: ALLOW_DEV_PROVIDERS no longer gates inference. It is still
+  // parsed so old configs boot, but its only remaining effect is gating
+  // local model artifact pulls (downloading weights via the admin API —
+  // an operational action, not inference). Prefer removing it from config.
   // ---------------------------------------------------------------------------
   ALLOW_DEV_PROVIDERS: z
     .preprocess(
@@ -122,11 +137,17 @@ const envSchema = z.object({
       z.boolean()
     )
     .default(false),
+  // Native-Windows default. Under docker compose the backend reaches the
+  // bundled Ollama service at http://ollama:11434 — set OLLAMA_BASE_URL to
+  // that (see docker-compose.yml); on a native Windows host, localhost is
+  // correct (see backend/scripts/setup-ollama-windows.ps1).
   OLLAMA_BASE_URL: z.string().url().default('http://localhost:11434'),
   OLLAMA_EMBEDDING_MODEL: z.string().min(1).default('nomic-embed-text'),
   OLLAMA_EMBEDDING_DIMENSIONS: z.coerce.number().int().min(1).max(4096).default(768),
   // Allowlist for `ollama pull` via the artifact API. No arbitrary model
-  // URLs: only these exact model names may be fetched locally.
+  // URLs: only these exact model names may be fetched locally. Pulls via
+  // the API remain gated by ALLOW_DEV_PROVIDERS (deprecated for inference,
+  // still the switch for weight downloads).
   OLLAMA_ALLOWED_MODELS: z.string().default('llama3.1:8b,nomic-embed-text'),
   // Allowlist of origins a registry model's `source` URL may point at.
   // Model registration with any other source origin is rejected.

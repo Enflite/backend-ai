@@ -33,6 +33,7 @@ import { migration003 } from './003_documents_rag.js';
 import { migration004 } from './004_eval_oidc.js';
 import { migration005 } from './005_repos_memory.js';
 import { migration006 } from './006_learning_flywheel.js';
+import { migration028 } from './028_ollama_primary_seed.js';
 
 export const migrations: Migration[] = [
   migration001,
@@ -41,4 +42,5 @@ export const migrations: Migration[] = [
   migration004,
   migration005,
   migration006,
+  migration028,
 ];

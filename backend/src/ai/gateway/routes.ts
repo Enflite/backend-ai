@@ -349,11 +349,11 @@ export async function modelAdminRoutes(fastify: FastifyInstance): Promise<void> 
 }
 
 /**
- * Local-dev model artifact management (Ollama). DEV ONLY: every function in
- * artifacts.ts refuses unless ALLOW_DEV_PROVIDERS is enabled, and these
- * routes additionally require model:manage. Production model deployment is
- * configuration-driven (see docs/inference.md) — the application never
- * downloads weights in production.
+ * Local model artifact management (Ollama). Weight downloads via this API
+ * stay gated by ALLOW_DEV_PROVIDERS (deprecated for inference, still the
+ * switch for pulls), and these routes additionally require model:manage.
+ * Remote model deployment is configuration-driven (see docs/inference.md)
+ * — the application never downloads weights on the vLLM path.
  */
 export async function modelArtifactRoutes(fastify: FastifyInstance): Promise<void> {
   const { listLocalModels, pullLocalModel, assertLocalPullAllowed } = await import('../artifacts.js');

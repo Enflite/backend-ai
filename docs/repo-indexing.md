@@ -71,16 +71,25 @@ When the chat route offers the repo tools (coding-capable role +
 locate symbols and `repo.readFile` for the full file before answering
 code questions, instead of guessing at paths. Prompt version `2.4.0`.
 
-## Provider parity (vLLM and Ollama)
+## Provider parity (Ollama primary, vLLM option)
 
 The system prompt — including the SyteLine domain-expertise pack — is
 assembled in `chat/routes.ts` and passed to the AI gateway unchanged. The
-gateway dispatches to vLLM/OpenAI-compatible or Ollama providers with the
+gateway dispatches to Ollama or vLLM/OpenAI-compatible providers with the
 identical message array (byte-for-byte; covered by a regression test in
 `test/gateway.test.ts`). The SyteLine knowledge pack therefore reaches the
-Ollama dev backend exactly as it reaches production vLLM. Ollama remains
-dev-only: the provider factory refuses to construct it unless
-`ALLOW_DEV_PROVIDERS` is enabled.
+Ollama backend exactly as it reaches vLLM. Ollama is the primary
+inference provider (Windows-native); no dev-only gate remains on
+inference — the gateway's approval, endpoint allowlist, and classification
+checks are the authorization boundary.
+
+> **Note:** repo code indexing currently requires a 1536-dimensional
+> embedding provider (`REPO_EMBEDDING_DIMENSIONS`, pinned by the Atlas
+> Vector Search index on `repo_code_chunks.embedding`). The default Ollama
+> embeddings are 768 dims (`nomic-embed-text`), so repo syncs fail fast with
+> `REPO_EMBEDDING_DIMENSIONS_UNSUPPORTED` until a 1536-dim provider is
+> configured (`EMBEDDING_PROVIDER=openai-compatible` with a 1536-dim model,
+> or a 1536-dim Ollama embedding model).
 
 ## Security properties
 

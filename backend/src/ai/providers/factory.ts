@@ -3,12 +3,17 @@
  *
  * Application code (gateway, ingestion, retrieval) never constructs a
  * provider directly and never reads provider env vars itself; it asks the
- * factory. This keeps every connection parameter, dev-only gate, and
- * allowlist check in one auditable place.
+ * factory. This keeps every connection parameter and allowlist check in
+ * one auditable place.
  *
- * Dev-only rule: the Ollama provider is refused unless ALLOW_DEV_PROVIDERS
- * is explicitly enabled. Ollama is a workstation convenience, never a
- * security boundary and never a production path.
+ * Security-boundary note: the factory makes NO trust decisions. The AI
+ * Gateway authorizes every call BEFORE a provider is constructed — model
+ * approval, endpoint allowlist (AI_PROVIDER_ALLOWED_ORIGINS),
+ * classification policy, tenant grants, DLP. Ollama is the primary
+ * inference provider (Windows-native, GPU-capable) and needs no special
+ * gate: the gateway's authorization is the boundary, not the provider
+ * binary. vLLM remains a supported provider for high-throughput
+ * Linux deployments.
  */
 import { config } from '../../config.js';
 import { Errors } from '../../errors.js';
@@ -43,12 +48,9 @@ export function resolveChatProvider(model: ProviderModelRef): ChatProvider {
         defaultTimeoutMs,
       });
     case 'ollama':
-      if (!config.ALLOW_DEV_PROVIDERS) {
-        throw Errors.forbidden(
-          'MODEL_PROVIDER_DEV_ONLY',
-          'Ollama models are for local development only and dev providers are not enabled on this server'
-        );
-      }
+      // Primary inference provider. No dev-only gate: the gateway
+      // authorizes the model (approval, endpoint allowlist, classification)
+      // before the factory ever constructs a provider.
       return new OllamaProvider({
         endpoint: model.endpoint,
         defaultTimeoutMs,
@@ -88,12 +90,7 @@ export function resolveEmbeddingProvider(kind?: EmbeddingProviderKind): Embeddin
       });
     }
     case 'ollama': {
-      if (!config.ALLOW_DEV_PROVIDERS) {
-        throw Errors.forbidden(
-          'EMBEDDING_PROVIDER_DEV_ONLY',
-          'Ollama embeddings are for local development only and dev providers are not enabled on this server'
-        );
-      }
+      // Primary embedding provider. No dev-only gate (see chat case above).
       return new OllamaProvider({
         endpoint: config.OLLAMA_BASE_URL,
         defaultTimeoutMs: config.EMBEDDING_TIMEOUT_MS,
