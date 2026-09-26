@@ -13,6 +13,7 @@
     "migrate": "tsx src/db/migrate.ts",
     "migrate:prod": "node dist/src/db/migrate.js",
     "create-user": "tsx scripts/create-user.ts",
+    "seed:syteline-sft": "tsx scripts/seed-syteline-sft-dataset.ts",
     "verify:restore": "bash scripts/verify-restore.sh",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",

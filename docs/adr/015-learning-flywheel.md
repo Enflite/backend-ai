@@ -64,6 +64,8 @@ provider with a Modelfile — `ollama create <name> -f Modelfile` — then
 register `<name>` as a normal `ollama`-provider model and walk the standard
 lifecycle (`REGISTERED → … → ACTIVE`). No application code changes are
 needed: the gateway already speaks Ollama. See `docs/inference.md` §4.
+Operational bootstrap (seed dataset → job → promotion → Ollama):
+`docs/fine-tuning.md`.
 
 ## Alternatives considered
 
