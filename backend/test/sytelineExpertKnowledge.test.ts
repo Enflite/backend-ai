@@ -28,6 +28,7 @@ const SYNC_ANCHORS = [
   'FormSync',
   'Stopped',
   'IdoCollections',
+  'Uf_ENF_',
 ];
 
 describe('syteline expert knowledge pack', () => {

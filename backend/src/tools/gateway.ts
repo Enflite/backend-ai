@@ -9,6 +9,7 @@ import { Errors } from '../errors.js';
 import { canModelProcess } from '../policy/engine.js';
 import { getSyteLineAdapter } from './syteline.js';
 import { repoToolDefinitions } from './repos.js';
+import { sytelineFormToolDefinitions } from './sytelineForms.js';
 
 /**
  * Context handed to every tool execution. Carries the caller's auth (tenant,
@@ -198,6 +199,10 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
   // Repo tools (multi-repo code search/read). Registered after the SyteLine
   // family; both families are permission-gated independently.
   ...repoToolDefinitions,
+  // SyteLine form-project tools (form XML build, docs, deck, PR). The
+  // 'syteline:forms' permission gates the whole family; the AI operates
+  // Git/project files only — SyteLine/UET/FormSync steps stay human.
+  ...sytelineFormToolDefinitions,
 ];
 
 export function getTool(name: string): ToolDefinition<any> {

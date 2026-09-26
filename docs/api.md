@@ -165,6 +165,25 @@ agentic loop (`backend/src/chat/agenticLoop.ts`; see `docs/capabilities.md`
 | `syteline.getBom` | BOM explosion for a manufactured item (components, qty-per, lead time) |
 | `syteline.getCustomer` | Customer record by customer number |
 
+### SyteLine form-project tools
+
+Form-customization automation (port of `Enflite/Form-Project-Templates`):
+the AI scaffolds a form project, builds `<Form>.xml` from the original
+export (text-level, byte-for-byte: UTF-8 with BOM, CRLF), generates the
+docs and implementation-plan deck, and opens the review PR. Each tool
+requires `syteline:forms` in addition to `tool:use`. The AI works
+Git/project files only — SyteLine, UET, and FormSync steps are numbered
+human runbook steps in the generated docs. Form-project PRs are never
+merged by automation.
+
+| Tool | Purpose |
+|---|---|
+| `syteline.form_start_project` | Scaffold a new form project (port of `new-project.sh`) |
+| `syteline.form_add_field` | Build `<Form>.xml` from the TRN original; stops when TRN/production originals differ; `checkOnly` verifies deterministic rebuild |
+| `syteline.form_write_docs` | Write README, seven-phase Implementation-Plan, troubleshooting, original/README |
+| `syteline.form_build_deck` | Generate `plan/deck.config.js` and build the implementation-plan PPTX |
+| `syteline.form_open_pr` | Create the repo, push, and open the review PR (never merges) |
+
 ## Repositories & code search
 
 Multi-repo code indexing for coding turns (see `docs/repo-indexing.md`).
