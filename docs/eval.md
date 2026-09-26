@@ -22,14 +22,14 @@ npm run eval -- --model <model-id>
 npm run eval -- --model <id> --categories json-output,tool-selection --severities p0 --dimensions grounding-citations
 
 # Live run against the real AI gateway (REQUIRES REAL INFRASTRUCTURE):
-EVAL_LIVE_PROVIDER=vllm EVAL_TENANT_ID=... EVAL_USER_ID=... EVAL_ROLE_ID=... \
+EVAL_LIVE_PROVIDER=ollama EVAL_TENANT_ID=... EVAL_USER_ID=... EVAL_ROLE_ID=... \
   npm run eval -- --model <id> --live
 
 # Judge modes for the llm-judge cases (subjective charter dimensions):
 npm run eval -- --model <id> --no-store --judge-mode mock   # default: deterministic mock judge, CI-safe
 npm run eval -- --model <id> --no-store --judge-mode skip   # skip llm-judge cases (never fail them)
 # Real judge via the platform gateway pointed at a judge model (REQUIRES REAL INFRASTRUCTURE, NEVER IN CI):
-EVAL_LIVE_PROVIDER=vllm EVAL_TENANT_ID=... EVAL_USER_ID=... EVAL_ROLE_ID=... EVAL_JUDGE_MODEL=<judge-model-id> \
+EVAL_LIVE_PROVIDER=ollama EVAL_TENANT_ID=... EVAL_USER_ID=... EVAL_ROLE_ID=... EVAL_JUDGE_MODEL=<judge-model-id> \
   npm run eval -- --model <id> --judge-mode real
 ```
 

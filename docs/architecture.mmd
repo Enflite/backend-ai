@@ -43,7 +43,8 @@ flowchart TB
     end
 
     subgraph AIInfra["AI infrastructure (external boundaries)"]
-        vLLM["[CURRENT] vLLM OpenAI-compatible<br/>/chat/completions<br/>backend/src/ai/gateway/vllmProvider.ts"]
+        Ollama["[CURRENT] Ollama (PRIMARY, Windows-native)<br/>/api/chat + /api/embeddings<br/>backend/src/ai/providers/ollama.ts"]
+        vLLM["[CURRENT] vLLM option (Linux)<br/>OpenAI-compatible /v1<br/>backend/src/ai/providers/openaiCompatible.ts"]
         Embed["[CURRENT] Embedding provider<br/>backend/src/documents/ingestion.ts<br/>internalEmbeddingProvider"]
         Rerank["[CURRENT] Reranker hook<br/>injected via setReranker()<br/>default: passthrough (no external service)"]
     end
@@ -156,7 +157,7 @@ sequenceDiagram
     participant G as gatewayStream()<br/>ai/gateway/gateway.ts
     participant CR as capabilityRouter<br/>resolveCapabilityModel
     participant MR as modelRegistry<br/>getApprovedModelForUser
-    participant V as vllmProvider<br/>OpenAI-compatible /chat/completions
+    participant V as providers/factory<br/>Ollama (primary) or vLLM/OpenAI-compatible
     participant T as runToolCall()<br/>tools/gateway.ts
     participant DB as PostgreSQL
     participant AU as recordAudit()
@@ -396,14 +397,15 @@ flowchart TB
         BE["[CURRENT] backend (build ./backend, target dev)<br/>:8080<br/>depends_on postgres (healthy)<br/>+ minio-init (completed)<br/>npm ci → migrate → dev"]
         MINIO[("[CURRENT] minio<br/>quay.io/minio/minio:RELEASE.2025-09-07<br/>127.0.0.1:9000 / :9001<br/>volume objectdata")]
         INIT["[CURRENT] minio-init (mc)<br/>creates bucket<br/>${OBJECT_STORAGE_BUCKET:-enflite-ai-documents}"]
-        VLLM["[CURRENT] vllm (profile: gpu)<br/>vllm/vllm-openai:v0.15.1<br/>:8000<br/>--model ${VLLM_MODEL:-<br/>meta-llama/Meta-Llama-3.1-8B-Instruct}"]
+        VLLM["[CURRENT] vllm (profile: gpu, high-throughput option)<br/>vllm/vllm-openai:v0.15.1<br/>:8000<br/>--model ${VLLM_MODEL:-<br/>meta-llama/Meta-Llama-3.1-8B-Instruct}"]
+        OLLAMA["[CURRENT] ollama (PRIMARY)<br/>ollama/ollama:0.34.0<br/>127.0.0.1:11434<br/>volume ollama-data<br/>healthcheck: ollama list"]
     end
     FE(["[CURRENT] React frontend<br/>VITE_API_URL → :8080<br/>built by Vite separately"])
 
     BE -->|"DATABASE_URL"| PG
     BE -->|"S3 API"| MINIO
     INIT --> MINIO
-    BE -->|"AI provider endpoint<br/>(model registry)"| VLLM
+    BE -->|"AI provider endpoint<br/>(model registry, default Ollama)"| OLLAMA
     FE -->|"HTTPS :8080/api/v1"| BE
 
     PROD["[FUTURE] Production deltas (docs/deployment.md):<br/>• NODE_ENV=production, COOKIE_SECURE=true<br/>• JWT_SECRET ≥32 chars from secret manager (never committed)<br/>• MALWARE_SCAN_MODE=http + MALWARE_SCANNER_ENDPOINT<br/>• explicit CORS_ORIGIN<br/>• migrations via npm run migrate (025 .sql files copied to dist)<br/>• [FUTURE] shared rate limiter in front of multi-instance backend<br/>• [FUTURE] P2-a: dedicated ingestion worker replicas<br/>• P1-a: verify pgvector ≥0.7.0 + ALTER EXTENSION vector UPDATE"]

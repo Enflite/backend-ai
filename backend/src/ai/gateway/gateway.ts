@@ -133,10 +133,9 @@ function checkClassification(classification: Classification, model: ApprovedMode
 }
 
 function checkProviderSupport(model: ApprovedModel): void {
-  // 'ollama' is dev-only: the factory refuses to construct it unless
-  // ALLOW_DEV_PROVIDERS is enabled, so reaching this check is not itself
-  // an authorization decision — the gate lives in the factory. This check
-  // just fails fast on a misconfigured provider string before any authz.
+  // Fail fast on a misconfigured provider string before any authz. The
+  // factory no longer gates providers — authorization (approval, endpoint
+  // allowlist, classification) is enforced by the gateway around this call.
   if (!isKnownChatProvider(model.provider)) {
     throw Errors.forbidden('MODEL_PROVIDER_UNSUPPORTED', 'Approved model provider is not supported by this gateway');
   }

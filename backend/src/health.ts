@@ -88,18 +88,23 @@ async function checkEmbeddings(): Promise<DependencyCheck> {
   // Embeddings power ingestion and RAG. A ping failure degrades those paths
   // but chat keeps working, so this check is non-critical: it surfaces as
   // `unavailable` while /ready stays 200.
-  if (!config.EMBEDDING_BASE_URL) {
+  // The default provider is Ollama, whose base URL comes from
+  // OLLAMA_BASE_URL — EMBEDDING_BASE_URL is only set for the
+  // openai-compatible path.
+  const isOllama = config.EMBEDDING_PROVIDER === 'ollama';
+  const baseUrl = isOllama ? config.OLLAMA_BASE_URL : config.EMBEDDING_BASE_URL;
+  if (!baseUrl) {
     return { status: 'not_configured', critical: false };
   }
   const started = Date.now();
-  const base = config.EMBEDDING_BASE_URL.replace(/\/$/, '');
+  const base = baseUrl.replace(/\/$/, '');
   // Cheap, token-free pings: vLLM/OpenAI-compatible servers expose
   // GET /v1/models; Ollama answers GET /api/tags.
-  const pingUrl = config.EMBEDDING_PROVIDER === 'ollama' ? `${base}/api/tags` : `${base}/v1/models`;
+  const pingUrl = isOllama ? `${base}/api/tags` : `${base}/v1/models`;
   try {
     const response = await fetch(pingUrl, {
       signal: AbortSignal.timeout(config.READY_CHECK_TIMEOUT_MS),
-      headers: config.EMBEDDING_API_KEY ? { authorization: `Bearer ${config.EMBEDDING_API_KEY}` } : {},
+      headers: !isOllama && config.EMBEDDING_API_KEY ? { authorization: `Bearer ${config.EMBEDDING_API_KEY}` } : {},
     });
     // Any completed HTTP response proves the service is reachable, even a
     // 401/404 from a path the provider does not implement.

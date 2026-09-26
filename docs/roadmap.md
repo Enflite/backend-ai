@@ -8,7 +8,7 @@ security/correctness → eval framework → private inference → scale/reliabil
 
 - Session authentication, server-side RBAC, tenant RLS, classification policy, audit events, approved-model AI Gateway, conversations, and SSE chat.
 - Secure document upload/metadata/delete/retry, S3-compatible storage, durable ingestion jobs (worker pool with retries, idempotency, poison-job quarantine, tenant fairness), malware scanner boundary, real local extractors, chunking, embedding provenance, pgvector HNSW storage, permission-aware retrieval, grounded chat citations, and a connected React document workspace.
-- Private inference: provider abstraction, vLLM production path, dev-only Ollama, eval-gated model lifecycle (registered → evaluated → approved → canary → active), per-request latency telemetry.
+- Private inference: provider abstraction, Ollama-first inference (Windows-native; vLLM as the high-throughput Linux option), eval-gated model lifecycle (registered → evaluated → approved → canary → active), per-request latency telemetry.
 - Capability routing: per-turn model selection across `chat`/`syteline`/`coding`/`embeddings` slots with audited fallback; generalized agentic tool loop with approval gate for destructive tools; repo-aware coding.
 - Observability: request/trace IDs, RED-style metrics on `GET /metrics`, dependency-aware `/ready`, load-test harness (`npm run loadtest:smoke`), backup/restore runbook (`docs/recovery.md` + `scripts/verify-restore.sh`).
 - Enterprise: agentic read-only SyteLine tools (items, sales orders, availability, POs, work orders, BOM, customers) with evidence-cited diagnoses, OIDC SSO, DLP scanning/redaction, retention enforcement + legal hold.

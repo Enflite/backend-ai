@@ -25,7 +25,7 @@ export function gatewayChatFn(modelId: string, auth: GatewayAuth): ChatFn {
   if (!provider) {
     throw new Error(
       'Live eval refused: EVAL_LIVE_PROVIDER is not set. ' +
-        'Set it to the provider name (e.g. "vllm") to run against the real AI gateway, ' +
+        'Set it to the provider name (e.g. "ollama") to run against the real AI gateway, ' +
         'or omit --live to run the scripted mock suite.'
     );
   }

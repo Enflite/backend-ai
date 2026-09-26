@@ -35,7 +35,7 @@ Every PR description carries the split:
 - **VALIDATED IN CI** — actually ran here and passed (tests, typecheck,
   builds, migration syntax, mock-backed suites).
 - **REQUIRES REAL GPU / PRODUCTION INFRASTRUCTURE** — needs live
-  PostgreSQL+pgvector, vLLM, embedding service, object storage, malware
+  PostgreSQL+pgvector, Ollama and/or vLLM, embedding service, object storage, malware
   scanner, or SyteLine, none of which exist in this sandbox.
 
 Never claim validation that did not happen. Never imply a deployment is

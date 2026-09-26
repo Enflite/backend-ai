@@ -16,8 +16,9 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done.
   hardened auth/authorization boundaries.
 - **[x] Phase 2 — eval framework + assistant-quality foundation** (PR #9):
   deterministic eval corpus, five-zone system prompting, promotion gate.
-- **[x] Phase 3 — private inference** (PR #11): provider abstraction, vLLM
-  production path, dev-only Ollama, eval-gated model lifecycle
+- **[x] Phase 3 — private inference** (PR #11): provider abstraction,
+  Ollama-first inference (Windows-native; vLLM kept as the high-throughput
+  Linux option), eval-gated model lifecycle
   (REGISTERED → … → APPROVED → CANARY → ACTIVE), per-request latency telemetry.
 - **[x] Phase 4 — scale and reliability** (PR #13): in-process ingestion worker
   pool with retries/backoff/idempotency/poison-job quarantine, gateway

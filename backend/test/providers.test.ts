@@ -204,7 +204,7 @@ describe('OpenAICompatibleEmbeddingProvider retries', () => {
   });
 });
 
-describe('OllamaProvider (local dev only)', () => {
+describe('OllamaProvider (primary inference provider)', () => {
   function makeProvider() {
     return new OllamaProvider({
       endpoint: 'http://localhost:11434',
@@ -263,30 +263,29 @@ describe('OllamaProvider (local dev only)', () => {
 });
 
 describe('provider factory gates', () => {
-  const originalAllowDev = config.ALLOW_DEV_PROVIDERS;
   const originalEmbeddingProvider = config.EMBEDDING_PROVIDER;
   const originalBaseUrl = config.EMBEDDING_BASE_URL;
   const originalEmbeddingModel = config.EMBEDDING_MODEL;
 
   beforeEach(() => {
-    config.ALLOW_DEV_PROVIDERS = false;
+    // Explicit per-test selection; the suite also asserts the real default
+    // (ollama) below, so no test may depend on ambient config here.
     config.EMBEDDING_PROVIDER = 'openai-compatible';
   });
 
   afterEach(() => {
-    config.ALLOW_DEV_PROVIDERS = originalAllowDev;
     config.EMBEDDING_PROVIDER = originalEmbeddingProvider;
     config.EMBEDDING_BASE_URL = originalBaseUrl;
     config.EMBEDDING_MODEL = originalEmbeddingModel;
   });
 
-  it('resolves the default vllm provider in production', () => {
+  it('resolves the vllm/openai-compatible providers (still supported)', () => {
     expect(resolveChatProvider(modelRef('vllm')).kind).toBe('openai-compatible');
     expect(resolveChatProvider(modelRef('openai-compatible')).kind).toBe('openai-compatible');
   });
 
-  it('refuses ollama in production even when the model record says ollama', () => {
-    expectThrowCode(() => resolveChatProvider(modelRef('ollama')), 'MODEL_PROVIDER_DEV_ONLY');
+  it('resolves ollama chat with no dev flag — it is the primary provider', () => {
+    expect(resolveChatProvider(modelRef('ollama')).kind).toBe('ollama');
   });
 
   it('rejects unknown providers', () => {
@@ -298,6 +297,15 @@ describe('provider factory gates', () => {
     expect(isKnownChatProvider('openai-compatible')).toBe(true);
     expect(isKnownChatProvider('ollama')).toBe(true);
     expect(isKnownChatProvider('mystery')).toBe(false);
+  });
+
+  it('defaults the embedding provider to ollama', () => {
+    // Captured at describe-collection time, before any test in this file
+    // mutates config: this is the parsed schema default (no
+    // EMBEDDING_PROVIDER in the test env).
+    expect(originalEmbeddingProvider).toBe('ollama');
+    config.EMBEDDING_PROVIDER = originalEmbeddingProvider;
+    expect(resolveEmbeddingProvider().kind).toBe('ollama');
   });
 
   it('resolves the configured embedding provider from server config', () => {
@@ -317,15 +325,8 @@ describe('provider factory gates', () => {
     expectThrowCode(() => resolveEmbeddingProvider(), 'EMBEDDING_PROVIDER_UNKNOWN');
   });
 
-  it('creates the ollama embedding provider only with the dev flag', () => {
-    expectThrowCode(() => resolveEmbeddingProvider('ollama'), 'EMBEDDING_PROVIDER_DEV_ONLY');
-    config.ALLOW_DEV_PROVIDERS = true;
+  it('creates the ollama embedding provider with no dev flag', () => {
     expect(resolveEmbeddingProvider('ollama').kind).toBe('ollama');
-  });
-
-  it('constructs the ollama chat provider only with the dev flag', () => {
-    config.ALLOW_DEV_PROVIDERS = true;
-    expect(resolveChatProvider(modelRef('ollama')).kind).toBe('ollama');
   });
 });
 

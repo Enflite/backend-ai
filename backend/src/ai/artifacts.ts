@@ -3,14 +3,15 @@
  *
  * Two paths, kept deliberately separate:
  *
- * DEV (Ollama): pull/cache models on the developer workstation via the
- * Ollama API. Only model names on the OLLAMA_ALLOWED_MODELS allowlist can
- * be pulled — no arbitrary model URLs, ever. Refused unless
- * ALLOW_DEV_PROVIDERS is enabled.
+ * LOCAL (Ollama): pull/cache models via the Ollama API. Only model names
+ * on the OLLAMA_ALLOWED_MODELS allowlist can be pulled — no arbitrary
+ * model URLs, ever. Pulls via this API remain gated by ALLOW_DEV_PROVIDERS
+ * (deprecated for inference, still the switch for weight downloads) and
+ * require model:manage; every pull is audited.
  *
- * PRODUCTION (vLLM): models are deployed to private vLLM infrastructure by
+ * REMOTE (vLLM): models are deployed to private vLLM infrastructure by
  * configuration, not by the application. The platform never downloads model
- * weights itself in production; it only records which versioned artifact a
+ * weights itself on this path; it only records which versioned artifact a
  * registry entry points at (source URL allowlisted, SHA-256 pinned) and
  * serves traffic to the vLLM endpoint that hosts it. See docs/inference.md
  * for the deployment runbook.
@@ -59,7 +60,7 @@ export function assertLocalPullAllowed(name: string): string {
   return allowedModelOrThrow(name);
 }
 
-/** List locally cached Ollama models (dev only). */
+/** List locally cached Ollama models (weight-download gate applies). */
 export async function listLocalModels(): Promise<OllamaModelStatus[]> {
   devOnlyGuard();
   const response = await fetch(`${config.OLLAMA_BASE_URL.replace(/\/+$/, '')}/api/tags`, {
@@ -79,8 +80,9 @@ export async function listLocalModels(): Promise<OllamaModelStatus[]> {
 }
 
 /**
- * Pull an allowlisted model into the local Ollama cache (dev only).
- * Streams progress events; the caller decides how to surface them.
+ * Pull an allowlisted model into the local Ollama cache (weight-download
+ * gate applies). Streams progress events; the caller decides how to
+ * surface them.
  */
 export async function* pullLocalModel(
   name: string,

@@ -1,10 +1,16 @@
 # Development
 
-Copy `backend/.env.example` and provide test-only secrets. `docker compose up mongodb minio minio-init` prepares MongoDB and private S3-compatible storage. Run backend migrations before `npm run dev`; run the frontend with its documented pnpm command.
+Copy `backend/.env.example` and provide test-only secrets. `docker compose up mongodb minio minio-init` prepares MongoDB and private S3-compatible storage. For inference: `docker compose up ollama` starts the bundled Ollama service (or run `backend/scripts/setup-ollama-windows.ps1` on a native Windows host), then `docker exec <compose-project>-ollama-1 ollama pull llama3.1:8b` and `ollama pull nomic-embed-text` if the images weren't pre-pulled. Run backend migrations before `npm run dev`; run the frontend with its documented pnpm command.
 
 Create users with `npm run create-user -- --email <email>`; the password comes from a no-echo TTY prompt unless `BACKEND_CREATE_USER_PASSWORD` is set (`--password` is not accepted).
 
-Document ingestion additionally needs an OpenAI-compatible embedding endpoint. `disabled-development` permits non-CUI parsing when no malware scanner is present, but records no clean verdict and cannot start in production. CUI remains quarantined without a clean scanner verdict.
+Document ingestion uses the Ollama embedding provider by default
+(`nomic-embed-text`, 768 dims) — no separate embedding service needed for
+local dev. To use an OpenAI-compatible embedding endpoint instead
+(e.g. vLLM `/v1/embeddings`), set `EMBEDDING_PROVIDER=openai-compatible`
+plus `EMBEDDING_BASE_URL`/`EMBEDDING_MODEL`/`EMBEDDING_DIMENSIONS`. Warning:
+embedding model/dimensions are pinned into `document_chunks` — switching
+providers on an existing database requires re-ingestion. `disabled-development` permits non-CUI parsing when no malware scanner is present, but records no clean verdict and cannot start in production. CUI remains quarantined without a clean scanner verdict.
 
 Validation commands are:
 

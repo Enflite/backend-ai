@@ -34,6 +34,8 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      ollama:
+        condition: service_healthy
     environment:
       MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017/enflite-ai}
       # Dev-only placeholder default. Override JWT_SECRET in any non-local
@@ -44,6 +46,12 @@ services:
       # Dev-only convenience. config.ts refuses to boot with DEV_AUTH_ENABLED=true
       # when NODE_ENV=production.
       DEV_AUTH_ENABLED: "true"
+      # Primary inference path is Ollama (chat + embeddings). Inside compose
+      # the backend reaches it at the service name; the seed model endpoint
+      # (migration 028) matches. Native Windows hosts use localhost:11434
+      # (see backend/scripts/setup-ollama-windows.ps1).
+      OLLAMA_BASE_URL: http://ollama:11434
+      EMBEDDING_PROVIDER: ollama
       NODE_ENV: development
       PORT: 8080
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
@@ -98,7 +106,35 @@ services:
     ports:
       - "8000:8000"
 
+  ollama:
+    # Primary inference provider: chat + embeddings. Pinned to a specific
+    # release; :latest is not reproducible and can pull a breaking server
+    # change under the compose stack without review.
+    image: ollama/ollama:0.34.0
+    ports:
+      - "127.0.0.1:11434:11434"
+    healthcheck:
+      # The ollama CLI talks to the in-container server on localhost:11434.
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    volumes:
+      # Model weights persist here; without the volume every `compose down`
+      # re-downloads them.
+      - ollama-data:/root/.ollama
+    # GPU passthrough (uncomment on NVIDIA hosts; needs the NVIDIA container
+    # toolkit). CPU-only works out of the box, just slower.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
 volumes:
   mongodata:
   objectdata:
   repodata:
+  ollama-data:
