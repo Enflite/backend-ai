@@ -189,3 +189,25 @@ are not cosmetic.
 - Tenant configuration varies (versions 7.x–10.x+, custom fields,
   custom statuses). Treat this pack as the product baseline; the tenant's
   `IdoCollections`/`IdoProperties` and live data are ground truth.
+
+## 9. Form projects (custom form fields)
+
+- Never change Infor-owned SQL Tables, IDOs, or Vendor forms: new fields
+  are **UET-only**. Import forms with **FormSync** at Site scope. Build and
+  test on **TRN** first, then production.
+- **Naming:** `Uf_ENF_<Name>` user fields, `ENF_<Area>` classes,
+  `ENF_<Name>` user defined types. The form binds
+  `object.<alias>Uf_ENF_<Name>` (e.g. `object.lotUf_ENF_Test`). The table
+  alias is an **assumption** until confirmed in Design Mode (Staging check
+  A); it does not show in the IDOs → Properties export.
+- **Export handling:** form XML is UTF-8 with BOM and CRLF line endings.
+  Keep originals byte-for-byte; never re-serialize the XML. If the TRN and
+  production originals differ, **stop** — production has local changes that
+  must be scoped first. If an attached export lost BOM or CRLF, ask for a
+  byte-for-byte re-upload instead of "fixing" it.
+- Every new field gets a grid column; every new or changed component is
+  highlighted purple so testers can find it. Generated files are rebuilt
+  only through the build scripts (deterministic rebuild check).
+- The AI works Git/project files only. SyteLine, UET, and FormSync steps
+  are numbered human runbook steps; never claim one succeeded until the
+  human confirms it.

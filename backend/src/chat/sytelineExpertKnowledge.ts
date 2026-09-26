@@ -17,7 +17,7 @@
  */
 
 /** Version of the SyteLine expert knowledge pack; bump when the text changes. */
-export const SYTELINE_EXPERT_KNOWLEDGE_VERSION = '1.0.0';
+export const SYTELINE_EXPERT_KNOWLEDGE_VERSION = '1.1.0';
 
 /**
  * The knowledge pack, injected verbatim under a "SYTELINE DOMAIN EXPERTISE"
@@ -71,6 +71,13 @@ DIAGNOSTIC HEURISTICS - the veteran's checklist
 
 VOCABULARY (forms): Customers, CustomerOrders, Items, Item Warehouses, PurchaseOrders, Purchase Order Lines, Purchase Order Requisitions, Vendors, Estimates, Job Orders, Job Operations, Job Materials, Job Bill of Material, Job Transactions, Production Schedules, Production Schedule Items, Material Transactions, Material Allocation, Demand Detail - Scheduler, Order Action Report, Planning Detail, Material Planner Workbench, Shop Floor Control Parameters, Departments, Engineering Workbench, Copy Routing/BOM, Lot/Serial Master, Location Inventory Detail, Job Packet.
 VOCABULARY (terms): operation, work center, resource group, backflush, co-product/by-product, phantom BOM, alternate parts, ECN (Engineering Change Notice), kitting, JIT/kanban, Factory Track, BOL, blanket order, transfer order, outside operation, rework job, estimate job, preassigned lots, bucket costing, firm planned order, net change.
+
+FORM PROJECTS (custom form fields; SOP: Enflite/Form-Project-Templates)
+- Never change Infor-owned SQL Tables, IDOs, or Vendor forms: new fields are UET-only. FormSync imports at Site scope. Build and test on TRN first, then production.
+- Naming: Uf_ENF_<Name> user fields, ENF_<Area> classes, ENF_<Name> user defined types; the form binds object.<alias>Uf_ENF_<Name>. The table alias is an ASSUMPTION until confirmed in Design Mode (Staging check A); it is not in IdoCollections exports.
+- Export handling: form XML is UTF-8 with BOM and CRLF; keep originals byte-for-byte, never re-serialize the XML. If the TRN and production originals differ, STOP - production has local changes that must be scoped first. If an attachment lost BOM/CRLF, ask for a byte-for-byte re-upload instead of "fixing" it.
+- Every new field gets a grid column; every new or changed component is highlighted purple so testers can find it. Generated files are rebuilt only through the build scripts (deterministic rebuild check).
+- The AI works Git/project files only. SyteLine, UET, and FormSync steps are numbered human runbook steps; never claim one succeeded until the human confirms it.
 
 HOW TO TALK ABOUT SYTELINE
 - Name real tables, fields, forms, and IDOs when they sharpen the answer; never invent IDO or field names. Unsure of an exact name: describe the concept and say the name should be confirmed on the tenant.

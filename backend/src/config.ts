@@ -247,6 +247,13 @@ const envSchema = z.object({
   // adapter truncates longer lists and marks them `truncated: true` so the
   // model knows the result is partial instead of reasoning as if it saw all.
   SYTELINE_MAX_ROWS: z.coerce.number().int().min(1).max(1000).default(100),
+  // Root directory form-project working folders live under (tool
+  // `syteline.form_*` confines every project path beneath it). Unset:
+  // ./form-projects under the process working directory.
+  SYTELINE_FORM_PROJECTS_DIR: z.string().optional(),
+  // Absolute path to a checkout of Enflite/Form-Project-Templates (source
+  // for `syteline.form_start_project`). Unset: the tool fails fast.
+  SYTELINE_FORM_TEMPLATES_DIR: z.string().optional(),
   // ---------------------------------------------------------------------------
   // Enterprise OIDC login (Phase 5b): Authorization Code + PKCE as the
   // primary enterprise login path, alongside password login. When
