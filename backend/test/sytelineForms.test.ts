@@ -16,6 +16,18 @@
  *  8. Tool registration + authorization: the five tools need
  *     'syteline:forms'.
  *  9. STOP guard: form_add_field refuses when TRN/production originals differ.
+ * 10. Multi-field insertion ordering (alphabetical, adjacent, per-field binding).
+ * 11. Caption-only relabel: only the caption line changes.
+ * 12. Field kind mapping: date/dropdown/notes; yes-no refused, not invented.
+ * 13. Missing anchor: descriptive error, no partial state, no output file.
+ * 14. Duplicate field refused (same field twice, stem collision, rebuild).
+ * 15. Highlight removal: stripping purple yields the plain build exactly.
+ * 16. Grid column sequencing: ContainerSequence/LeftPos after the last column.
+ * 17. Malformed export: parse throws descriptively; no output file.
+ * 18. Alias override: binds object.<alias>Uf_ENF_<Name>.
+ * 19. Determinism: byte-identical rebuilds; empty-spec rebuild is a fixed point.
+ * 20. TabOrder uniqueness across old and new components.
+ * 21. Incremental second add leaves the first field byte-identical.
  */
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
@@ -42,6 +54,7 @@ import {
   parseFormXml,
   renderFormXml,
   sha256Hex,
+  type NewFieldSpec,
 } from '../src/syteline/forms/formXml.js';
 import {
   assertUetClassName,
@@ -153,7 +166,7 @@ function newFieldSpec() {
 function buildSpec(): {
   formName: string;
   aliasPrefix: string;
-  newFields: ReturnType<typeof newFieldSpec>[];
+  newFields: NewFieldSpec[];
   relabels: Array<{ component: string; newCaption: string }>;
   resizes: Array<{ component: string; changes: Record<string, number | string> }>;
   addGridColumns: boolean;
@@ -168,6 +181,89 @@ function buildSpec(): {
     addGridColumns: true,
     highlight: true,
   };
+}
+
+function alphaFieldSpec() {
+  return {
+    field: 'Uf_ENF_Alpha',
+    caption: 'Alpha',
+    kind: 'text' as const,
+    stem: componentStem('Uf_ENF_Alpha'),
+    container: 'Tab1',
+    top: 27.1222222222222,
+    labelLeft: 26,
+    labelWidth: 7.5,
+    editLeft: 34.4285714285714,
+    editWidth: 22,
+  };
+}
+
+function zetaFieldSpec() {
+  return {
+    field: 'Uf_ENF_Zeta',
+    caption: 'Zeta',
+    kind: 'text' as const,
+    stem: componentStem('Uf_ENF_Zeta'),
+    container: 'Tab1',
+    top: 28.5888888888889,
+    labelLeft: 26,
+    labelWidth: 7.5,
+    editLeft: 34.4285714285714,
+    editWidth: 22,
+  };
+}
+
+/** Raw body of one component block (between the tags), or throws. */
+function componentBody(text: string, name: string): string {
+  const m = text.match(new RegExp(`<Component Name="${name}">(.*?)</Component>`, 's'));
+  if (!m) throw new Error(`test setup: component ${name} missing from built XML`);
+  return m[1]!;
+}
+
+/** Component names in document order in built XML. */
+function documentOrder(text: string): string[] {
+  return [...text.matchAll(/^ {12}<Component Name="([^"]+)">/gm)].map((m) => m[1]!);
+}
+
+/** How many `<Component Name="X">` blocks the text holds. */
+function componentCount(text: string, name: string): number {
+  return text.split(`<Component Name="${name}">`).length - 1;
+}
+
+/** Field input shape for the syteline.form_add_field tool. */
+function toolFieldInput() {
+  return {
+    field: 'Uf_ENF_Test',
+    caption: 'Test',
+    kind: 'text' as const,
+    container: 'Tab1',
+    top: 25.6555555555556,
+    labelLeft: 26,
+    labelWidth: 7.5,
+    editLeft: 34.4285714285714,
+    editWidth: 22,
+  };
+}
+
+/** Minimal harness for tool-level failure tests (own project dir per block). */
+function toolTestProject(name: string) {
+  const projectsRoot = join(process.cwd(), 'form-projects');
+  const projectDir = join(projectsRoot, name);
+  const ctx = {
+    auth: authFor(USER_A1, TENANT_A, {
+      permissions: ['chat:create', 'tool:use', 'syteline:forms'] as Permission[],
+    }),
+    classification: 'INTERNAL' as const,
+  };
+  const signal = AbortSignal.timeout(30_000);
+  function writeOriginal(file: string, text: string) {
+    mkdirSync(join(projectDir, 'original'), { recursive: true });
+    writeFileSync(join(projectDir, 'original', file), encodeExport(text));
+  }
+  function cleanup() {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+  return { projectDir, ctx, signal, writeOriginal, cleanup };
 }
 
 // ---------------------------------------------------------------------------
@@ -689,5 +785,391 @@ describe('github helpers', () => {
     delete process.env.GITHUB_TOKEN;
     await expect(openPr('Enflite/Lots', 't', 'b', 'main', {})).rejects.toThrow(/GITHUB_TOKEN/);
     if (saved !== undefined) process.env.GITHUB_TOKEN = saved;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. Multi-field insertion ordering
+// ---------------------------------------------------------------------------
+
+describe('multi-field insertion ordering', () => {
+  it('places each field trio in alphabetical document order, adjacent to its anchor region', () => {
+    const spec = buildSpec();
+    spec.newFields = [alphaFieldSpec(), zetaFieldSpec()];
+    const out = buildFormXml(fixtureExport(), spec);
+    const order = documentOrder(out);
+    expect(order).toEqual([
+      'Tab1',
+      'SourceEdit',
+      'GridColA',
+      'UfAlphaEdit',
+      'UfAlphaGridCol',
+      'UfAlphaStatic',
+      'UfZetaEdit',
+      'UfZetaGridCol',
+      'UfZetaStatic',
+    ]);
+    // Each trio lands adjacent to the anchor region (right after the last
+    // existing component) in the right relative order.
+    const anchorIdx = order.indexOf('GridColA');
+    expect(order.indexOf('UfAlphaEdit')).toBe(anchorIdx + 1);
+    expect(order.indexOf('UfAlphaStatic')).toBe(anchorIdx + 3);
+    expect(order.indexOf('UfZetaEdit')).toBe(anchorIdx + 4);
+    expect(order.indexOf('UfZetaStatic')).toBe(anchorIdx + 6);
+    // Bindings stay per-field.
+    expect(componentBody(out, 'UfAlphaEdit')).toContain(
+      '<DataSource>object.lotUf_ENF_Alpha</DataSource>',
+    );
+    expect(componentBody(out, 'UfZetaEdit')).toContain(
+      '<DataSource>object.lotUf_ENF_Zeta</DataSource>',
+    );
+  });
+
+  it('appends grid columns in field order without overlap', () => {
+    const spec = buildSpec();
+    spec.newFields = [alphaFieldSpec(), zetaFieldSpec()];
+    const out = buildFormXml(fixtureExport(), spec);
+    // GridColA: left 100, width 14 -> first new column at 114, second at 128.
+    expect(componentBody(out, 'UfAlphaGridCol')).toContain('<LeftPos>114</LeftPos>');
+    expect(componentBody(out, 'UfZetaGridCol')).toContain('<LeftPos>128</LeftPos>');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. Caption-only relabel
+// ---------------------------------------------------------------------------
+
+describe('caption-only relabel', () => {
+  it('changes only the caption line; binding and validators stay byte-identical', () => {
+    const spec = buildSpec();
+    spec.newFields = [];
+    spec.relabels = [{ component: 'SourceEdit', newCaption: 'Origin' }];
+    spec.highlight = false;
+    const before = componentBody(fixtureExport(), 'SourceEdit').split(CRLF);
+    const after = componentBody(buildFormXml(fixtureExport(), spec), 'SourceEdit').split(CRLF);
+    expect(after.length).toBe(before.length);
+    const changed = after.filter((line, i) => line !== before[i]);
+    expect(changed).toEqual(['               <Caption>Origin</Caption>']);
+    const body = after.join(CRLF);
+    expect(body).toContain('<DataSource>object.lot.Source</DataSource>');
+    expect(body).toContain('<Binding>1</Binding>');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. Field kind mapping
+// ---------------------------------------------------------------------------
+
+describe('field kind mapping', () => {
+  function buildOne(field: NewFieldSpec): string {
+    const spec = buildSpec();
+    spec.newFields = [field];
+    return buildFormXml(fixtureExport(), spec);
+  }
+
+  it('maps date to Type 26 with the Date property class', () => {
+    const out = buildOne({
+      ...newFieldSpec(),
+      field: 'Uf_ENF_Dob',
+      caption: 'DOB',
+      kind: 'date' as const,
+      stem: componentStem('Uf_ENF_Dob'),
+    });
+    const edit = componentBody(out, 'UfDobEdit');
+    expect(edit).toContain('<Type>26</Type>');
+    expect(edit).toContain('<PropertyClassName>Date</PropertyClassName>');
+    expect(componentBody(out, 'UfDobGridCol')).toContain('<Type>15</Type>');
+  });
+
+  it('maps dropdown to Type 27 with the user-defined-type list source', () => {
+    const out = buildOne({
+      ...newFieldSpec(),
+      field: 'Uf_ENF_Status',
+      caption: 'Status',
+      kind: 'dropdown' as const,
+      stem: componentStem('Uf_ENF_Status'),
+      userDefinedType: 'ENF_Status',
+    });
+    const edit = componentBody(out, 'UfStatusEdit');
+    expect(edit).toContain('<Type>27</Type>');
+    expect(edit).toContain('<DefaultFrom>UserDefinedType(ENF_Status)</DefaultFrom>');
+  });
+
+  it('maps notes to Type 18 with no menu and no grid column', () => {
+    const out = buildOne({
+      ...newFieldSpec(),
+      field: 'Uf_ENF_Remarks',
+      caption: 'Remarks',
+      kind: 'notes' as const,
+      stem: componentStem('Uf_ENF_Remarks'),
+    });
+    const edit = componentBody(out, 'UfRemarksEdit');
+    expect(edit).toContain('<Type>18</Type>');
+    expect(edit).not.toContain('<MenuName>');
+    expect(out).not.toContain('<Component Name="UfRemarksGridCol">');
+  });
+
+  it('refuses yes-no instead of emitting an invented checkbox shape', () => {
+    const bad = { ...newFieldSpec(), kind: 'yes-no' } as unknown as NewFieldSpec;
+    const spec = buildSpec();
+    spec.newFields = [bad];
+    expect(() => buildFormXml(fixtureExport(), spec)).toThrow(/unsupported field kind "yes-no"/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 14. Missing anchor component
+// ---------------------------------------------------------------------------
+
+describe('missing anchor component', () => {
+  it('throws a descriptive error and leaves no partial state behind', () => {
+    const bad = buildSpec();
+    bad.relabels = [{ component: 'NoSuchComp', newCaption: 'X' }];
+    expect(() => buildFormXml(fixtureExport(), bad)).toThrow(/NoSuchComp.*not found/);
+    // The failed build mutated nothing: a valid build still works and is stable.
+    const first = buildFormXml(fixtureExport(), buildSpec());
+    const second = buildFormXml(fixtureExport(), buildSpec());
+    expect(first).toBe(second);
+  });
+
+  it('tool level: a bad relabel rejects and writes no output file', async () => {
+    const t = toolTestProject('test-anchor-proj');
+    t.writeOriginal('Lots.trn.original.xml', fixtureExport());
+    try {
+      const def = getTool('syteline.form_add_field');
+      await expect(
+        def.execute(
+          {
+            projectDir: 'test-anchor-proj',
+            originalFile: 'Lots.trn.original.xml',
+            aliasPrefix: 'lot',
+            fields: [toolFieldInput()],
+            relabels: [{ component: 'NoSuchComp', newCaption: 'X' }],
+          },
+          t.ctx,
+          t.signal,
+        ),
+      ).rejects.toThrow(/NoSuchComp.*not found/);
+      expect(existsSync(join(t.projectDir, 'Lots.trn.original.xml'))).toBe(false);
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 15. Duplicate field refused
+// ---------------------------------------------------------------------------
+
+describe('duplicate field refused', () => {
+  it('throws on the same field twice in one spec', () => {
+    const spec = buildSpec();
+    spec.newFields = [newFieldSpec(), newFieldSpec()];
+    expect(() => buildFormXml(fixtureExport(), spec)).toThrow(
+      /duplicate new field "Uf_ENF_Test"/,
+    );
+  });
+
+  it('throws when two fields would generate the same component names', () => {
+    const spec = buildSpec();
+    // Uf_Test strips to the same UfTest stem as Uf_ENF_Test.
+    spec.newFields = [newFieldSpec(), { ...newFieldSpec(), field: 'Uf_Test' }];
+    expect(() => buildFormXml(fixtureExport(), spec)).toThrow(
+      /duplicate component stem "UfTest"/,
+    );
+  });
+
+  it('a built field exists exactly once; rebuilding refuses the collision', () => {
+    const out = buildFormXml(fixtureExport(), buildSpec());
+    for (const n of ['UfTestStatic', 'UfTestEdit', 'UfTestGridCol']) {
+      expect(componentCount(out, n)).toBe(1);
+    }
+    expect(() => buildFormXml(out, buildSpec())).toThrow(/already exists/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 16. Highlight removal
+// ---------------------------------------------------------------------------
+
+describe('highlight removal', () => {
+  it('rebuilds without highlighting and changes nothing else', () => {
+    const spec = buildSpec();
+    const hi = buildFormXml(fixtureExport(), spec);
+    const lo = buildFormXml(fixtureExport(), { ...spec, highlight: false });
+    expect(hi).toContain(PURPLE_LABEL);
+    expect(hi).toContain(PURPLE_DATA);
+    expect(lo).not.toContain('BACKCOLOR');
+    expect(lo).not.toContain('FORECOLOR');
+    // Stripping the purple keywords from the highlighted build yields the
+    // plain build exactly: highlighting is purely additive.
+    const normalize = (t: string) =>
+      t
+        .split(' ' + PURPLE_LABEL)
+        .join('')
+        .split(PURPLE_DATA)
+        .join('')
+        .split('<Post301Format></Post301Format>')
+        .join('<Post301Format />');
+    expect(normalize(hi)).toBe(lo);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 17. Grid column sequencing
+// ---------------------------------------------------------------------------
+
+describe('grid column sequencing', () => {
+  it('sequences new columns after the last existing one with no overlap', () => {
+    const parsed = parseFormXml(fixtureExport());
+    const gridCols = [...parsed.components.values()].filter(
+      (c) => c.containerName === 'FormCollectionGrid',
+    );
+    const maxRight = Math.max(...gridCols.map((c) => c.leftPos + c.width));
+    const maxSeq = Math.max(...gridCols.map((c) => c.containerSequence));
+
+    const spec = buildSpec();
+    spec.newFields = [alphaFieldSpec(), zetaFieldSpec()];
+    const out = buildFormXml(fixtureExport(), spec);
+    const aCol = componentBody(out, 'UfAlphaGridCol');
+    const zCol = componentBody(out, 'UfZetaGridCol');
+    // Text columns are 14 wide: each starts exactly where the previous ends.
+    expect(aCol).toContain(`<ContainerSequence>${maxSeq + 1}</ContainerSequence>`);
+    expect(aCol).toContain(`<LeftPos>${maxRight}</LeftPos>`);
+    expect(zCol).toContain(`<ContainerSequence>${maxSeq + 2}</ContainerSequence>`);
+    expect(zCol).toContain(`<LeftPos>${maxRight + 14}</LeftPos>`);
+    expect(aCol).toContain('<ContainerName>FormCollectionGrid</ContainerName>');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 18. Malformed export
+// ---------------------------------------------------------------------------
+
+describe('malformed export', () => {
+  it('parseFormXml throws a descriptive error on truncated or corrupt input', () => {
+    expect(() => parseFormXml('')).toThrow(/not a SyteLine form export/);
+    expect(() => parseFormXml('this is not xml')).toThrow(/not a SyteLine form export/);
+    expect(() => parseFormXml('<Form Name="Lots">\r\n<Components>\r\n')).toThrow(/truncated/);
+    expect(() => parseFormXml(fixtureExport().replace('</Form>', ''))).toThrow(/truncated/);
+  });
+
+  it('tool level: a corrupt original rejects and produces no output file', async () => {
+    const t = toolTestProject('test-malformed-proj');
+    // Byte-valid (BOM + CRLF) but truncated XML: passes the byte guard, fails the parse.
+    t.writeOriginal('Lots.trn.original.xml', '<Form Name="Lots">\r\n<Components>\r\n');
+    try {
+      const def = getTool('syteline.form_add_field');
+      await expect(
+        def.execute(
+          {
+            projectDir: 'test-malformed-proj',
+            originalFile: 'Lots.trn.original.xml',
+            aliasPrefix: 'lot',
+            fields: [toolFieldInput()],
+          },
+          t.ctx,
+          t.signal,
+        ),
+      ).rejects.toThrow(/truncated|not a SyteLine/);
+      expect(existsSync(join(t.projectDir, 'Lots.trn.original.xml'))).toBe(false);
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 19. Alias override
+// ---------------------------------------------------------------------------
+
+describe('alias override', () => {
+  it('binds to the explicit alias, not the assumed one', () => {
+    const spec = buildSpec();
+    spec.aliasPrefix = 'wh';
+    const out = buildFormXml(fixtureExport(), spec);
+    expect(componentBody(out, 'UfTestEdit')).toContain(
+      '<DataSource>object.whUf_ENF_Test</DataSource>',
+    );
+    expect(componentBody(out, 'UfTestGridCol')).toContain(
+      '<DataSource>object.whUf_ENF_Test</DataSource>',
+    );
+    expect(out).not.toContain('object.lotUf_ENF_Test');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 20. Determinism
+// ---------------------------------------------------------------------------
+
+describe('determinism', () => {
+  it('two builds from the same inputs are byte-identical and pass the check', () => {
+    const originalBytes = encodeExport(fixtureExport());
+    const spec = buildSpec();
+    const a = renderFormXml(originalBytes, spec);
+    const b = renderFormXml(originalBytes, spec);
+    expect(a.equals(b)).toBe(true);
+    expect(checkDeterministic(originalBytes, spec, a)).toBe(true);
+  });
+
+  it('rebuilding built XML with an empty spec is a fixed point', () => {
+    const originalBytes = encodeExport(fixtureExport());
+    const built = renderFormXml(originalBytes, buildSpec());
+    const text = decodeExport(built);
+    const empty = { ...buildSpec(), newFields: [], relabels: [], resizes: [] };
+    expect(buildFormXml(text, empty)).toBe(text);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 21. TabOrder uniqueness
+// ---------------------------------------------------------------------------
+
+describe('TabOrder uniqueness', () => {
+  it('new components get TabOrders that collide with nothing', () => {
+    const spec = buildSpec();
+    spec.newFields = [alphaFieldSpec(), zetaFieldSpec()];
+    const out = buildFormXml(fixtureExport(), spec);
+    const orders = [...out.matchAll(/<TabOrder>(\d+)<\/TabOrder>/g)].map((m) => Number(m[1]));
+    expect(new Set(orders).size).toBe(orders.length);
+    // The fixture's max TabOrder is 6; the six new components take 7..12.
+    const names = [
+      'UfAlphaEdit',
+      'UfAlphaGridCol',
+      'UfAlphaStatic',
+      'UfZetaEdit',
+      'UfZetaGridCol',
+      'UfZetaStatic',
+    ];
+    const newOrders = names.map((n) =>
+      Number(componentBody(out, n).match(/<TabOrder>(\d+)<\/TabOrder>/)![1]),
+    );
+    expect([...newOrders].sort((a, b) => a - b)).toEqual([7, 8, 9, 10, 11, 12]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 22. Incremental second add
+// ---------------------------------------------------------------------------
+
+describe('incremental second add', () => {
+  it('adds a second field to built XML without disturbing the first', () => {
+    const specA = { ...buildSpec(), newFields: [alphaFieldSpec()] };
+    const specB = { ...buildSpec(), newFields: [zetaFieldSpec()] };
+    const out1 = buildFormXml(fixtureExport(), specA);
+    const alphaNames = ['UfAlphaStatic', 'UfAlphaEdit', 'UfAlphaGridCol'];
+    const alphaBlocks = alphaNames.map((n) => componentBody(out1, n));
+    const out2 = buildFormXml(out1, specB);
+    // The first field's components are byte-identical in the second build.
+    alphaNames.forEach((n, i) => {
+      expect(componentBody(out2, n)).toBe(alphaBlocks[i]);
+    });
+    // Both fields exist exactly once.
+    for (const n of [...alphaNames, 'UfZetaStatic', 'UfZetaEdit', 'UfZetaGridCol']) {
+      expect(componentCount(out2, n)).toBe(1);
+    }
+    expect(componentBody(out2, 'UfZetaEdit')).toContain(
+      '<DataSource>object.lotUf_ENF_Zeta</DataSource>',
+    );
   });
 });
