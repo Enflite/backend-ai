@@ -188,7 +188,26 @@ export function tabLabel(caption: string): string {
 }
 
 export function parseFormXml(text: string): ParsedForm {
-  const formName = text.match(/<Form Name="([^"]+)"/)?.[1] ?? '';
+  const formOpen = text.match(/<Form Name="([^"]+)"/);
+  if (!formOpen) {
+    throw new Error(
+      'not a SyteLine form export: <Form Name="..."> not found. ' +
+        'The export is truncated or corrupt — re-export it from FormSync and keep it byte-for-byte.',
+    );
+  }
+  const formName = formOpen[1]!;
+  if (!text.includes('</Components>')) {
+    throw new Error(
+      `form "${formName}": </Components> not found — the export looks truncated. ` +
+        'Re-export it from FormSync and keep it byte-for-byte; never hand-edit an export.',
+    );
+  }
+  if (!text.includes('</Form>')) {
+    throw new Error(
+      `form "${formName}": </Form> not found — the export looks truncated. ` +
+        'Re-export it from FormSync and keep it byte-for-byte; never hand-edit an export.',
+    );
+  }
   const fds = text.match(
     /<Variable Name="fds_DataSource">\s*<Value>([^<]*)<\/Value>/,
   )?.[1];
@@ -321,6 +340,12 @@ function kindType(kind: NewFieldKind): string {
       return COMPONENT_TYPES.list;
     case 'notes':
       return COMPONENT_TYPES.notes;
+    default:
+      throw new Error(
+        `unsupported field kind "${kind as string}": the template build script covers ` +
+          'text/date/dropdown/notes only. yes-no (checkbox) fields are refused — ' +
+          "inventing a checkbox shape would violate \"the team's source is the source of truth\".",
+      );
   }
 }
 
@@ -346,6 +371,23 @@ interface BuiltComponents {
 function buildNewComponents(parsed: ParsedForm, spec: FormBuildSpec): BuiltComponents {
   const blocks = new Map<string, string>();
   if (spec.newFields.length === 0) return { blocks };
+  const seenFields = new Set<string>();
+  const seenStems = new Set<string>();
+  for (const f of spec.newFields) {
+    if (seenFields.has(f.field)) {
+      throw new Error(
+        `duplicate new field "${f.field}" in the build spec — each UET field is added once.`,
+      );
+    }
+    seenFields.add(f.field);
+    if (seenStems.has(f.stem)) {
+      throw new Error(
+        `duplicate component stem "${f.stem}" in the build spec — two fields would ` +
+          'generate the same component names.',
+      );
+    }
+    seenStems.add(f.stem);
+  }
   if (!spec.aliasPrefix || spec.aliasPrefix.startsWith('<')) {
     throw new Error(
       'set the table alias (aliasPrefix), e.g. "lot". It is always an ' +
