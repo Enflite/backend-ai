@@ -15,9 +15,10 @@
  *
  * Size is bounded before any provider call: at most
  * CHAT_MAX_IMAGES_PER_TURN images, each image under CHAT_MAX_IMAGE_BYTES,
- * and the turn's images under CHAT_MAX_IMAGE_TOTAL_BYTES in total. An
- * oversize image fails the turn with a clear error rather than blowing up
- * base64 memory or the model's context window.
+ * and the turn's images under CHAT_MAX_IMAGE_TOTAL_BYTES in total. Any
+ * overage fails the turn with a clear error rather than blowing up base64
+ * memory, the model's context window, or answering about images the model
+ * never received.
  */
 import { Buffer } from 'node:buffer';
 import { config } from '../config.js';
@@ -115,11 +116,18 @@ export async function resolveChatDocuments(
   const textDocumentIds = documentIds.filter((id) => !imageIds.has(id));
 
   // Bound the count before touching bytes; bound each image's bytes and the
-  // turn's total bytes before base64-encoding (which inflates ~33%).
-  const capped = imageDocs.slice(0, config.CHAT_MAX_IMAGES_PER_TURN);
+  // turn's total bytes before base64-encoding (which inflates ~33%). All
+  // three limits fail the turn closed with a clear error — the model must
+  // never answer about images it did not receive.
+  if (imageDocs.length > config.CHAT_MAX_IMAGES_PER_TURN) {
+    throw Errors.badRequest(
+      'TOO_MANY_IMAGES',
+      `Attach at most ${config.CHAT_MAX_IMAGES_PER_TURN} images per chat turn`
+    );
+  }
   const images: AttachedImage[] = [];
   let totalBytes = 0;
-  for (const doc of capped) {
+  for (const doc of imageDocs) {
     if (doc.sizeBytes > config.CHAT_MAX_IMAGE_BYTES) {
       throw Errors.badRequest(
         'IMAGE_TOO_LARGE',

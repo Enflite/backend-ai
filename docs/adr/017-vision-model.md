@@ -40,7 +40,9 @@ saw — a trust violation.
   (still malware-scanned), and an image-only turn never emits the "no
   evidence" notice. Authorization for byte loading mirrors the RAG path
   (tenant, READY, not deleted, classification, owner-or-grant), bounded
-  by `CHAT_MAX_IMAGES_PER_TURN` (4) and `CHAT_MAX_IMAGE_BYTES` (8 MiB).
+  by `CHAT_MAX_IMAGES_PER_TURN` (4), `CHAT_MAX_IMAGE_BYTES` (8 MiB), and
+  `CHAT_MAX_IMAGE_TOTAL_BYTES` (32 MiB) — any overage fails the turn with
+  a clear error, never a silent drop.
 - **Provider mapping**: Ollama `/api/chat` gets `images: [base64]` on the
   user message; OpenAI-compatible APIs get a content-parts array (text +
   `image_url` data URLs). The platform `ChatMessage` carries an

@@ -346,6 +346,7 @@ function mockModelCollections(modelDocs: any[]) {
           if (filter._id && doc._id !== filter._id) return false;
           if (filter.name && doc.name !== filter.name) return false;
           if (filter.isVisionDefault === true && doc.isVisionDefault !== true) return false;
+          if (filter['capabilities.vision'] === true && doc.capabilities?.vision !== true) return false;
           if (filter.status?.$in && !filter.status.$in.includes(doc.status)) return false;
           if (filter.enabled === true && doc.enabled !== true) return false;
           return true;
@@ -481,6 +482,28 @@ describe('vision capability resolution', () => {
     expect(recordAudit).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'MODEL_CAPABILITY_FALLBACK', resourceId: 'text-id' })
     );
+  });
+
+  it('skips a text-only model flagged as the vision default — the ensure path never resurrects it for image turns', async () => {
+    const { resolveVisionModel } = await import('../src/ai/gateway/capabilityRouter.js');
+    resolveServingModelMock.mockResolvedValue(null);
+    // An admin flagged a TEXT-ONLY model as the vision default. The ensure
+    // path must not return it for an image turn; it seeds the canonical
+    // vision model instead.
+    const textOnlyFlagged = {
+      _id: 'text-only-id',
+      name: 'some-text-model',
+      status: 'ACTIVE',
+      enabled: true,
+      isVisionDefault: true,
+      capabilities: { chat: true },
+    };
+    mockModelCollections([textOnlyFlagged]);
+
+    const model = await resolveVisionModel({ tenantId: 't1', userId: 'u1', roleId: 'r1' });
+    expect(model.id).not.toBe('text-only-id');
+    expect(model.name).toBe(VISION_MODEL_NAME);
+    expect(isVisionCapableModel(model)).toBe(true);
   });
 
   it('fails closed (NO_APPROVED_MODEL) when the vision model was admin-disabled — no silent chat fallback', async () => {
@@ -634,13 +657,11 @@ describe('resolveChatDocuments', () => {
     expect(textDocumentIds).toEqual([]);
   });
 
-  it('caps the number of images per turn', async () => {
+  it('fails closed when more than the per-turn image cap is attached', async () => {
     const docs = Array.from({ length: 6 }, (_, i) => imageDoc({ _id: `img-${i}` }));
-    const { images, textDocumentIds } = await resolve(docs);
-    expect(images).toHaveLength(4); // CHAT_MAX_IMAGES_PER_TURN default
-    // Images past the count budget are dropped from the turn (they are
-    // authorized images, not text — RAG has no chunks for them).
-    expect(textDocumentIds).toEqual([]);
+    // The model must never answer about images it did not receive: the turn
+    // fails with a clear error instead of silently dropping images.
+    await expect(resolve(docs)).rejects.toMatchObject({ code: 'TOO_MANY_IMAGES' });
   });
 
   it('fails closed on an oversize image', async () => {

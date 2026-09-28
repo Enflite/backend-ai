@@ -201,16 +201,20 @@ export async function ensureTenantDefaultModel(): Promise<ApprovedModel | null> 
 
 /** The servable vision default model doc, if one exists. Prefers an
  * operator-flagged vision default (`isVisionDefault`) over the canonical
- * seed name. */
+ * seed name. Both legs require the vision capability: a text-only model in
+ * the vision slot must never be returned for an image turn (a misconfigured
+ * admin default falls through to the canonical seed instead). */
 async function findServableVisionModel(db: MinimalDb): Promise<ModelDoc | null> {
   const flagged = await db.collection<ModelDoc>('models').findOne({
     isVisionDefault: true,
+    'capabilities.vision': true,
     status: { $in: [...SERVABLE_STATUSES] },
     enabled: true,
   });
   if (flagged) return flagged;
   return db.collection<ModelDoc>('models').findOne({
     name: VISION_MODEL_NAME,
+    'capabilities.vision': true,
     status: { $in: [...SERVABLE_STATUSES] },
     enabled: true,
   });
