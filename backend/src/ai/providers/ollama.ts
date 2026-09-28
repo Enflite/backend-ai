@@ -35,6 +35,8 @@ export interface OllamaProviderConfig {
 interface OllamaChatMessage {
   role: string;
   content: string;
+  /** Base64-encoded image bytes; only sent to vision-capable models. */
+  images?: string[];
   tool_calls?: Array<{ function: { name: string; arguments: Record<string, unknown> } }>;
 }
 
@@ -42,6 +44,7 @@ function toOpenAIMessages(messages: ChatMessage[]): OllamaChatMessage[] {
   return messages.map((m) => ({
     role: m.role,
     content: typeof m.content === 'string' ? m.content : '',
+    ...(m.images?.length ? { images: m.images.map((image) => image.data) } : {}),
     ...(m.tool_calls?.length
       ? {
           tool_calls: m.tool_calls.map((tc) => {

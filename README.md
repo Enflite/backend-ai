@@ -52,12 +52,16 @@ Wait until `backend`, `mongodb`, `minio`, and `ollama` all show running (or heal
 
 **Step 3 — Pull the AI models**
 
-Ollama needs the actual model weights before it can chat. This downloads about 5 GB on first run, so grab coffee:
+Ollama needs the actual model weights before it can chat. This downloads about 10 GB on first run, so grab coffee:
 
 ```powershell
 docker compose exec ollama ollama pull llama3.1:8b
 docker compose exec ollama ollama pull nomic-embed-text
+docker compose exec ollama ollama pull qwen2.5vl:7b
 ```
+
+The third model is the vision model: chat turns with attached screenshots or
+images are routed to it automatically (see `docs/adr/017-vision-model.md`).
 
 **Step 4 — Create your user**
 
@@ -88,7 +92,7 @@ Quick API health check: http://localhost:8080/health should respond.
 
 - **Docker Desktop isn't running** — `docker compose` fails with a cryptic error. Start Docker Desktop first and wait for it to finish booting.
 - **A port is already in use** — the stack needs 8080 (API), 8443 (frontend), 27017 (MongoDB), 9000/9001 (storage), 11434 (Ollama). The frontend refuses to start on any other port, so free up 8443 rather than working around it.
-- **Chat fails but login works** — you skipped Step 3. Run the `ollama pull` commands; chat needs `llama3.1:8b` present.
+- **Chat fails but login works** — you skipped Step 3. Run the `ollama pull` commands; chat needs `llama3.1:8b` present, and image attachments need `qwen2.5vl:7b`.
 - **Backend dependency changes need a rebuild** — editing backend code hot-reloads fine (it's volume-mounted), but if you change `backend/package.json` dependencies, run `docker compose up -d --build` again.
 - **Migrations** — the Docker backend runs `npm run migrate` automatically on boot. If you ever run the backend natively (`cd backend; npm ci; npm run migrate; npm run dev`), run `npm run migrate` yourself after pulling new code.
 - **Slow first chat response** — normal. The model loads into memory on first use; subsequent messages are faster.

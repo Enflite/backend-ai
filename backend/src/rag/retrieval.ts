@@ -4,6 +4,7 @@ import { Db, Document } from 'mongodb';
 import { getDb } from '../db/mongo.js';
 import { internalEmbeddingProvider } from '../documents/ingestion.js';
 import { createCrossEncoderReranker } from './crossEncoderReranker.js';
+import { grantPrincipalOr } from './grants.js';
 
 export interface Citation {
   documentId: string;
@@ -189,22 +190,12 @@ interface AuthorizedDocument {
  * predicate as the documents routes: exactly one principal field per grant —
  * absent fields are omitted, never null — so the role/department/group
  * clauses are only added when the caller actually has that principal).
+ *
+ * Shared with the chat image path (chat/imageAttachments.ts), which mirrors
+ * document authorization exactly. Re-exported here so existing importers of
+ * `rag/retrieval.js` keep working.
  */
-async function grantPrincipalOr(db: Db, auth: AuthContext): Promise<Record<string, unknown>[]> {
-  const [deptRows, groupRows] = await Promise.all([
-    db.collection<{ departmentId: string }>('department_memberships')
-      .find({ userId: auth.userId }, { projection: { departmentId: 1 } }).toArray(),
-    db.collection<{ groupId: string }>('security_group_memberships')
-      .find({ userId: auth.userId }, { projection: { groupId: 1 } }).toArray(),
-  ]);
-  const or: Record<string, unknown>[] = [{ userId: auth.userId }];
-  if (auth.roleId) or.push({ roleId: auth.roleId });
-  const departmentIds = deptRows.map((row) => row.departmentId);
-  const groupIds = groupRows.map((row) => row.groupId);
-  if (departmentIds.length > 0) or.push({ departmentId: { $in: departmentIds } });
-  if (groupIds.length > 0) or.push({ groupId: { $in: groupIds } });
-  return or;
-}
+export { grantPrincipalOr };
 
 /**
  * Resolve the documents the caller may read BEFORE any vector work runs:

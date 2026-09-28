@@ -54,7 +54,7 @@ export default function DocumentsPanel({ user, documents, selectedIds, onSelecte
         <label className="block text-sm font-medium">Upload an enterprise document</label>
         <div className="flex gap-2">
           {canClassify && <select aria-label="Document classification" value={classification} onChange={(event) => setClassification(event.target.value as DataClassification)} className="rounded px-2 bg-transparent text-sm" style={{ border: '1px solid var(--border)' }}>{CLASSIFICATIONS.map((value) => <option key={value}>{value}</option>)}</select>}
-          <input ref={input} type="file" accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.html" disabled={busy} onChange={(event) => void upload(event.target.files?.[0])} className="min-w-0 text-sm" />
+          <input ref={input} type="file" accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.html,.png,.jpg,.jpeg,.gif,.webp" disabled={busy} onChange={(event) => void upload(event.target.files?.[0])} className="min-w-0 text-sm" />
         </div>
         {!canClassify && <p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>Uploads receive the server policy default classification.</p>}
       </div>

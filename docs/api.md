@@ -47,9 +47,13 @@ Request body: `{ conversationId?, content (1–32000 chars), modelId?,
 classification?, documentIds?[], capability?, codeFiles?[] }`. If `classification` is omitted, new
 conversations default to `PUBLIC` for `PUBLIC`-cleared callers, otherwise
 `INTERNAL`; `UNKNOWN` is rejected. `capability` is one of `chat | syteline |
-coding | embeddings` and selects the capability slot for model routing
-(an explicit `modelId` always wins); when omitted the route detects intent
-conservatively and defaults to `chat`. `codeFiles` is `[{ path, content }]`
+coding | embeddings | vision` and selects the capability slot for model routing
+(an explicit `modelId` always wins — except on image turns, where a selected
+text-only model is replaced by the vision model with a `MODEL_VISION_SWITCH`
+notice); when omitted the route detects intent conservatively and defaults to
+`chat`. Attaching image documents (PNG/JPEG/WebP/GIF) to `documentIds` forces
+the `vision` capability for the turn: images bypass RAG (no text chunks) and
+are served to the vision model as image inputs. `codeFiles` is `[{ path, content }]`
 — caller-supplied repo-relative files (≤ 20 files, ≤ 200 KB each) assembled
 into labeled context for coding turns; see `docs/capabilities.md` §4.
 

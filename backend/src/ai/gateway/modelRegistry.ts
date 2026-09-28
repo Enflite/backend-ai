@@ -12,6 +12,15 @@ import { Classification } from '../../authz/permissions.js';
  */
 export const DEFAULT_MODEL_NAME = 'meta-llama/Meta-Llama-3.1-8B-Instruct';
 
+/**
+ * Canonical name of the platform vision model (ADR-017). Image attachments
+ * are routed to this model automatically: the text default is text-only and
+ * must never receive image payloads.
+ */
+export const VISION_MODEL_NAME = 'qwen/Qwen2.5-VL-7B-Instruct';
+/** Ollama tag pulled for the vision model (see backend/scripts/setup-ollama-windows.ps1). */
+export const VISION_MODEL_OLLAMA_TAG = 'qwen2.5vl:7b';
+
 /** Statuses the gateway will serve traffic to (mirrors modelLifecycle). */
 const SERVABLE_STATUSES = ['ACTIVE', 'CANARY'] as const;
 
@@ -52,6 +61,8 @@ type ModelDoc = Omit<ApprovedModel, 'id'> & {
   enabled: boolean;
   /** Marks the tenant default model (set by migration 029; self-healed by ensure). */
   isDefault?: boolean;
+  /** Marks the platform vision default model (self-healed by ensure). */
+  isVisionDefault?: boolean;
 };
 
 /** MongoDB document shape for the `model_access` collection. */
@@ -71,13 +82,23 @@ interface ModelAccessDoc {
 }
 
 function toApprovedModel(doc: ModelDoc): ApprovedModel {
-  const { _id, enabled: _enabled, isDefault: _isDefault, ...rest } = doc;
+  const { _id, enabled: _enabled, isDefault: _isDefault, isVisionDefault: _isVisionDefault, ...rest } = doc;
   return { id: _id, ...rest };
 }
 
 /** True when this model doc is the tenant default (flag or canonical name). */
 export function isDefaultModelDoc(doc: { name: string; isDefault?: boolean }): boolean {
   return doc.isDefault === true || doc.name === DEFAULT_MODEL_NAME;
+}
+
+/** True when this model doc is the platform vision default (flag or canonical name). */
+export function isVisionDefaultModelDoc(doc: { name: string; isVisionDefault?: boolean }): boolean {
+  return doc.isVisionDefault === true || doc.name === VISION_MODEL_NAME;
+}
+
+/** True when the approved model advertises vision capability. */
+export function isVisionCapableModel(model: { capabilities?: Record<string, unknown> }): boolean {
+  return model.capabilities?.['vision'] === true;
 }
 
 type MinimalDb = {
@@ -178,6 +199,101 @@ export async function ensureTenantDefaultModel(): Promise<ApprovedModel | null> 
   }
 }
 
+/** The servable vision default model doc, if one exists. Prefers an
+ * operator-flagged vision default (`isVisionDefault`) over the canonical
+ * seed name. Both legs require the vision capability: a text-only model in
+ * the vision slot must never be returned for an image turn (a misconfigured
+ * admin default falls through to the canonical seed instead). */
+async function findServableVisionModel(db: MinimalDb): Promise<ModelDoc | null> {
+  const flagged = await db.collection<ModelDoc>('models').findOne({
+    isVisionDefault: true,
+    'capabilities.vision': true,
+    status: { $in: [...SERVABLE_STATUSES] },
+    enabled: true,
+  });
+  if (flagged) return flagged;
+  return db.collection<ModelDoc>('models').findOne({
+    name: VISION_MODEL_NAME,
+    'capabilities.vision': true,
+    status: { $in: [...SERVABLE_STATUSES] },
+    enabled: true,
+  });
+}
+
+/**
+ * Seed shape for the platform vision model. Served by Ollama under the
+ * `qwen2.5vl:7b` tag; image attachments are routed to this model
+ * automatically. Context window is the model's native 32k.
+ */
+function visionModelSeed(now: Date): Record<string, unknown> {
+  return {
+    _id: randomUUID(),
+    name: VISION_MODEL_NAME,
+    version: '1.0',
+    provider: 'ollama',
+    endpoint: 'http://ollama:11434',
+    modelIdentifier: VISION_MODEL_OLLAMA_TAG,
+    status: 'ACTIVE',
+    license: 'apache-2.0',
+    source: 'qwen',
+    sha256: null,
+    contextWindow: 32768,
+    capabilities: { chat: true, streaming: true, vision: true },
+    classification: 'INTERNAL',
+    allowedClassifications: ['PUBLIC', 'INTERNAL'],
+    deployment: {},
+    requestTimeoutMs: null,
+    maxTokens: null,
+    temperature: null,
+    fallbackModelId: null,
+    isDefault: false,
+    isVisionDefault: true,
+    enabled: true,
+    lifecycleUpdatedAt: now,
+    approvedBy: null,
+    approvedAt: null,
+    lastEvalRunId: null,
+    createdAt: now,
+  };
+}
+
+/**
+ * Ensure the platform vision model exists and is servable (create-on-read).
+ * Idempotent: safe to call on every resolution miss.
+ *
+ * - Returns the servable vision model when one exists (self-healing the
+ *   `isVisionDefault` flag on the canonical seed doc when needed).
+ * - Returns null WITHOUT creating anything when the vision-named doc
+ *   exists but is not servable: an admin deliberately disabled it, and
+ *   resurrecting it would override that decision.
+ * - Inserts the seed vision model only when no vision-capable servable doc
+ *   exists; a duplicate-key race re-reads instead of failing.
+ */
+export async function ensureVisionModel(): Promise<ApprovedModel | null> {
+  const db = (await getDb()) as unknown as MinimalDb;
+  const existing = await findServableVisionModel(db);
+  if (existing) {
+    if (existing.isVisionDefault !== true) {
+      await db.collection<ModelDoc>('models').updateOne({ _id: existing._id }, { $set: { isVisionDefault: true } });
+    }
+    return toApprovedModel(existing);
+  }
+  const named = await db
+    .collection<ModelDoc>('models')
+    .findOne({ name: VISION_MODEL_NAME }, { projection: { _id: 1 } });
+  if (named) return null;
+  const now = new Date();
+  try {
+    const seed = visionModelSeed(now);
+    await db.collection<ModelDoc>('models').insertOne(seed);
+    return toApprovedModel(seed as unknown as ModelDoc);
+  } catch (err) {
+    if ((err as { code?: number })?.code !== 11000) throw err;
+    const raced = await findServableVisionModel(db);
+    return raced ? toApprovedModel(raced) : null;
+  }
+}
+
 /** Principal legs for `model_access` queries: exactly one of userId/roleId. */
 function principalOr(userId: string, roleId: string): Array<Record<string, string>> {
   return [{ userId }, { roleId }];
@@ -208,6 +324,19 @@ export async function listApprovedModelsForUser(tenantId: string, userId: string
       );
       if (!revocation) modelIds.push(defaultDoc._id);
     }
+    // Default-open vision: the platform vision model is implicitly available
+    // to every user in the tenant — no grant row needed — unless explicitly
+    // revoked for their principal. Ensure-on-read so /models lists it even
+    // before the first image turn seeded it.
+    await ensureVisionModel();
+    const visionDoc = await findServableVisionModel(db as unknown as MinimalDb);
+    if (visionDoc && !modelIds.includes(visionDoc._id)) {
+      const revocation = await db.collection<ModelAccessDoc>('model_access').findOne(
+        { tenantId, modelId: visionDoc._id, $or: principalOr(userId, roleId), revoked: true },
+        { projection: { _id: 1 } }
+      );
+      if (!revocation) modelIds.push(visionDoc._id);
+    }
     if (modelIds.length === 0) return [];
     const docs = await db
       .collection<ModelDoc>('models')
@@ -235,6 +364,8 @@ export async function getApprovedModelForUser(modelId: string, tenantId: string,
     }
     // Default-open: the tenant default model needs no grant row.
     if (isDefaultModelDoc(doc)) return toApprovedModel(doc);
+    // Default-open vision: the platform vision default needs no grant row.
+    if (isVisionDefaultModelDoc(doc)) return toApprovedModel(doc);
     // Non-default models stay fail-closed: an explicit grant is required.
     if (!access) {
       throw Errors.forbidden('MODEL_NOT_APPROVED', 'Model is not approved for this user and tenant');

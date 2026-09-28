@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import type { Model, UploadedFile } from '../types';
 
 interface ChatInputProps {
@@ -13,6 +13,19 @@ interface ChatInputProps {
 /** Client-side upload cap. Must stay in sync with the backend's
  *  MAX_UPLOAD_BYTES default (25 MiB); the server rejects larger files. */
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
+
+/** Thumbnail for an attached image file. Creates one object URL per mount and
+ *  revokes it on unmount so repeated renders don't leak blob URLs. */
+function ImageThumb({ file }: { file: File }) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    const objectUrl = URL.createObjectURL(file);
+    setUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [file]);
+  if (!url) return <IconFile />;
+  return <img src={url} alt="" className="w-8 h-8 rounded object-cover flex-shrink-0" />;
+}
 
 export default function ChatInput({ onSend, onStop, isStreaming, disabled, model, onModelClick }: ChatInputProps) {
   const [text, setText] = useState('');
@@ -123,7 +136,11 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
                 }}
                 title={f.error}
               >
-                <IconFile />
+                {f.file && f.type.startsWith('image/') ? (
+                  <ImageThumb file={f.file} />
+                ) : (
+                  <IconFile />
+                )}
                 <span className="max-w-[140px] truncate">{f.name}</span>
                 <span style={{ color: 'var(--muted-foreground)' }}>{formatSize(f.size)}</span>
                 {f.status === 'uploading' && (
@@ -162,7 +179,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
               ref={fileInputRef}
               type="file"
               multiple
-              accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.html"
+              accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.html,.png,.jpg,.jpeg,.gif,.webp"
               className="hidden"
               onChange={handleFileChange}
             />

@@ -6,7 +6,12 @@ const { streamChat } = vi.hoisted(() => ({ streamChat: vi.fn() }));
 const { resolveChatProvider } = vi.hoisted(() => ({ resolveChatProvider: vi.fn(() => ({ kind: 'test', streamChat })) }));
 const { recordAudit } = vi.hoisted(() => ({ recordAudit: vi.fn() }));
 
-vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ getApprovedModelForUser }));
+vi.mock('../src/ai/gateway/modelRegistry.js', async (importOriginal) => {
+  // Mock only model authorization; keep the real isVisionCapableModel so the
+  // gateway's vision-failover guard is genuinely exercised.
+  const original = await importOriginal<typeof import('../src/ai/gateway/modelRegistry.js')>();
+  return { ...original, getApprovedModelForUser };
+});
 vi.mock('../src/ai/providers/factory.js', async (importOriginal) => {
   // Mock only provider construction; keep the real isKnownChatProvider so
   // the gateway's fail-fast provider check is genuinely exercised.
@@ -196,8 +201,55 @@ describe('gateway failover', () => {
     expect(actions).not.toContain('MODEL_FAILOVER');
   });
 
-  it('never fails over on authorization rejections', async () => {
-    const primary = model({ fallbackModelId: 'model-fallback' });
+  it('refuses to fail over an image turn to a text-only fallback', async () => {
+    const primary = model({ id: 'model-primary', capabilities: { vision: true }, fallbackModelId: 'model-fallback' });
+    const textFallback = model({ id: 'model-fallback', name: 'TextFallback', capabilities: {}, fallbackModelId: null });
+    getApprovedModelForUser.mockImplementation(async (id: string) => (id === 'model-fallback' ? textFallback : primary));
+    streamChat.mockImplementationOnce(async function* () {
+      throw new Error('connection refused');
+    });
+    const telemetry: Record<string, unknown> = {};
+    const result = await gatewayStream({
+      ...baseInput,
+      telemetry: telemetry as never,
+      messages: [
+        { role: 'user' as const, content: 'what is in this screenshot?', images: [{ data: 'QUJD', mimeType: 'image/jpeg' }] },
+      ],
+    });
+    await expect(drain(result)).rejects.toThrow('Model provider unavailable');
+    // Exactly one provider call: the text-only fallback never saw the images.
+    expect(streamChat).toHaveBeenCalledTimes(1);
+    expect(telemetry.fallbackUsed).toBeUndefined();
+    const actions = recordAudit.mock.calls.map((call) => call[0].action);
+    expect(actions).not.toContain('MODEL_FAILOVER');
+  });
+
+  it('fails over an image turn to a vision-capable fallback', async () => {
+    const primary = model({ id: 'model-primary', capabilities: { vision: true }, fallbackModelId: 'model-fallback' });
+    const visionFallback = model({ id: 'model-fallback', name: 'VisionFallback', capabilities: { vision: true }, fallbackModelId: null });
+    getApprovedModelForUser.mockImplementation(async (id: string) => (id === 'model-fallback' ? visionFallback : primary));
+    streamChat
+      .mockImplementationOnce(async function* () {
+        throw new Error('connection refused');
+      })
+      .mockImplementationOnce(async function* () {
+        yield { type: 'text', content: 'fallback answer' };
+      });
+    const telemetry: Record<string, unknown> = {};
+    const result = await gatewayStream({
+      ...baseInput,
+      telemetry: telemetry as never,
+      messages: [
+        { role: 'user' as const, content: 'what is in this screenshot?', images: [{ data: 'QUJD', mimeType: 'image/jpeg' }] },
+      ],
+    });
+    const events = await drain(result);
+    expect(events).toContainEqual({ type: 'failover', modelId: 'model-fallback', modelName: 'VisionFallback', contextWindow: 8192 });
+    expect(events).toContainEqual({ type: 'text', content: 'fallback answer' });
+    expect(telemetry.fallbackUsed).toBe(true);
+  });
+
+  it('never fails over on authorization rejections', async () => {    const primary = model({ fallbackModelId: 'model-fallback' });
     getApprovedModelForUser.mockResolvedValue(primary);
     streamChat.mockImplementation(async function* () {
       throw Errors.forbidden('MODEL_CLASSIFICATION_DENIED', 'nope');

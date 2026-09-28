@@ -134,6 +134,59 @@ describe('ingestion embedding validation', () => {
   });
 });
 
+describe('ingestion image handling', () => {
+  beforeEach(() => resetMocks());
+
+  // Minimal valid PNG: signature + IHDR declaring 2x1.
+  const pngBytes = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01,
+    0x08, 0x02, 0x00, 0x00, 0x00,
+  ]);
+
+  function mockImageRow() {
+    getMockCollection('documents').findOneAndUpdate.mockResolvedValue({
+      _id: 'img1',
+      tenantId: 't1',
+      objectKey: 'k',
+      mimeType: 'image/png',
+      classification: 'INTERNAL',
+    });
+  }
+
+  it('marks images READY without extraction, embedding, or chunks — storing dimensions', async () => {
+    mockImageRow();
+    const deps = fakeDependencies();
+    deps.storage.get.mockResolvedValue(pngBytes);
+
+    const result = await ingestDocument('img1', 't1', deps as any);
+
+    expect(result).toBe('READY');
+    // No text extraction, no embeddings, no chunk rows for vision inputs.
+    expect(deps.extractor).not.toHaveBeenCalled();
+    expect(deps.embeddings.embed).not.toHaveBeenCalled();
+    expect(chunkInsertCalls().length).toBe(0);
+    // READY with parsed dimensions from the PNG header.
+    const readyUpdate = getMockCollection('documents').updateOne.mock.calls.find(
+      ([, update]: any[]) => update?.$set?.status === 'READY'
+    );
+    expect(readyUpdate?.[1]?.$set).toMatchObject({ imageWidth: 2, imageHeight: 1 });
+  });
+
+  it('still malware-scans images before marking them READY', async () => {
+    mockImageRow();
+    const deps = fakeDependencies();
+    deps.storage.get.mockResolvedValue(pngBytes);
+    deps.scanner.scan.mockResolvedValue({ verdict: 'INFECTED', scanner: 'test' });
+
+    const result = await ingestDocument('img1', 't1', deps as any);
+
+    expect(result).toBe('QUARANTINED');
+    expect(deps.scanner.scan).toHaveBeenCalled();
+  });
+});
+
 describe('OpenAI-compatible embedding provider retries', () => {
   const originalFetch = globalThis.fetch;
 

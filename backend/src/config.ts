@@ -161,6 +161,13 @@ const envSchema = z.object({
     .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
     .default(true),
   MAX_UPLOAD_BYTES: z.coerce.number().int().min(1024).max(104857600).default(26214400),
+  // Vision inputs: per-turn caps on attached images. Base64 inflates bytes
+  // by ~33% and every image adds ~1k vision-encoder tokens, so the count,
+  // each image's bytes, and the total bytes are all bounded before any
+  // provider call.
+  CHAT_MAX_IMAGES_PER_TURN: z.coerce.number().int().min(1).max(16).default(4),
+  CHAT_MAX_IMAGE_BYTES: z.coerce.number().int().min(65536).max(104857600).default(8388608),
+  CHAT_MAX_IMAGE_TOTAL_BYTES: z.coerce.number().int().min(65536).max(419430400).default(33554432),
   MAX_EXTRACTED_CHARACTERS: z.coerce.number().int().min(1000).max(20000000).default(2000000),
   MAX_ARCHIVE_ENTRIES: z.coerce.number().int().min(1).max(10000).default(1000),
   MAX_ARCHIVE_UNCOMPRESSED_BYTES: z.coerce.number().int().min(1024).max(268435456).default(52428800),

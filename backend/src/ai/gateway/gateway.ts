@@ -1,6 +1,6 @@
 import { Errors, AppError } from '../../errors.js';
 import { recordAudit } from '../../audit/audit.js';
-import { getApprovedModelForUser, ApprovedModel } from './modelRegistry.js';
+import { getApprovedModelForUser, isVisionCapableModel, ApprovedModel } from './modelRegistry.js';
 import { resolveChatProvider, isKnownChatProvider } from '../providers/factory.js';
 import type { ProviderEvent, ProviderToolDefinition, TokenUsage, ChatMessage, ChatProvider } from '../providers/types.js';
 export type { ProviderToolDefinition, ChatMessage, TokenUsage };
@@ -149,10 +149,18 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+/**
+ * Rough per-image token budget. Vision encoders tokenize images into patch
+ * sequences (hundreds to ~1k+ tokens depending on resolution); 1024 is a
+ * conservative over-estimate for context-window budgeting only.
+ */
+const IMAGE_TOKEN_ESTIMATE = 1024;
+
 export function estimateMessagesTokens(messages: ChatMessage[]): number {
   return messages.reduce((total, message) => {
     const content = typeof message.content === 'string' ? message.content : '';
-    return total + estimateTokens(content) + 8; // per-message framing overhead
+    const imageTokens = (message.images?.length ?? 0) * IMAGE_TOKEN_ESTIMATE;
+    return total + estimateTokens(content) + imageTokens + 8; // per-message framing overhead
   }, 0);
 }
 
@@ -344,6 +352,13 @@ export async function gatewayStream(input: GatewayStreamInput): Promise<GatewayS
         checkProviderSupport(fallback);
         resolveEndpoint(fallback);
         checkClassification(input.classification, fallback);
+        // Image turns must only fail over to vision-capable models: a
+        // text-only fallback would receive image payloads it cannot read.
+        // The platform vision seed sets fallbackModelId: null, so this only
+        // bites on admin-configured fallbacks.
+        if (messages.some((message) => (message.images?.length ?? 0) > 0) && !isVisionCapableModel(fallback)) {
+          throw Errors.forbidden('MODEL_NOT_APPROVED', 'fallback model is not vision-capable');
+        }
       } catch (policyError) {
         // Deliberately generic: the specific fallback policy failure is in the
         // audit trail, but the client must not learn which fallbacks exist or
