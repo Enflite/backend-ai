@@ -148,6 +148,18 @@ attachments to Anthropic's or OpenAI's cloud. The switcher labels each provider
 also capped at the INTERNAL classification by default — an admin must
 explicitly widen a cloud model to serve CONFIDENTIAL or above.
 
+**Privacy-aware auto-routing** (see `docs/privacy-routing.md`). When Claude is
+configured, turns without an explicit provider choice are scanned for
+sensitive data *after the full prompt is assembled* — history, retrieved
+document chunks, tool results, memory, PII. Anything touching customer,
+finance, or proprietary data stays on local Enflite (even overriding a
+manual Claude pick, with a friendly notice); clean turns go to Claude
+automatically. Repo source code stays Claude-routable by default (explicit,
+flippable tenant flag). Web access follows the same boundary:
+Claude-routed turns get Claude's built-in web search, sensitive turns stay
+local and offline. Admins can adjust the enforced categories or disable
+auto-routing per tenant (`PUT /admin/privacy-routing`).
+
 **Adding cloud keys** (admin / operator). Set these in the backend environment
 (or your secret manager), then restart the backend:
 

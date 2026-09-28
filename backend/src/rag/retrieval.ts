@@ -183,6 +183,15 @@ interface AuthorizedDocument {
   _id: string;
   filename: string;
   classification: string;
+  /**
+   * Optional document sensitivity tag (e.g. "customer" | "finance" |
+   * "proprietary"). Carried into the `<untrusted_document>` wrapper as a
+   * `sensitivity="..."` attribute when present so privacy routing can
+   * categorize private-corpus chunks more finely than the default
+   * proprietary bucket. No migration seeds it today; untagged documents
+   * simply omit the attribute.
+   */
+  sensitivity?: string;
 }
 
 /**
@@ -227,7 +236,7 @@ async function resolveAuthorizedDocuments(
       ...(documentIds?.length ? { _id: { $in: documentIds } } : {}),
       $or: or,
     },
-    { projection: { filename: 1, classification: 1 } }
+    { projection: { filename: 1, classification: 1, sensitivity: 1 } }
   ).toArray();
 }
 
@@ -484,8 +493,16 @@ export async function retrieveAuthorizedContext(
     included.push(result);
     characters += result.text.length;
   }
-  const context = included.map((result, index) =>
-    `<untrusted_document citation="${index + 1}" document_id="${result.documentId}" chunk_id="${result.chunkId}">\n${escapeUntrusted(result.text)}\n</untrusted_document>`
-  ).join('\n\n');
+  const context = included.map((result, index) => {
+    // Forward the document's sensitivity tag (when one exists) so privacy
+    // routing can categorize the chunk. Restricted to [a-z]+ so the value
+    // cannot break out of the attribute.
+    const tag = docById.get(result.documentId)?.sensitivity;
+    const sensitivityAttr =
+      typeof tag === 'string' && /^[a-z]+$/.test(tag) ? ` sensitivity="${tag}"` : '';
+    return (
+      `<untrusted_document citation="${index + 1}" document_id="${result.documentId}" chunk_id="${result.chunkId}"${sensitivityAttr}>\n${escapeUntrusted(result.text)}\n</untrusted_document>`
+    );
+  }).join('\n\n');
   return { context, citations: included.map((result) => result.citation), results: included };
 }

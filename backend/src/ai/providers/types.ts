@@ -70,7 +70,13 @@ export interface TokenUsage {
 export type ProviderEvent =
   | { type: 'text'; content: string }
   | { type: 'tool_call'; id: string; name: string; arguments: string }
-  | { type: 'usage'; usage: TokenUsage };
+  | { type: 'usage'; usage: TokenUsage }
+  /**
+   * A provider-executed server-side tool (e.g. Claude's native web_search).
+   * Executed by the provider itself, never by the agent — the agentic loop
+   * must not treat it as a client tool call.
+   */
+  | { type: 'server_tool'; name: string };
 
 export interface StreamChatOptions {
   /** Provider endpoint base URL, already allowlisted by the gateway. */
@@ -84,6 +90,14 @@ export interface StreamChatOptions {
   maxTokens?: number | null;
   temperature?: number | null;
   signal?: AbortSignal;
+  /**
+   * Enable the provider's native server-side web search (Claude's
+   * web_search tool). Only meaningful for Claude; other providers ignore
+   * it. The chat route sets it only on Claude-routed turns, which are by
+   * construction free of sensitive data (privacy routing) — local Enflite
+   * turns stay offline-only.
+   */
+  enableNativeWebSearch?: boolean;
 }
 
 export interface EmbedOptions {

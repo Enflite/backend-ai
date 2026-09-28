@@ -29,6 +29,7 @@ import { createChatConcurrencyLimiter, replyBusy } from '../ai/gateway/limits.js
 import { recordChatTurn, recordRetrieval } from '../observability/metrics.js';
 import { DlpStreamGuard } from '../dlp/streamGuard.js';
 import { displayNameForModel, providerGroupFor, providerLabelFor, type ProviderGroup } from '../ai/providers/providerDisplay.js';
+import { applyPrivacyRouting, stripCustomerDataTools } from '../ai/gateway/privacyRouting.js';
 
 const chatBodySchema = z.object({
   conversationId: z.string().uuid().optional(),
@@ -338,6 +339,16 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       if (!modelId && conversation.model) modelId = conversation.model;
       classification = conversation.classification;
     }
+    // Explicit selection: a modelId on the request (the #42 switcher) or a
+    // model pinned on the conversation. Captured before the
+    // vision/capability/default-open resolution below fills in an automatic
+    // choice, so privacy routing can tell "the user chose this" apart from
+    // "the pipeline chose this".
+    const explicitModelSelection = modelId !== undefined;
+    const isNewConversation = conversationId === undefined;
+    if (!conversationId) {
+      conversationId = randomUUID();
+    }
     // A caller may not self-assert a classification above their clearance, even
     // for a conversation they own (clearances can be lowered after creation).
     assertClassificationAllowed(auth.clearance, classification);
@@ -463,9 +474,6 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       // MODEL_UNAVAILABLE only when no servable model exists at all.
       modelId = (await resolveDefaultOpenModel(auth.tenantId, auth.userId, auth.roleId)).id;
     }
-    // Const copy: TypeScript narrowing of the `let` does not survive into the
-    // tenantOp closures below, so bind the resolved id once here.
-    const resolvedModelId: string = modelId;
     const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
 
     // Concurrency cap (gateway fairness): acquire one slot BEFORE any
@@ -486,24 +494,9 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       return replyBusy(reply, concurrencySlot.retryAfterSeconds);
     }
     try {
-      if (!conversationId) {
-        conversationId = randomUUID();
-        const now = new Date();
-        const conversationDoc: ConversationDoc = {
-          _id: conversationId,
-          tenantId: auth.tenantId,
-          userId: auth.userId,
-          title: parsed.data.content.slice(0, 80),
-          model: model.name,
-          modelId,
-          classification,
-          createdAt: now,
-          updatedAt: now,
-        };
-        await tenantOp(auth.tenantId, async (db) => {
-          await db.collection<ConversationDoc>('conversations').insertOne(conversationDoc);
-        });
-      }
+      // The conversation doc is created after privacy routing below, with
+      // the final serving model — transcripts stay honest about which
+      // model served the turn.
       // Const copy: the `let` narrowing does not survive into closures.
       const resolvedConversationId: string = conversationId;
 
@@ -528,18 +521,9 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           role: role as 'user' | 'assistant' | 'system',
           content,
         }));
-      await tenantOp(auth.tenantId, async (db) => {
-        await db.collection<MessageDoc>('messages').insertOne({
-          _id: randomUUID(),
-          conversationId: resolvedConversationId,
-          tenantId: auth.tenantId,
-          role: 'user',
-          content: parsed.data.content,
-          model: model.name,
-          modelId: resolvedModelId,
-          createdAt: new Date(),
-        });
-      });
+      // The user message is persisted after privacy routing below, with
+      // the final serving model — transcripts stay honest about which
+      // model served the turn.
       history.push({ role: 'user', content: parsed.data.content });
 
       let citations: Awaited<ReturnType<typeof retrieveAuthorizedContext>>['citations'] = [];
@@ -606,16 +590,9 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       // only — never secrets). The gateway pins it at index 0 of every
       // provider call and re-adds it after each truncation round, so it is
       // never dropped no matter how long the history grows.
-      const sytelineToolsAvailable = turnProviderTools.some((tool) => tool.function.name.startsWith('syteline.'));
-      const repoToolsAvailable = turnProviderTools.some((tool) => tool.function.name.startsWith('repo.'));
       // Coding turns get the CODING WORK section: ground claims in shown files,
       // never invent paths or APIs, deliver changes as unified diffs.
       const codingMode = requestedCapability === 'coding' || codeFileInputs.length > 0;
-      // Assembled through the deterministic prefix-cache contract
-      // (prefixCache.ts): byte-stable static head first, per-turn dynamic
-      // sections after, so vLLM's automatic prefix caching can reuse the
-      // head's KV blocks across turns. Same model-visible content as the
-      // plain builder — only the ordering guarantee differs.
       // User memory injection: the caller's remembered facts, classification-
       // filtered against this turn's request classification (UNKNOWN fails
       // closed) and secret-scrubbed by buildUserMemoryInjection. Best effort:
@@ -634,31 +611,129 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       }
       // Small-talk turns get the slim casual prompt (no static charter head, no
       // tool guidance, no knowledge packs); working turns get the full
-      // charter-encoded prompt through the prefix-cache contract.
-      const buildTurnSystemPrompt = (modelName: string, modelVersion?: string) =>
+      // charter-encoded prompt through the prefix-cache contract. The tool
+      // set is a parameter because privacy routing may strip the syteline.*
+      // family on cloud-served turns — the prompt must not promise tools
+      // the model cannot call.
+      const buildTurnSystemPrompt = (
+        modelName: string,
+        modelVersion: string | undefined,
+        tools: ProviderToolDefinition[]
+      ) =>
         smallTalkTurn
           ? buildSmallTalkPrompt()
           : buildCacheableSystemPrompt({
               modelName,
               modelVersion,
-              toolsAvailable: turnProviderTools.length > 0,
-              sytelineToolsAvailable,
+              toolsAvailable: tools.length > 0,
+              sytelineToolsAvailable: tools.some((tool) => tool.function.name.startsWith('syteline.')),
               codingMode,
-              repoToolsAvailable,
+              repoToolsAvailable: tools.some((tool) => tool.function.name.startsWith('repo.')),
               // Vision turns get the VISION INPUT section: read what is actually
               // visible, quote error text exactly, diagnose screenshots.
               visionMode: hasImages,
               userMemory: userMemorySection,
             }).text;
-      const chatSystemPrompt = buildTurnSystemPrompt(model.name, model.version);
+      const chatSystemPrompt = buildTurnSystemPrompt(model.name, model.version, turnProviderTools);
 
       // Context-window management: sliding window that always keeps the system
       // prompt and the most recent turns. The drop count is surfaced in `meta`
       // so truncation is never silent.
-      const windowed = applyContextWindow(history, model.contextWindow, undefined, chatSystemPrompt);
+      let windowed = applyContextWindow(history, model.contextWindow, undefined, chatSystemPrompt);
       if (windowed.dropped > 0) {
         req.log.info({ requestId: req.requestId, conversationId, dropped: windowed.dropped }, 'context window truncated oldest messages');
       }
+
+      // Privacy-aware provider routing (see ai/gateway/privacyRouting.ts).
+      // Runs AFTER the prompt is fully assembled — system prompt, history
+      // window, RAG chunks, code files, memory injection — because a
+      // "general" follow-up still carries earlier sensitive data in its
+      // history (context bleed). Scanning only the latest message would
+      // leak that history to a cloud provider. The capability is
+      // re-detected from the turn text (not the pipeline's resolution,
+      // which is unset when a model was already selected) so the
+      // syteline-predicts-customer-data rule applies to explicit Claude
+      // selections too.
+      const promptScanText = [
+        chatSystemPrompt,
+        ...windowed.messages.map((message) =>
+          typeof message.content === 'string' ? message.content : JSON.stringify(message)
+        ),
+      ].join('\n');
+      const privacyDecision = await applyPrivacyRouting({
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        roleId: auth.roleId,
+        requestId: req.requestId,
+        preliminaryModel: model,
+        explicitModelSelection,
+        promptText: promptScanText,
+        requestedCapability: detectCapability(parsed.data.content, { sytelineToolsOffered }),
+        hasImages,
+      });
+      const servingModel = privacyDecision.model;
+      const servingProviderGroup = providerGroupFor(servingModel.provider);
+      // The model id wired to the gateway and the transcript: the resolved
+      // request id, unless privacy routing actually switched models (the
+      // decision's model object is authoritative only on override).
+      const servingModelId = privacyDecision.privacyOverridden ? servingModel.id : modelId;
+      // Tool-offering gate: a cloud-served turn never gets tools whose
+      // results could introduce sensitive data (syteline.* for the
+      // customer/finance categories, repo.* only when the code carve-out
+      // is flipped off), because the agentic loop keeps the round's model
+      // across tool calls without re-running privacy routing.
+      const servingProviderTools =
+        servingProviderGroup === 'enflite'
+          ? turnProviderTools
+          : stripCustomerDataTools(
+              turnProviderTools,
+              privacyDecision.allEnforcedCategories,
+              privacyDecision.codeRoutableToCloud
+            );
+      if (privacyDecision.privacyOverridden) {
+        // The serving model changed: rebuild the system prompt (it names
+        // the model) and re-apply the context window (it differs per
+        // model), so the turn is served exactly as the final model needs.
+        const servingSystemPrompt = buildTurnSystemPrompt(
+          servingModel.name,
+          servingModel.version,
+          servingProviderTools
+        );
+        windowed = applyContextWindow(history, servingModel.contextWindow, undefined, servingSystemPrompt);
+      }
+
+      // Persist the conversation doc (new conversations) and the user
+      // message with the FINAL serving model, so transcripts stay honest
+      // about which model served the turn.
+      if (isNewConversation) {
+        const now = new Date();
+        const conversationDoc: ConversationDoc = {
+          _id: resolvedConversationId,
+          tenantId: auth.tenantId,
+          userId: auth.userId,
+          title: parsed.data.content.slice(0, 80),
+          model: servingModel.name,
+          modelId: servingModelId,
+          classification,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await tenantOp(auth.tenantId, async (db) => {
+          await db.collection<ConversationDoc>('conversations').insertOne(conversationDoc);
+        });
+      }
+      await tenantOp(auth.tenantId, async (db) => {
+        await db.collection<MessageDoc>('messages').insertOne({
+          _id: randomUUID(),
+          conversationId: resolvedConversationId,
+          tenantId: auth.tenantId,
+          role: 'user',
+          content: parsed.data.content,
+          model: servingModel.name,
+          modelId: servingModelId,
+          createdAt: new Date(),
+        });
+      });
 
 
       // Take over the raw response for SSE. hijack() is required: without it
@@ -754,7 +829,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       }, HEARTBEAT_INTERVAL_MS);
       if (!(await send('meta', {
         conversationId,
-        model: { id: model.id, name: model.name },
+        model: { id: servingModelId, name: servingModel.name },
         citations,
         contextDropped: windowed.dropped,
         // Telemetry for operators: which capability served and whether the
@@ -773,7 +848,17 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
         await send('notice', {
           code: 'MODEL_VISION_SWITCH',
           message: visionSwitchNotice,
-          model: { id: model.id, name: model.name },
+          model: { id: servingModelId, name: servingModel.name },
+        });
+      }
+      // Privacy routing overrode a cloud selection toward local: say so
+      // once, friendly — never a lecture. The notice doubles as the
+      // activity-feed entry (see frontend noticeToActivityEntries).
+      if (privacyDecision.notice) {
+        await send('notice', {
+          code: 'PRIVACY_ROUTING',
+          message: privacyDecision.notice,
+          model: { id: servingModelId, name: servingModel.name },
         });
       }
 
@@ -794,6 +879,17 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
             message: `Running ${calls.length} tool call${calls.length === 1 ? '' : 's'}…`,
             tools: calls.map((call) => call.name),
           }),
+        // Claude's native web_search ran server-side (Claude-routed turns
+        // only): note it once per turn so the activity feed shows the
+        // model reached the web. Local Enflite turns stay offline-only.
+        serverTool: (() => {
+          let noticed = false;
+          return (name: string) => {
+            if (noticed) return Promise.resolve(true);
+            noticed = true;
+            return send('notice', { code: 'WEB_SEARCH', message: 'Searched the web', tools: [name] });
+          };
+        })(),
         failover: (modelName, failoverModelId) =>
           send('notice', {
             code: 'MODEL_FAILOVER',
@@ -830,9 +926,14 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           requestId: req.requestId,
           classification,
           auth,
-          initialModel: { id: modelId, name: model.name, contextWindow: model.contextWindow, version: model.version },
-          buildSystemPrompt: buildTurnSystemPrompt,
-          providerTools: turnProviderTools,
+          initialModel: { id: servingModelId, name: servingModel.name, contextWindow: servingModel.contextWindow, version: servingModel.version },
+          buildSystemPrompt: (servingModelName, servingModelVersion) =>
+            buildTurnSystemPrompt(servingModelName, servingModelVersion, servingProviderTools),
+          providerTools: servingProviderTools,
+          // Claude's native server-side web_search: enabled only on
+          // Claude-routed turns, which privacy routing guarantees are free
+          // of sensitive data. Local Enflite turns stay offline-only.
+          enableNativeWebSearch: servingProviderGroup === 'claude',
           messages: windowed.messages,
           signal: abortController.signal,
           telemetry,
@@ -854,7 +955,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           finishReason: 'error',
           toolIterations: 0,
           truncatedByCap: false,
-          servingModel: { id: modelId, name: model.name },
+          servingModel: { id: servingModelId, name: servingModel.name },
           interrupted: false,
           failed: true,
           aborted: abortController.signal.aborted,

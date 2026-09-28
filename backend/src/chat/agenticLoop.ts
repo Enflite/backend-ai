@@ -74,6 +74,13 @@ export interface AgenticLoopSink {
   done(payload: AgenticLoopDonePayload): Promise<boolean>;
   /** Stream-level error. */
   error(code: string, message: string): Promise<void>;
+  /**
+   * A provider-executed server-side tool (e.g. Claude's native web_search).
+   * Executed by the provider itself — the loop must never run it as a
+   * client tool. Optional: sinks that don't care can omit it. Return false
+   * to stop.
+   */
+  serverTool?(name: string): Promise<boolean>;
 }
 
 export interface AgenticLoopDonePayload {
@@ -132,6 +139,13 @@ export interface AgenticLoopOptions {
   maxIterations: number;
   maxResponseChars: number;
   dlpGuard?: DlpStreamGuard | null;
+  /**
+   * Enable the provider's native server-side web search for this run
+   * (Claude's web_search tool). The chat route sets it only on
+   * Claude-routed turns, which privacy routing guarantees are free of
+   * sensitive data.
+   */
+  enableNativeWebSearch?: boolean;
   /**
    * Approval contract per tool name. Return 'requires-approval' for tools
    * that must not auto-execute. The default (used by the chat route) routes
@@ -276,6 +290,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         signal,
         telemetry,
         systemPrompt: roundSystemPrompt,
+        enableNativeWebSearch: options.enableNativeWebSearch,
       });
       const toolCalls: LoopToolCall[] = [];
       let roundTruncated = false;
@@ -307,6 +322,14 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
           }
         } else if (event.type === 'tool_call') {
           toolCalls.push(event);
+        } else if (event.type === 'server_tool') {
+          // Provider-executed server-side tool (e.g. Claude web_search):
+          // already ran on the provider side, so it is surfaced, never
+          // re-executed as a client tool call.
+          if (sink.serverTool && !(await sink.serverTool(event.name))) {
+            sinkStopped = true;
+            break;
+          }
         } else if (event.type === 'failover') {
           roundModelId = event.modelId;
           roundModelName = event.modelName;

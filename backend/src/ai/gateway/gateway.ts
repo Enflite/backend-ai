@@ -40,6 +40,13 @@ export interface GatewayStreamInput {
   systemPrompt?: string;
   /** Filled in as the stream progresses: time-to-first-token and usage. */
   telemetry?: GatewayTelemetry;
+  /**
+   * Enable the provider's native server-side web search for this turn
+   * (Claude's web_search tool). The chat route sets it only on
+   * Claude-routed turns, which privacy routing guarantees are free of
+   * sensitive data. Local Enflite turns stay offline-only.
+   */
+  enableNativeWebSearch?: boolean;
 }
 
 export interface GatewayTelemetry {
@@ -233,6 +240,7 @@ async function* streamWithTelemetry(
     maxTokens: model.maxTokens,
     temperature: model.temperature,
     signal: input.signal,
+    enableNativeWebSearch: input.enableNativeWebSearch,
   });
   for await (const event of stream) {
     if (event.type === 'text' && telemetry.timeToFirstTokenMs === undefined) {

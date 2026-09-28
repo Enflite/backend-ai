@@ -146,6 +146,19 @@ const { resolveCapabilityModel } = vi.hoisted(() => ({ resolveCapabilityModel: v
 vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock }));
 vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
+vi.mock('../src/ai/gateway/privacyRouting.js', () => ({
+  applyPrivacyRouting: async (input: { preliminaryModel: unknown }) => ({
+    model: input.preliminaryModel,
+    privacyOverridden: false,
+    autoRoutedToCloud: false,
+    notice: null,
+    detection: { hasCustomerData: false, reasons: [], categories: [] },
+    enforcedCategories: [],
+    allEnforcedCategories: ['customer', 'finance', 'proprietary'],
+    codeRoutableToCloud: true,
+  }),
+  stripCustomerDataTools: (tools: unknown[]) => tools,
+}));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
 vi.mock('../src/ai/gateway/gateway.js', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../src/ai/gateway/gateway.js')>();
