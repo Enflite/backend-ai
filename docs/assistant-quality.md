@@ -168,6 +168,12 @@ is a build/test requirement:
 6. **No cross-tenant memory.** Conversation history, preferences, and
    retrieved context are tenant-scoped at every layer — including caches,
    logs, and embeddings.
+7. **Small-talk discipline.** Greetings, thanks, and farewells never trigger
+   tool calls or retrieval: the route suppresses the tool registry and uses
+   a slim prompt for pure chit-chat (deterministic gate, no model call).
+   The "I don't know" response fires only after tools/retrieval were
+   actually attempted and came up empty — never as a generic dodge, and
+   never in reply to conversation that needed no evidence.
 
 ## 5. Measuring quality
 
