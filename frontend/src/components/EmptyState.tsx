@@ -15,17 +15,10 @@ interface EmptyStateProps {
 export default function EmptyState({ model, onPrompt }: EmptyStateProps) {
   return (
     <div className="flex flex-col items-center justify-center h-full px-4 py-12 text-center">
-      <div
-        className="w-14 h-14 rounded-2xl flex items-center justify-center mb-5"
-        style={{ background: 'rgba(0,201,167,0.1)', border: '1px solid rgba(0,201,167,0.2)' }}
-      >
-        <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-          <path d="M14 2L17 10H25L19 15L21 23L14 18L7 23L9 15L3 10H11L14 2Z" fill="var(--accent)" opacity="0.8" />
-        </svg>
-      </div>
+      <img src="/enflite-logo.png" alt="Enflite" className="h-10 w-auto mb-5" />
 
       <h2 className="text-xl font-semibold mb-2" style={{ color: 'var(--foreground)' }}>
-        Private AI — Ready
+        Enflite — Ready
       </h2>
       <p className="text-sm max-w-sm mb-1" style={{ color: 'var(--muted-foreground)' }}>
         Using <strong style={{ color: 'var(--foreground)' }}>{model.name}</strong> running on your internal infrastructure.

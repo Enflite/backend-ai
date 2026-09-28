@@ -5,7 +5,7 @@ const CLASSIFICATION_COLOR: Record<string, string> = {
   PUBLIC: '#22c55e',
   INTERNAL: '#3b82f6',
   CONFIDENTIAL: '#f59e0b',
-  PROPRIETARY: '#ef4444',
+  PROPRIETARY: '#cf0c2c',
   CUI: '#a855f7',
 };
 
@@ -53,7 +53,7 @@ export default function ModelSelector({ models, selected, onSelect, onClose }: M
                     {unavailable ? (
                       <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: '#6b728020', color: '#9ca3af' }}>Disabled</span>
                     ) : selected.id === model.id && (
-                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(0,201,167,0.15)', color: 'var(--accent)' }}>Active</span>
+                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(207,12,44,0.15)', color: 'var(--accent)' }}>Active</span>
                     )}
                   </div>
                   <p className="text-xs mt-0.5" style={{ color: 'var(--muted-foreground)' }}>{model.description}</p>

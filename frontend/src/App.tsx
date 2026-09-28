@@ -10,7 +10,7 @@ import type { AuthUser, Conversation, DataClassification, DocumentRecord, Messag
 
 const CLASSIFICATION_COLOR: Record<string, string> = {
   PUBLIC: '#22c55e', INTERNAL: '#3b82f6', CONFIDENTIAL: '#f59e0b',
-  PROPRIETARY: '#ef4444', CUI: '#a855f7', UNKNOWN: '#6b7280',
+  PROPRIETARY: '#cf0c2c', CUI: '#a855f7', UNKNOWN: '#6b7280',
 };
 const CLASSIFICATION_ORDER: DataClassification[] = ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'PROPRIETARY', 'CUI', 'UNKNOWN'];
 const randomId = () => crypto.randomUUID();
@@ -137,6 +137,8 @@ export default function App() {
   }, []);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [activeConversation?.messages, isStreaming]);
+
+  useEffect(() => { document.title = 'Enflite'; }, []);
 
   useEffect(() => {
     if (!user || !documents.some((document) => document.status === 'PENDING' || document.status === 'PROCESSING')) return;
@@ -408,7 +410,7 @@ function Login({ onLogin, error }: { onLogin: (email: string, password: string) 
   return <main className="h-screen grid place-items-center px-4"><form className="w-full max-w-sm p-6 rounded-xl space-y-4" style={{ background: 'var(--card)', border: '1px solid var(--border)' }} onSubmit={async (event) => {
     event.preventDefault(); setBusy(true); setLocalError('');
     try { await onLogin(email, password); } catch (cause) { setLocalError(cause instanceof Error ? cause.message : 'Sign in failed'); } finally { setBusy(false); }
-  }}><div><h1 className="text-xl font-semibold">Enflite Private AI</h1><p className="text-sm mt-1" style={{ color: 'var(--muted-foreground)' }}>Sign in with your enterprise account</p></div>
+  }}><div><img src="/enflite-logo.png" alt="Enflite" className="h-9 w-auto mb-3" /><h1 className="text-xl font-semibold">Enflite</h1><p className="text-sm mt-1" style={{ color: 'var(--muted-foreground)' }}>Sign in with your enterprise account</p></div>
     {(localError || error) && <p role="alert" className="text-sm" style={{ color: '#fca5a5' }}>{localError || error}</p>}
     {ssoEnabled && <button type="button" onClick={() => { window.location.href = api.oidcLoginUrl(); }} className="w-full rounded-md py-2 text-sm font-medium" style={{ background: 'var(--secondary)', color: 'var(--foreground)', border: '1px solid var(--border)' }}>Sign in with SSO</button>}
     {ssoEnabled && <div className="flex items-center gap-3 text-xs" style={{ color: 'var(--muted-foreground)' }}><span className="flex-1" style={{ borderTop: '1px solid var(--border)' }} /><span>or with password</span><span className="flex-1" style={{ borderTop: '1px solid var(--border)' }} /></div>}
