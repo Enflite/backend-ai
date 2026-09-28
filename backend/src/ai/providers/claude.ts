@@ -39,6 +39,15 @@ const DEFAULT_MAX_TOKENS = 4096;
 
 const ANTHROPIC_VERSION = '2023-06-01';
 
+/**
+ * Claude's native server-side web_search tool. Executed by Anthropic's
+ * API — no extra key, no new egress beyond api.anthropic.com (already the
+ * allowlisted Claude endpoint). max_uses bounds search spend per turn.
+ * Enabled only on Claude-routed turns, which privacy routing guarantees
+ * are free of sensitive data; local Enflite turns stay offline-only.
+ */
+const NATIVE_WEB_SEARCH_TOOL = { type: 'web_search_20250305', name: 'web_search', max_uses: 5 };
+
 export interface ClaudeProviderConfig {
   /** Base URL of the Anthropic API (default https://api.anthropic.com). */
   endpoint: string;
@@ -161,6 +170,7 @@ export class ClaudeProvider implements ChatProvider {
     maxTokens,
     temperature,
     signal,
+    enableNativeWebSearch,
   }: StreamChatOptions): AsyncGenerator<ProviderEvent, void, unknown> {
     const base = (endpoint || this.config.endpoint).replace(/\/+$/, '');
     const url = `${base}/v1/messages`;
@@ -173,8 +183,10 @@ export class ClaudeProvider implements ChatProvider {
       stream: true,
     };
     if (system) body.system = system;
-    if (tools?.length) {
-      body.tools = toApiTools(tools);
+    const apiTools = [...toApiTools(tools ?? [])];
+    if (enableNativeWebSearch) apiTools.push({ ...NATIVE_WEB_SEARCH_TOOL });
+    if (apiTools.length > 0) {
+      body.tools = apiTools;
       body.tool_choice = { type: 'auto' };
     }
     if (typeof temperature === 'number') body.temperature = temperature;
@@ -237,6 +249,14 @@ export class ClaudeProvider implements ChatProvider {
               name: typeof block.name === 'string' ? block.name.slice(0, 128) : '',
               json: '',
             });
+          } else if (block?.type === 'server_tool_use') {
+            // Server-side tools (e.g. web_search) are executed by Anthropic
+            // itself, never by the agentic loop: surface them as a
+            // notification, not a client tool call. web_search_tool_result
+            // blocks are intentionally not surfaced — the model synthesizes
+            // them into its streamed answer, which DLP already screens.
+            const name = typeof block.name === 'string' && block.name.length > 0 ? block.name.slice(0, 128) : 'server_tool';
+            yield { type: 'server_tool', name };
           }
           break;
         }

@@ -683,3 +683,26 @@ export async function findServableVisionModelForGroup(group: ProviderGroup): Pro
     enabled: true,
   });
 }
+
+/**
+ * Finds the preferred servable chat (non-vision) model for a cloud
+ * provider group. Prefer the provider's flagship default (`isProviderDefault`
+ * — e.g. claude-sonnet-4-20250514 for Claude), falling back to any servable
+ * chat-capable model for the group. Returns null when the provider is not
+ * configured.
+ */
+export async function findServableChatModelForGroup(group: 'claude' | 'openai'): Promise<ModelDoc | null> {
+  const db = (await getDb()) as unknown as MinimalDb;
+  const configured = group === 'claude' ? isClaudeConfigured() : isOpenAIConfigured();
+  if (!configured) return null;
+  await ensureCloudProviderModels();
+  const query = {
+    provider: group,
+    'capabilities.chat': true,
+    status: { $in: [...SERVABLE_STATUSES] },
+    enabled: true,
+  };
+  const preferred = await db.collection<ModelDoc>('models').findOne({ ...query, isProviderDefault: true });
+  if (preferred) return preferred;
+  return db.collection<ModelDoc>('models').findOne(query);
+}

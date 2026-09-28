@@ -31,6 +31,11 @@ import {
   listRoutingPolicies,
   setRoutingPolicy,
 } from './capabilityRouter.js';
+import {
+  SENSITIVE_CATEGORIES,
+  getPrivacyAutoRouting,
+  setPrivacyRoutingSetting,
+} from './privacyRouting.js';
 
 const modelIdSchema = z.object({ id: z.string().uuid() });
 
@@ -485,6 +490,49 @@ export async function modelAdminRoutes(fastify: FastifyInstance): Promise<void> 
       req.ip
     );
     return reply.send({ policy });
+  });
+
+  // Privacy-aware provider routing settings. autoRouteToCloud defaults ON
+  // (clean, unpinned turns auto-route to Claude when configured); admins
+  // can disable it per tenant. sensitiveCategories defaults to all three
+  // (customer, finance, proprietary) — default-deny. codeRoutableToCloud
+  // is the code carve-out: repo source code stays routable to Claude for
+  // coding help; flip it to false to make code local-only too. The toggle
+  // only ever moves clean turns to cloud — the sensitive-data rule is not
+  // toggleable, only the enforced category list is.
+  fastify.get('/admin/privacy-routing', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    return reply.send({ setting: await getPrivacyAutoRouting(auth.tenantId) });
+  });
+
+  fastify.put('/admin/privacy-routing', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const parsed = z
+      .object({
+        autoRouteToCloud: z.boolean().optional(),
+        sensitiveCategories: z.array(z.enum(SENSITIVE_CATEGORIES)).optional(),
+        codeRoutableToCloud: z.boolean().optional(),
+      })
+      .strict()
+      .safeParse(req.body);
+    if (!parsed.success) {
+      throw Errors.badRequest(
+        'INVALID_BODY',
+        'Request body must be { autoRouteToCloud?: boolean, sensitiveCategories?: ("customer"|"finance"|"proprietary")[], codeRoutableToCloud?: boolean }'
+      );
+    }
+    const setting = await setPrivacyRoutingSetting(
+      auth.tenantId,
+      parsed.data,
+      auth.userId,
+      req.requestId,
+      req.ip
+    );
+    return reply.send({ setting });
   });
 }
 

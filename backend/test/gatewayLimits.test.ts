@@ -43,6 +43,19 @@ vi.mock('../src/tools/gateway.js', () => ({ runToolCall, toolRegistry: [] }));
 vi.mock('../src/audit/audit.js', () => ({ recordAudit, sanitizeReason: (reason: string) => reason }));
 vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({ resolveCapabilityModel }));
 vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, getApprovedModelForUser }));
+vi.mock('../src/ai/gateway/privacyRouting.js', () => ({
+  applyPrivacyRouting: async (input: { preliminaryModel: unknown }) => ({
+    model: input.preliminaryModel,
+    privacyOverridden: false,
+    autoRoutedToCloud: false,
+    notice: null,
+    detection: { hasCustomerData: false, reasons: [], categories: [] },
+    enforcedCategories: [],
+    allEnforcedCategories: ['customer', 'finance', 'proprietary'],
+    codeRoutableToCloud: true,
+  }),
+  stripCustomerDataTools: (tools: unknown[]) => tools,
+}));
 vi.mock('../src/rag/retrieval.js', () => ({ retrieveAuthorizedContext }));
 vi.mock('../src/auth/middleware.js', () => ({
   requireAuth: (req: any, _reply: any, done: () => void) => {

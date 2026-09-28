@@ -244,6 +244,8 @@ The purge runs in-process every `RETENTION_PURGE_INTERVAL_HOURS` (see
 | GET | `/admin/routing-policies` | auth + `model:manage` | List routing policies (strategy + fallback) per capability |
 | GET | `/admin/routing-policies/:capability` | auth + `model:manage` | One policy, or the platform default when unconfigured |
 | PUT | `/admin/routing-policies/:capability` | auth + `model:manage` | Set `{ strategy: quality\|latency\|cost, fallbackToChat }`, audited |
+| GET | `/admin/privacy-routing` | auth + `model:manage` | Privacy-routing settings (auto-routing default ON, all three categories enforced, code carve-out ON) |
+| PUT | `/admin/privacy-routing` | auth + `model:manage` | Set any subset of `{ autoRouteToCloud, sensitiveCategories, codeRoutableToCloud }`, audited |
 | GET | `/admin/models/artifacts/local` | auth + `model:manage` | Local Ollama artifacts (pulls gated by `ALLOW_DEV_PROVIDERS`) |
 | POST | `/admin/models/artifacts/pull` | auth + `model:manage` | Pull a model artifact via Ollama (allowlisted names, audited) |
 

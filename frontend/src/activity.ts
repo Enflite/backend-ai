@@ -14,7 +14,7 @@
 
 export type AssistantState = 'idle' | 'thinking' | 'streaming' | 'tools';
 
-export type ActivityKind = 'tools' | 'vision' | 'failover' | 'sources' | 'attachment';
+export type ActivityKind = 'tools' | 'vision' | 'failover' | 'sources' | 'attachment' | 'privacy' | 'web';
 
 export interface ActivityEntry {
   id: string;
@@ -221,6 +221,10 @@ export function noticeToActivityEntries(notice: NoticeInput, messageId?: string)
       return [makeEntry('vision', 'Used the vision model', 'Your image needed a model that can see', messageId)];
     case 'MODEL_FAILOVER':
       return [makeEntry('failover', 'Continued with a backup model', undefined, messageId)];
+    case 'PRIVACY_ROUTING':
+      return [makeEntry('privacy', 'Kept this on Enflite', 'It touches customer data', messageId)];
+    case 'WEB_SEARCH':
+      return [makeEntry('web', 'Searched the web', undefined, messageId)];
     default:
       return [];
   }

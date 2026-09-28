@@ -16,6 +16,8 @@ const KIND_ICON: Record<ActivityKind, React.ReactNode> = {
   failover: <IconSwap />,
   sources: <IconBook />,
   attachment: <IconClip />,
+  privacy: <IconShield />,
+  web: <IconGlobe />,
 };
 
 const KIND_LABEL: Record<ActivityKind, string> = {
@@ -24,6 +26,8 @@ const KIND_LABEL: Record<ActivityKind, string> = {
   failover: 'Model',
   sources: 'Sources',
   attachment: 'Attachment',
+  privacy: 'Privacy',
+  web: 'Web',
 };
 
 /**
@@ -121,4 +125,10 @@ function IconBook() {
 }
 function IconClip() {
   return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M11 7l-4.5 4.5a2.5 2.5 0 01-3.5-3.5L8.5 2.5a4 4 0 015.7 5.7L8 14.5" /></svg>;
+}
+function IconShield() {
+  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M8 1.5l5 2v4c0 3.5-2.5 6-5 7-2.5-1-5-3.5-5-7v-4l5-2z" /></svg>;
+}
+function IconGlobe() {
+  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="6.5" /><path d="M1.5 8h13M8 1.5c-3.5 3.5-3.5 9.5 0 13 3.5-3.5 3.5-9.5 0-13z" /></svg>;
 }

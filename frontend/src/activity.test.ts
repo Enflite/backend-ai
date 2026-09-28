@@ -130,6 +130,22 @@ describe('noticeToActivityEntries', () => {
     expect(failover[0].title).toBe('Continued with a backup model');
   });
 
+  it('records privacy overrides and web searches', () => {
+    const privacy = noticeToActivityEntries(
+      { code: 'PRIVACY_ROUTING', message: 'Kept this on Enflite — it touches customer data.' },
+      'msg-2'
+    );
+    expect(privacy).toHaveLength(1);
+    expect(privacy[0].kind).toBe('privacy');
+    expect(privacy[0].title).toBe('Kept this on Enflite');
+    expect(privacy[0].messageId).toBe('msg-2');
+
+    const web = noticeToActivityEntries({ code: 'WEB_SEARCH', message: 'Searched the web' });
+    expect(web).toHaveLength(1);
+    expect(web[0].kind).toBe('web');
+    expect(web[0].title).toBe('Searched the web');
+  });
+
   it('skips plans and unknown codes', () => {
     expect(noticeToActivityEntries({ code: 'TOOL_PLAN', message: 'x', tools: ['repo.readFile'] })).toEqual([]);
     expect(noticeToActivityEntries({ code: 'SOMETHING_ELSE', message: 'x' })).toEqual([]);
