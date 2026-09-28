@@ -10,7 +10,7 @@ import { assertClassificationAllowed } from '../authz/classification.js';
 import { applyContextWindow, GatewayTelemetry, ProviderToolDefinition, streamMetadata } from '../ai/gateway/gateway.js';
 import type { ChatImage } from '../ai/providers/types.js';
 import { getApprovedModelForUser } from '../ai/gateway/modelRegistry.js';
-import { isVisionCapableModel, resolveCapabilityModel, resolveDefaultOpenModel, resolveVisionModel, type CapabilityResolution } from '../ai/gateway/capabilityRouter.js';
+import { isVisionCapableModel, resolveCapabilityModel, resolveDefaultOpenModel, resolveVisionModel, resolveVisionModelForGroup, type CapabilityResolution } from '../ai/gateway/capabilityRouter.js';
 import { retrieveAuthorizedContext } from '../rag/retrieval.js';
 import { resolveChatDocuments } from './imageAttachments.js';
 import { recordAudit } from '../audit/audit.js';
@@ -27,6 +27,7 @@ import { config } from '../config.js';
 import { createChatConcurrencyLimiter, replyBusy } from '../ai/gateway/limits.js';
 import { recordChatTurn, recordRetrieval } from '../observability/metrics.js';
 import { DlpStreamGuard } from '../dlp/streamGuard.js';
+import { displayNameForModel, providerGroupFor, providerLabelFor, type ProviderGroup } from '../ai/providers/providerDisplay.js';
 
 const chatBodySchema = z.object({
   conversationId: z.string().uuid().optional(),
@@ -362,12 +363,17 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     if (hasImages) {
       // Vision turns: the text chat default is text-only and must never
       // receive image payloads. An explicitly selected model is kept only
-      // when it advertises vision capability; otherwise the platform vision
-      // model serves the turn — with a notice, never silently.
+      // when it advertises vision capability; otherwise the vision model
+      // for the selected model's provider group serves the turn — with a
+      // notice, never silently.
       let selectedVisionModel: Awaited<ReturnType<typeof getApprovedModelForUser>> | null = null;
+      let selectedGroup: ProviderGroup = 'enflite';
+      let selectedLabel = 'Enflite';
       if (modelId) {
         try {
           const selected = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
+          selectedGroup = providerGroupFor(selected.provider);
+          selectedLabel = providerLabelFor(selected.provider);
           if (isVisionCapableModel(selected)) selectedVisionModel = selected;
         } catch (error) {
           // Only the expected "not approved for this caller" failure falls
@@ -378,17 +384,22 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           }
         }
       }
-      const visionModel = selectedVisionModel ?? (await resolveVisionModel({
+      const visionModel = selectedVisionModel ?? (await resolveVisionModelForGroup({
         tenantId: auth.tenantId,
         userId: auth.userId,
         roleId: auth.roleId,
+        group: selectedGroup,
         requestId: req.requestId,
       }));
       if (!selectedVisionModel && modelId && modelId !== visionModel.id) {
         const count = imageAttachments.length;
-        visionSwitchNotice =
-          `Reading your image${count === 1 ? '' : 's'} with ${visionModel.name} — ` +
-          `the selected model can't view images.`;
+        const visionGroup = providerGroupFor(visionModel.provider);
+        const sameProvider = visionGroup === selectedGroup;
+        visionSwitchNotice = sameProvider
+          ? `Reading your image${count === 1 ? '' : 's'} with ${displayNameForModel(visionModel)} — ` +
+            `the selected model can't view images.`
+          : `Reading your image${count === 1 ? '' : 's'} with ${displayNameForModel(visionModel)} (Enflite) — ` +
+            `${selectedLabel} has no vision model available right now.`;
       }
       modelId = visionModel.id;
       capabilityResolution = {

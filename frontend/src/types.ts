@@ -43,14 +43,36 @@ export interface Conversation {
   classification: DataClassification;
 }
 
+export type ProviderGroup = 'enflite' | 'claude' | 'openai';
+
 export interface Model {
   id: string;
+  /** User-facing name (e.g. "Enflite 8B") — never a raw registry ID. */
   name: string;
   provider: string;
+  /** One of 'enflite' | 'claude' | 'openai' — drives the provider switcher. */
+  providerGroup: ProviderGroup;
+  providerLabel: string;
+  /** The provider's preferred chat model — auto-selected on provider switch. */
+  isProviderDefault: boolean;
+  chat: boolean;
+  vision: boolean;
   description: string;
   classificationMax: DataClassification;
   contextLength: number;
   enabled: boolean;
+}
+
+/** Safe provider metadata for the one-tap switcher — never carries keys. */
+export interface ProviderInfo {
+  key: ProviderGroup;
+  label: string;
+  description: string;
+  residency: 'local' | 'cloud';
+  residencyLabel: string;
+  configured: boolean;
+  enabled: boolean;
+  hint?: string;
 }
 
 export interface UploadedFile {

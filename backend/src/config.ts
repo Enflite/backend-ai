@@ -52,9 +52,31 @@ const envSchema = z.object({
     )
     .default(process.env.NODE_ENV === 'production'),
   VLLM_API_KEY: z.string().optional().default(''),
+  // Cloud providers for one-tap switching in the UI (the "Enflite" provider
+  // is local Ollama and needs no key). Keys are never logged, never
+  // returned by any API, and never interpolated into errors. A cloud
+  // provider is offered in the UI only when its key is set (and not
+  // explicitly disabled): without a key the switcher shows it disabled
+  // with a hint, never as a dead button.
+  ANTHROPIC_API_KEY: z.string().optional().default(''),
+  ANTHROPIC_BASE_URL: z.string().url().default('https://api.anthropic.com'),
+  CLAUDE_ENABLED: z
+    .preprocess(
+      (val) => (val === undefined || val === null || val === '' ? undefined : val === true || val === 'true' || val === '1'),
+      z.boolean()
+    )
+    .default(true),
+  OPENAI_API_KEY: z.string().optional().default(''),
+  OPENAI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
+  OPENAI_ENABLED: z
+    .preprocess(
+      (val) => (val === undefined || val === null || val === '' ? undefined : val === true || val === 'true' || val === '1'),
+      z.boolean()
+    )
+    .default(true),
   AI_PROVIDER_ALLOWED_ORIGINS: z
     .string()
-    .default('http://localhost:8000,http://vllm:8000,http://localhost:11434,http://ollama:11434'),
+    .default('http://localhost:8000,http://vllm:8000,http://localhost:11434,http://ollama:11434,https://api.anthropic.com,https://api.openai.com'),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(120000),
   // Prompt prefix caching (vLLM automatic prefix caching): when true, chat
   // turns assemble the system prompt through the deterministic prefix-cache
@@ -148,7 +170,7 @@ const envSchema = z.object({
   // URLs: only these exact model names may be fetched locally. Pulls via
   // the API remain gated by ALLOW_DEV_PROVIDERS (deprecated for inference,
   // still the switch for weight downloads).
-  OLLAMA_ALLOWED_MODELS: z.string().default('llama3.1:8b,nomic-embed-text'),
+  OLLAMA_ALLOWED_MODELS: z.string().default('llama3.1:8b,nomic-embed-text,qwen2.5vl:7b'),
   // Allowlist of origins a registry model's `source` URL may point at.
   // Model registration with any other source origin is rejected.
   MODEL_SOURCE_ALLOWLIST: z.string().default('https://huggingface.co'),

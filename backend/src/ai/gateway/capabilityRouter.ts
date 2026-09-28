@@ -46,9 +46,11 @@ import {
   listApprovedModelsForUser,
   ensureTenantDefaultModel,
   ensureVisionModel,
+  findServableVisionModelForGroup,
   isVisionCapableModel,
   type ApprovedModel,
 } from './modelRegistry.js';
+import type { ProviderGroup } from '../providers/providerDisplay.js';
 
 export type Capability = (typeof KNOWN_CAPABILITIES)[number];
 export type RoutingStrategy = 'quality' | 'latency' | 'cost';
@@ -326,6 +328,42 @@ export async function resolveVisionModel(options: {
 }
 
 export { isVisionCapableModel };
+
+/**
+ * Resolve the vision model for a provider group (ADR-018).
+ *
+ * Image turns stay on the user's active provider when that provider has a
+ * servable vision model: 'enflite' reuses the platform vision model,
+ * 'claude'/'openai' resolve their own vision-capable seeds (ensured on
+ * read). When the group has no servable vision model — provider not
+ * configured, or the model revoked — the turn falls back to the Enflite
+ * vision model rather than failing: the chat route tells the user which
+ * model is reading their images, never silently.
+ */
+export async function resolveVisionModelForGroup(options: {
+  tenantId: string;
+  userId: string;
+  roleId: string;
+  group: ProviderGroup;
+  requestId?: string;
+}): Promise<ApprovedModel> {
+  const { tenantId, userId, roleId, group, requestId } = options;
+  if (group === 'enflite') {
+    return resolveVisionModel({ tenantId, userId, roleId, requestId });
+  }
+  const ensured = await findServableVisionModelForGroup(group);
+  if (ensured) {
+    try {
+      return await getApprovedModelForUser(ensured._id, tenantId, userId, roleId);
+    } catch (error) {
+      // Only the expected "not approved for this caller" failure falls
+      // through to the Enflite vision model. Anything else (outage,
+      // programming bug) must surface.
+      if (!(error instanceof AppError) || error.code !== 'MODEL_NOT_APPROVED') throw error;
+    }
+  }
+  return resolveVisionModel({ tenantId, userId, roleId, requestId });
+}
 
 /**
  * Resolve the model serving a turn for a capability.

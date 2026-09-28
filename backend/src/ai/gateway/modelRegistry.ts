@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { getDb, tenantOp } from '../../db/mongo.js';
 import { Errors } from '../../errors.js';
 import { Classification } from '../../authz/permissions.js';
+import { config } from '../../config.js';
+import type { ProviderGroup } from '../providers/providerDisplay.js';
 
 /**
  * Canonical tenant default model. Default-open serving: this model is
@@ -49,6 +51,8 @@ export interface ApprovedModel {
   /** Fail over to this model (once, no chains) when the primary fails. */
   fallbackModelId: string | null;
   createdAt: Date;
+  /** Cloud provider's preferred chat model (used by the UI provider switcher). */
+  isProviderDefault?: boolean;
 }
 
 /**
@@ -63,6 +67,10 @@ type ModelDoc = Omit<ApprovedModel, 'id'> & {
   isDefault?: boolean;
   /** Marks the platform vision default model (self-healed by ensure). */
   isVisionDefault?: boolean;
+  /** Marks a cloud provider's default chat model (preferred on provider switch). */
+  isProviderDefault?: boolean;
+  /** Marks platform cloud seeds ('claude' | 'openai'): default-open, unlike admin-registered models. */
+  seededProvider?: string;
 };
 
 /** MongoDB document shape for the `model_access` collection. */
@@ -82,7 +90,7 @@ interface ModelAccessDoc {
 }
 
 function toApprovedModel(doc: ModelDoc): ApprovedModel {
-  const { _id, enabled: _enabled, isDefault: _isDefault, isVisionDefault: _isVisionDefault, ...rest } = doc;
+  const { _id, enabled: _enabled, isDefault: _isDefault, isVisionDefault: _isVisionDefault, seededProvider: _seededProvider, ...rest } = doc;
   return { id: _id, ...rest };
 }
 
@@ -337,6 +345,25 @@ export async function listApprovedModelsForUser(tenantId: string, userId: string
       );
       if (!revocation) modelIds.push(visionDoc._id);
     }
+    // Default-open cloud providers: every servable platform cloud seed is
+    // implicitly available — no grant row needed — unless explicitly
+    // revoked. (Admin-registered cloud models stay fail-closed; only
+    // `seededProvider` docs get this treatment.) Ensure-on-read so /models
+    // lists Claude/OpenAI models as soon as their API key is configured.
+    await ensureCloudProviderModels();
+    const cloudSeeds = await db
+      .collection<ModelDoc>('models')
+      .find({ seededProvider: { $in: ['claude', 'openai'] }, status: { $in: [...SERVABLE_STATUSES] }, enabled: true })
+      .sort({ name: 1 })
+      .toArray();
+    for (const doc of cloudSeeds) {
+      if (modelIds.includes(doc._id)) continue;
+      const revocation = await db.collection<ModelAccessDoc>('model_access').findOne(
+        { tenantId, modelId: doc._id, $or: principalOr(userId, roleId), revoked: true },
+        { projection: { _id: 1 } }
+      );
+      if (!revocation) modelIds.push(doc._id);
+    }
     if (modelIds.length === 0) return [];
     const docs = await db
       .collection<ModelDoc>('models')
@@ -366,10 +393,211 @@ export async function getApprovedModelForUser(modelId: string, tenantId: string,
     if (isDefaultModelDoc(doc)) return toApprovedModel(doc);
     // Default-open vision: the platform vision default needs no grant row.
     if (isVisionDefaultModelDoc(doc)) return toApprovedModel(doc);
+    // Default-open cloud seeds: platform Claude/OpenAI seeds need no grant
+    // row (the admin opted in with an API key). Admin-registered models of
+    // any provider still need an explicit grant.
+    if (typeof doc.seededProvider === 'string' && doc.seededProvider.length > 0) {
+      return toApprovedModel(doc);
+    }
     // Non-default models stay fail-closed: an explicit grant is required.
     if (!access) {
       throw Errors.forbidden('MODEL_NOT_APPROVED', 'Model is not approved for this user and tenant');
     }
     return toApprovedModel(doc);
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Cloud providers (Claude / OpenAI) — ensure-on-read seeds.
+ *
+ * A cloud provider is "configured" only when its API key is set and it
+ * has not been explicitly disabled: without a key the UI shows the
+ * provider disabled with a hint, never as a dead button. Seeding is
+ * idempotent and follows the same create-on-read pattern as the tenant
+ * default and vision seeds above.
+ *
+ * Security posture for cloud seeds (see ADR-018):
+ * - Seeds are inserted only when the admin opted in with an API key.
+ * - The model's endpoint origin must be on AI_PROVIDER_ALLOWED_ORIGINS;
+ *   a locked-down config never gains cloud models from this path.
+ * - Cloud models are default-open within the tenant (same as the vision
+ *   default) via the `isProviderDefault` flag, so switching providers is
+ *   one tap — but their allowed classifications cap at INTERNAL: an admin
+ *   must explicitly widen a cloud model to serve CONFIDENTIAL or above.
+ * - Explicit revocation via model_access works exactly as for defaults.
+ * ------------------------------------------------------------------ */
+
+/** True when the Claude provider may serve traffic: key set, not disabled. */
+export function isClaudeConfigured(): boolean {
+  return config.CLAUDE_ENABLED && config.ANTHROPIC_API_KEY.trim().length > 0;
+}
+
+/** True when the OpenAI provider may serve traffic: key set, not disabled. */
+export function isOpenAIConfigured(): boolean {
+  return config.OPENAI_ENABLED && config.OPENAI_API_KEY.trim().length > 0;
+}
+
+interface CloudSeedSpec {
+  name: string;
+  provider: 'claude' | 'openai';
+  endpoint: string;
+  modelIdentifier: string;
+  contextWindow: number;
+  vision: boolean;
+  license: string;
+  source: string;
+}
+
+const CLOUD_SEEDS: CloudSeedSpec[] = [
+  {
+    name: 'Claude Sonnet 4',
+    provider: 'claude',
+    endpoint: 'https://api.anthropic.com',
+    modelIdentifier: 'claude-sonnet-4-20250514',
+    contextWindow: 200000,
+    vision: true,
+    license: 'proprietary',
+    source: 'anthropic',
+  },
+  {
+    name: 'GPT-4o',
+    provider: 'openai',
+    endpoint: 'https://api.openai.com/v1',
+    modelIdentifier: 'gpt-4o',
+    contextWindow: 128000,
+    vision: true,
+    license: 'proprietary',
+    source: 'openai',
+  },
+  {
+    name: 'GPT-4o Mini',
+    provider: 'openai',
+    endpoint: 'https://api.openai.com/v1',
+    modelIdentifier: 'gpt-4o-mini',
+    contextWindow: 128000,
+    vision: false,
+    license: 'proprietary',
+    source: 'openai',
+  },
+];
+
+function cloudSeedDoc(spec: CloudSeedSpec, now: Date, providerDefault: boolean): Record<string, unknown> {
+  return {
+    _id: randomUUID(),
+    name: spec.name,
+    version: '1.0',
+    provider: spec.provider,
+    endpoint: spec.endpoint,
+    modelIdentifier: spec.modelIdentifier,
+    status: 'ACTIVE',
+    license: spec.license,
+    source: spec.source,
+    sha256: null,
+    contextWindow: spec.contextWindow,
+    capabilities: spec.vision
+      ? { chat: true, streaming: true, vision: true }
+      : { chat: true, streaming: true },
+    classification: 'INTERNAL',
+    // Cloud models cap at INTERNAL by default: prompts leave the
+    // operator's infrastructure, so CONFIDENTIAL and above require an
+    // explicit admin widening of allowedClassifications.
+    allowedClassifications: ['PUBLIC', 'INTERNAL'],
+    deployment: {},
+    requestTimeoutMs: null,
+    maxTokens: null,
+    temperature: null,
+    fallbackModelId: null,
+    isDefault: false,
+    isVisionDefault: false,
+    isProviderDefault: providerDefault,
+    // Marks platform cloud seeds: they are default-open within the tenant
+    // (unlike admin-registered models, which stay fail-closed). Stripped
+    // from the ApprovedModel view in toApprovedModel.
+    seededProvider: spec.provider,
+    enabled: true,
+    lifecycleUpdatedAt: now,
+    approvedBy: null,
+    approvedAt: null,
+    lastEvalRunId: null,
+    createdAt: now,
+  };
+}
+
+/** True when this model doc is a provider's default-open chat model. */
+export function isProviderDefaultModelDoc(doc: { name: string; isProviderDefault?: boolean }): boolean {
+  return doc.isProviderDefault === true;
+}
+
+function endpointOriginAllowlisted(endpoint: string): boolean {
+  let origin: string;
+  try {
+    origin = new URL(endpoint).origin;
+  } catch {
+    return false;
+  }
+  const allowed = new Set(config.AI_PROVIDER_ALLOWED_ORIGINS.split(',').map((v) => v.trim()));
+  return allowed.has(origin);
+}
+
+/**
+ * Ensure servable seed models exist for every configured cloud provider.
+ * Idempotent: inserts only when the provider has no servable model doc at
+ * all. The first chat (non-vision) seed per provider is flagged
+ * `isProviderDefault` for default-open serving.
+ */
+export async function ensureCloudProviderModels(): Promise<void> {
+  const db = (await getDb()) as unknown as MinimalDb;
+  const now = new Date();
+  const groups: Array<{ provider: 'claude' | 'openai'; configured: boolean }> = [
+    { provider: 'claude', configured: isClaudeConfigured() },
+    { provider: 'openai', configured: isOpenAIConfigured() },
+  ];
+  for (const { provider, configured } of groups) {
+    if (!configured) continue;
+    const existing = await db.collection<ModelDoc>('models').findOne({
+      provider,
+      status: { $in: [...SERVABLE_STATUSES] },
+      enabled: true,
+    });
+    if (existing) continue;
+    const seeds = CLOUD_SEEDS.filter((s) => s.provider === provider);
+    // Respect a locked-down egress config: never seed a cloud model whose
+    // endpoint the gateway would refuse to call.
+    if (!seeds.every((s) => endpointOriginAllowlisted(s.endpoint))) continue;
+    let providerDefaultAssigned = false;
+    // Exactly one provider default: prefer the first text-only seed, else
+    // the first seed (a vision-capable default also serves image turns
+    // without a model switch).
+    const defaultSpec = seeds.find((s) => !s.vision) ?? seeds[0];
+    for (const spec of seeds) {
+      try {
+        await db.collection<ModelDoc>('models').insertOne(cloudSeedDoc(spec, now, spec === defaultSpec));
+      } catch (err) {
+        if ((err as { code?: number })?.code !== 11000) throw err;
+      }
+    }
+  }
+}
+
+/**
+ * The servable vision model for a provider group. 'enflite' reuses the
+ * platform vision model; cloud groups resolve their own vision-capable
+ * seed (ensured on read). Returns null when the group has no servable
+ * vision model — the caller falls back to the Enflite vision model.
+ */
+export async function findServableVisionModelForGroup(group: ProviderGroup): Promise<ModelDoc | null> {
+  const db = (await getDb()) as unknown as MinimalDb;
+  if (group === 'enflite') {
+    return findServableVisionModel(db);
+  }
+  const provider = group; // 'claude' | 'openai'
+  const configured = provider === 'claude' ? isClaudeConfigured() : isOpenAIConfigured();
+  if (!configured) return null;
+  await ensureCloudProviderModels();
+  return db.collection<ModelDoc>('models').findOne({
+    provider,
+    'capabilities.vision': true,
+    status: { $in: [...SERVABLE_STATUSES] },
+    enabled: true,
   });
 }

@@ -54,11 +54,17 @@ function toConversation(value: any): Conversation {
 function toModel(value: any): Model {
   const allowed = (value.allowedClassifications ?? []) as DataClassification[];
   const max = [...allowed].sort((a, b) => CLASSIFICATION_ORDER.indexOf(b) - CLASSIFICATION_ORDER.indexOf(a))[0] ?? 'PUBLIC';
+  const capabilities = (value.capabilities ?? {}) as Record<string, unknown>;
   return {
     id: value.id,
-    name: value.name,
+    name: value.displayName ?? value.name,
     provider: value.provider,
-    description: `${value.provider} · ${value.version}`,
+    providerGroup: value.providerGroup ?? 'enflite',
+    providerLabel: value.providerLabel ?? value.provider,
+    isProviderDefault: value.isProviderDefault ?? false,
+    chat: capabilities.chat !== false,
+    vision: capabilities.vision === true,
+    description: `${value.providerLabel ?? value.provider} · ${value.version}`,
     classificationMax: max,
     contextLength: value.contextWindow,
     enabled: value.enabled ?? true,
