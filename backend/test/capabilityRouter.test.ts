@@ -12,8 +12,9 @@ const { recordAudit, recordAuditInTx } = vi.hoisted(() => ({
   recordAuditInTx: vi.fn(),
 }));
 const { resolveServingModel } = vi.hoisted(() => ({ resolveServingModel: vi.fn() }));
-const { listApprovedModelsForUser } = vi.hoisted(() => ({
+const { listApprovedModelsForUser, ensureTenantDefaultModel } = vi.hoisted(() => ({
   listApprovedModelsForUser: vi.fn(),
+  ensureTenantDefaultModel: vi.fn(),
 }));
 
 vi.mock('../src/db/mongo.js', () => ({
@@ -26,13 +27,15 @@ vi.mock('../src/ai/gateway/modelLifecycle.js', () => ({
   resolveServingModel,
   KNOWN_CAPABILITIES: ['chat', 'syteline', 'coding', 'embeddings'],
 }));
-vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser }));
+vi.mock('../src/ai/gateway/modelRegistry.js', () => ({ listApprovedModelsForUser, ensureTenantDefaultModel }));
 
 import {
   getRoutingPolicy,
   listRoutingPolicies,
   normalizeCapability,
   resolveCapabilityModel,
+  resolveChatDefault,
+  resolveDefaultOpenModel,
   setRoutingPolicy,
 } from '../src/ai/gateway/capabilityRouter.js';
 
@@ -270,5 +273,73 @@ describe('resolveCapabilityModel', () => {
       resolveCapabilityModel({ tenantId: 't1', userId: 'u1', roleId: 'r1', capability: 'nope' })
     ).rejects.toThrowError(expect.objectContaining({ code: 'INVALID_CAPABILITY' }));
     expect(getMockCollection('model_routing_policies').findOne).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveChatDefault (default-open)', () => {
+  it('prefers the admin chat serving default', async () => {
+    resolveServingModel.mockResolvedValue(chatModel);
+    listApprovedModelsForUser.mockResolvedValue([{ id: 'other', name: 'Other' }]);
+    ensureTenantDefaultModel.mockResolvedValue(chatModel);
+    await expect(resolveChatDefault('t1', 'u1', 'r1')).resolves.toBe(chatModel);
+    expect(ensureTenantDefaultModel).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the first approved model when the serving default is stale (MODEL_NOT_APPROVED)', async () => {
+    resolveServingModel.mockRejectedValue(Errors.forbidden('MODEL_NOT_APPROVED', 'stale'));
+    const approved = { id: 'approved-1', name: 'Approved' };
+    listApprovedModelsForUser.mockResolvedValue([approved]);
+    await expect(resolveChatDefault('t1', 'u1', 'r1')).resolves.toBe(approved);
+    expect(ensureTenantDefaultModel).not.toHaveBeenCalled();
+  });
+
+  it('propagates unexpected errors from the serving default lookup', async () => {
+    resolveServingModel.mockRejectedValue(new Error('db is on fire'));
+    await expect(resolveChatDefault('t1', 'u1', 'r1')).rejects.toThrow('db is on fire');
+  });
+
+  it('ensures the tenant default when no serving default and no approvals exist', async () => {
+    resolveServingModel.mockResolvedValue(null);
+    listApprovedModelsForUser.mockResolvedValue([]);
+    const ensured = { id: 'default-1', name: 'Default' };
+    ensureTenantDefaultModel.mockResolvedValue(ensured);
+    await expect(resolveChatDefault('t1', 'u1', 'r1')).resolves.toBe(ensured);
+  });
+
+  it('returns null when even the ensured default is unavailable', async () => {
+    resolveServingModel.mockResolvedValue(null);
+    listApprovedModelsForUser.mockResolvedValue([]);
+    ensureTenantDefaultModel.mockResolvedValue(null);
+    await expect(resolveChatDefault('t1', 'u1', 'r1')).resolves.toBeNull();
+  });
+});
+
+describe('resolveDefaultOpenModel', () => {
+  it('returns the resolved model without throwing', async () => {
+    resolveServingModel.mockResolvedValue(chatModel);
+    listApprovedModelsForUser.mockResolvedValue([]);
+    ensureTenantDefaultModel.mockResolvedValue(chatModel);
+    await expect(resolveDefaultOpenModel('t1', 'u1', 'r1')).resolves.toBe(chatModel);
+  });
+
+  it('throws MODEL_UNAVAILABLE (not a permissions denial) when no servable model exists', async () => {
+    resolveServingModel.mockResolvedValue(null);
+    listApprovedModelsForUser.mockResolvedValue([]);
+    ensureTenantDefaultModel.mockResolvedValue(null);
+    const err = await resolveDefaultOpenModel('t1', 'u1', 'r1').catch((e) => e);
+    expect(err.code).toBe('MODEL_UNAVAILABLE');
+    expect(err.statusCode).not.toBe(403);
+  });
+
+  it('resolves chat capability even for a user with zero grant rows', async () => {
+    resolveServingModel.mockResolvedValue(null);
+    listApprovedModelsForUser.mockResolvedValue([]);
+    const ensured = { id: 'default-1', name: 'Default' };
+    ensureTenantDefaultModel.mockResolvedValue(ensured);
+    const resolution = await resolveCapabilityModel({
+      tenantId: 't1', userId: 'u1', roleId: 'r1', capability: 'chat', requestId: 'req-1',
+    });
+    expect(resolution.model).toBe(ensured);
+    expect(resolution.fallbackUsed).toBe(false);
   });
 });

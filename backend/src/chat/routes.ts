@@ -9,7 +9,7 @@ import { CLASSIFICATIONS, Classification, AuthContext } from '../authz/permissio
 import { assertClassificationAllowed } from '../authz/classification.js';
 import { applyContextWindow, GatewayTelemetry, ProviderToolDefinition, streamMetadata } from '../ai/gateway/gateway.js';
 import { getApprovedModelForUser } from '../ai/gateway/modelRegistry.js';
-import { resolveCapabilityModel, type CapabilityResolution } from '../ai/gateway/capabilityRouter.js';
+import { resolveCapabilityModel, resolveDefaultOpenModel, type CapabilityResolution } from '../ai/gateway/capabilityRouter.js';
 import { retrieveAuthorizedContext } from '../rag/retrieval.js';
 import { recordAudit } from '../audit/audit.js';
 import { toolRegistry, zodToJsonSchema } from '../tools/gateway.js';
@@ -357,7 +357,13 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       });
       modelId = capabilityResolution.model.id;
     }
-    if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
+    if (!modelId) {
+      // Default-open: the tenant default model is always available, so a
+      // user with no explicit model grants still gets a model. The old
+      // NO_APPROVED_MODEL dead end is gone; resolution throws
+      // MODEL_UNAVAILABLE only when no servable model exists at all.
+      modelId = (await resolveDefaultOpenModel(auth.tenantId, auth.userId, auth.roleId)).id;
+    }
     // Const copy: TypeScript narrowing of the `let` does not survive into the
     // tenantOp closures below, so bind the resolved id once here.
     const resolvedModelId: string = modelId;

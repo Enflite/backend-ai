@@ -227,11 +227,13 @@ The purge runs in-process every `RETENTION_PURGE_INTERVAL_HOURS` (see
 
 | Method | Path | Auth / Permission | Purpose |
 |---|---|---|---|
-| GET | `/models` | auth + `model:use` | Models approved and permitted for the caller (already filtered by tenant, role, clearance) |
+| GET | `/models` | auth + `model:use` | Models approved and permitted for the caller (already filtered by tenant, role, clearance); always includes the tenant default model (default-open serving) |
 | GET | `/admin/models` | auth + `model:manage` | Full registry listing (admin fields) |
 | POST | `/admin/models` | auth + `model:manage` | Register a model (enters lifecycle at `REGISTERED`) |
 | PATCH | `/admin/models/:id` | auth + `model:manage` | Edit registry metadata |
 | POST | `/admin/models/:id/transition` | auth + `model:manage` | Lifecycle transition `{ status }`; `PENDING_APPROVAL → APPROVED` requires the eval promotion gate to pass and records `approved_by`/`approved_at` |
+| POST | `/admin/models/:id/access` | auth + `model:manage` | Set explicit per-principal access `{ userId \| roleId, revoked }` (audited; `revoked: true` is the only way to deny the default model) |
+| DELETE | `/admin/models/:id/access` | auth + `model:manage` | Clear the explicit access row for a principal (audited; returns to the default-open default) |
 | GET | `/admin/serving-defaults` | auth + `model:manage` | Per-tenant+capability serving defaults |
 | PUT | `/admin/serving-defaults/:capability` | auth + `model:manage` | Set the serving model for a capability `{ modelId }` |
 | GET | `/admin/routing-policies` | auth + `model:manage` | List routing policies (strategy + fallback) per capability |

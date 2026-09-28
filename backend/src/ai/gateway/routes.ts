@@ -25,6 +25,11 @@ import {
 
 const modelIdSchema = z.object({ id: z.string().uuid() });
 
+/** `models` collection projection used by the access endpoints (ADR-014: UUID-string `_id`). */
+interface ModelIdDoc {
+  _id: string;
+}
+
 // Enabled-toggle is the only mutable field on the PATCH route: endpoint,
 // provider, model_identifier, and tuning knobs change inference behavior,
 // so they are immutable after registration — register a new model version
@@ -192,6 +197,90 @@ export async function modelAdminRoutes(fastify: FastifyInstance): Promise<void> 
       return row;
     });
     return reply.send({ model: toAdminModel(updated) });
+  });
+
+  // Explicit per-principal model access. Serving is default-open: the
+  // tenant default model needs no grant row, so "revoking" it (or any
+  // model) for a user/role is an explicit write, not a row deletion.
+  // - POST sets the access: revoked:false = explicit grant (required for
+  //   non-default models), revoked:true = explicit denial (wins over the
+  //   default model's implicit grant).
+  // - DELETE clears the row, returning the principal to the default-open
+  //   default. Both commit with their audit event in one transaction.
+  const modelAccessSetSchema = z.object({
+    userId: z.string().uuid().optional(),
+    roleId: z.string().uuid().optional(),
+    revoked: z.boolean(),
+  }).strict().refine(
+    (body) => (body.userId ? 1 : 0) + (body.roleId ? 1 : 0) === 1,
+    { message: 'Exactly one of userId or roleId is required' }
+  );
+  const modelAccessClearSchema = z.object({
+    userId: z.string().uuid().optional(),
+    roleId: z.string().uuid().optional(),
+  }).strict().refine(
+    (body) => (body.userId ? 1 : 0) + (body.roleId ? 1 : 0) === 1,
+    { message: 'Exactly one of userId or roleId is required' }
+  );
+
+  fastify.post('/admin/models/:id/access', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const parsedId = modelIdSchema.safeParse(req.params);
+    const parsedBody = modelAccessSetSchema.safeParse(req.body);
+    if (!parsedId.success || !parsedBody.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid model access request');
+    const { userId, roleId, revoked } = parsedBody.data;
+    // The absent principal field must be omitted (not null) for the sparse
+    // unique index on (tenantId, modelId, roleId, userId) to work.
+    const principal = userId ? { userId } : { roleId: roleId! };
+    await withTx(async (session, db) => {
+      const model = await db.collection<ModelIdDoc>('models').findOne({ _id: parsedId.data.id }, { session, projection: { _id: 1 } });
+      if (!model) throw Errors.notFound('MODEL_NOT_FOUND', 'Model not found');
+      const now = new Date();
+      await db.collection('model_access').updateOne(
+        { tenantId: auth.tenantId, modelId: parsedId.data.id, ...principal },
+        {
+          $set: { revoked, updatedAt: now },
+          $setOnInsert: {
+            _id: crypto.randomUUID(),
+            tenantId: auth.tenantId,
+            modelId: parsedId.data.id,
+            ...principal,
+            createdAt: now,
+          },
+        },
+        { session, upsert: true }
+      );
+      await recordAuditInTx(session, { tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip,
+        action: 'MODEL_ACCESS_SET', resource: 'model', resourceId: parsedId.data.id,
+        metadata: { ...principal, revoked } });
+    });
+    return reply.send({ modelId: parsedId.data.id, ...principal, revoked });
+  });
+
+  fastify.delete('/admin/models/:id/access', {
+    preHandler: [requireAuth, requirePermission('model:manage')],
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const parsedId = modelIdSchema.safeParse(req.params);
+    const parsedBody = modelAccessClearSchema.safeParse(req.body);
+    if (!parsedId.success || !parsedBody.success) throw Errors.badRequest('INVALID_REQUEST', 'Invalid model access request');
+    const { userId, roleId } = parsedBody.data;
+    const principal = userId ? { userId } : { roleId: roleId! };
+    const result = await withTx(async (session, db) => {
+      const model = await db.collection<ModelIdDoc>('models').findOne({ _id: parsedId.data.id }, { session, projection: { _id: 1 } });
+      if (!model) throw Errors.notFound('MODEL_NOT_FOUND', 'Model not found');
+      const deleted = await db.collection('model_access').deleteOne(
+        { tenantId: auth.tenantId, modelId: parsedId.data.id, ...principal },
+        { session }
+      );
+      await recordAuditInTx(session, { tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip,
+        action: 'MODEL_ACCESS_CLEARED', resource: 'model', resourceId: parsedId.data.id,
+        metadata: { ...principal } });
+      return deleted;
+    });
+    return reply.send({ modelId: parsedId.data.id, ...principal, cleared: result.deletedCount === 1 });
   });
 
   // Register a new model. It enters the lifecycle at REGISTERED: it serves

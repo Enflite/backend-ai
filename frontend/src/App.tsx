@@ -367,7 +367,7 @@ export default function App() {
         {error && <div role="alert" className="px-4 py-2 text-sm flex justify-between" style={{ color: '#fca5a5', background: '#7f1d1d55' }}><span>{error}</span><button onClick={() => setError('')}>Dismiss</button></div>}
         <div className="flex-1 overflow-y-auto"><div className="max-w-3xl mx-auto px-4">
           {!activeConversation || !activeConversation.messages.length ? (
-            selectedModel ? <EmptyState model={selectedModel} onPrompt={(prompt) => void sendMessage(prompt, [])} /> : <p className="text-center py-20 text-sm">No approved model is available for your account.</p>
+            selectedModel ? <EmptyState model={selectedModel} onPrompt={(prompt) => void sendMessage(prompt, [])} /> : <p className="text-center py-20 text-sm">Still loading the AI — if this persists, refresh and try again.</p>
           ) : <>{activeConversation.messages.map((message, index) => {
             const isLast = index === activeConversation.messages.length - 1;
             return <MessageBubble key={message.id} message={message}

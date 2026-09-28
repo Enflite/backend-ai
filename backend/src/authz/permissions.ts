@@ -64,6 +64,9 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'model:use',
     'tool:use',
     'syteline:read',
+    // Default-open: every user can drive the SyteLine form-project tools.
+    // Form-project PRs still require human review (never auto-merged).
+    'syteline:forms',
     'repo:read',
     'memory:read',
     'memory:write',
