@@ -232,7 +232,7 @@ The purge runs in-process every `RETENTION_PURGE_INTERVAL_HOURS` (see
 | Method | Path | Auth / Permission | Purpose |
 |---|---|---|---|
 | GET | `/models` | auth + `model:use` | Models approved and permitted for the caller (already filtered by tenant, role, clearance); always includes the tenant default model (default-open serving) |
-| GET | `/providers` | auth + `model:use` | Provider availability for the one-tap switcher: `enflite` (always), `claude`, `openai` (only when configured) with `label`, `tagline`, `dataResidency`, `residencyNote`, `configured`, `enabled`, and an admin `hint` for unconfigured providers — never includes keys or key material |
+| GET | `/providers` | auth + `model:use` | Provider availability for the one-tap switcher: always lists all three groups — `enflite` (always configured), `claude`, `openai` — with `label`, `tagline`, `dataResidency`, `residencyNote`, `configured`, `enabled`, and an admin `hint` for unconfigured providers (marked `configured: false`, never hidden) — never includes keys or key material |
 | GET | `/admin/models` | auth + `model:manage` | Full registry listing (admin fields) |
 | POST | `/admin/models` | auth + `model:manage` | Register a model (enters lifecycle at `REGISTERED`) |
 | PATCH | `/admin/models/:id` | auth + `model:manage` | Edit registry metadata |

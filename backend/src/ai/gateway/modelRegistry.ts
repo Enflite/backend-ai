@@ -410,6 +410,9 @@ export async function listApprovedModelsForUser(tenantId: string, userId: string
         .toArray();
       for (const doc of cloudSeeds) {
         if (modelIds.includes(doc._id)) continue;
+        // Per-provider gate: with only OpenAI configured, stale Claude
+        // seeds already in the DB must not be listed or served.
+        if (!cloudProviderServingAllowed(doc.provider)) continue;
         const revocation = await db.collection<ModelAccessDoc>('model_access').findOne(
           { tenantId, modelId: doc._id, $or: principalOr(userId, roleId), revoked: true },
           { projection: { _id: 1 } }
@@ -423,7 +426,9 @@ export async function listApprovedModelsForUser(tenantId: string, userId: string
       .find({ _id: { $in: modelIds }, status: { $in: ['ACTIVE', 'CANARY'] }, enabled: true })
       .sort({ name: 1 })
       .toArray();
-    return docs.map(toApprovedModel);
+    // A disabled cloud provider's models are never listed — seeded or
+    // admin-registered.
+    return docs.filter((d) => cloudProviderServingAllowed(d.provider)).map(toApprovedModel);
   });
 }
 
@@ -432,6 +437,11 @@ export async function getApprovedModelForUser(modelId: string, tenantId: string,
     const doc = await db.collection<ModelDoc>('models').findOne({ _id: modelId });
     if (!doc || (doc.status !== 'ACTIVE' && doc.status !== 'CANARY') || !doc.enabled) {
       throw Errors.forbidden('MODEL_NOT_APPROVED', 'Model is not approved for this user and tenant');
+    }
+    // A provider the admin disabled (or whose key was removed) serves
+    // nothing — even when a client passes the model id directly.
+    if (!cloudProviderServingAllowed(doc.provider)) {
+      throw Errors.forbidden('MODEL_NOT_APPROVED', 'Model provider is not enabled');
     }
     const access = await db.collection<ModelAccessDoc>('model_access').findOne({
       tenantId,
@@ -490,10 +500,22 @@ export function isOpenAIConfigured(): boolean {
   return config.OPENAI_ENABLED && config.OPENAI_API_KEY.trim().length > 0;
 }
 
+/**
+ * A cloud-provider model doc may only serve traffic while its provider is
+ * configured (API key set, not admin-disabled). Enforced at approval time —
+ * the UI hides disabled providers, but the API must reject them too, even
+ * when a client passes a cloud model id directly (e.g. a stored
+ * conversation model). Non-cloud providers are unaffected.
+ */
+export function cloudProviderServingAllowed(provider: string): boolean {
+  if (provider === 'claude') return isClaudeConfigured();
+  if (provider === 'openai') return isOpenAIConfigured();
+  return true;
+}
+
 interface CloudSeedSpec {
   name: string;
   provider: 'claude' | 'openai';
-  endpoint: string;
   modelIdentifier: string;
   contextWindow: number;
   vision: boolean;
@@ -501,11 +523,20 @@ interface CloudSeedSpec {
   source: string;
 }
 
+/**
+ * Cloud seed endpoints come from the configured base URLs (still
+ * allowlisted before insert): an operator pointing ANTHROPIC_BASE_URL at a
+ * proxy gets seeds that actually use it, instead of seeds that silently
+ * ignore their own config.
+ */
+function cloudSeedEndpoint(provider: 'claude' | 'openai'): string {
+  return provider === 'claude' ? config.ANTHROPIC_BASE_URL : config.OPENAI_BASE_URL;
+}
+
 const CLOUD_SEEDS: CloudSeedSpec[] = [
   {
     name: 'Claude Sonnet 4',
     provider: 'claude',
-    endpoint: 'https://api.anthropic.com',
     modelIdentifier: 'claude-sonnet-4-20250514',
     contextWindow: 200000,
     vision: true,
@@ -515,7 +546,6 @@ const CLOUD_SEEDS: CloudSeedSpec[] = [
   {
     name: 'GPT-4o',
     provider: 'openai',
-    endpoint: 'https://api.openai.com/v1',
     modelIdentifier: 'gpt-4o',
     contextWindow: 128000,
     vision: true,
@@ -525,7 +555,6 @@ const CLOUD_SEEDS: CloudSeedSpec[] = [
   {
     name: 'GPT-4o Mini',
     provider: 'openai',
-    endpoint: 'https://api.openai.com/v1',
     modelIdentifier: 'gpt-4o-mini',
     contextWindow: 128000,
     vision: false,
@@ -540,7 +569,7 @@ function cloudSeedDoc(spec: CloudSeedSpec, now: Date, providerDefault: boolean):
     name: spec.name,
     version: '1.0',
     provider: spec.provider,
-    endpoint: spec.endpoint,
+    endpoint: cloudSeedEndpoint(spec.provider),
     modelIdentifier: spec.modelIdentifier,
     status: 'ACTIVE',
     license: spec.license,
@@ -615,8 +644,9 @@ export async function ensureCloudProviderModels(): Promise<void> {
     if (existing) continue;
     const seeds = CLOUD_SEEDS.filter((s) => s.provider === provider);
     // Respect a locked-down egress config: never seed a cloud model whose
-    // endpoint the gateway would refuse to call.
-    if (!seeds.every((s) => endpointOriginAllowlisted(s.endpoint))) continue;
+    // endpoint the gateway would refuse to call. The endpoint is the
+    // configured base URL, not a hardcoded value.
+    if (!endpointOriginAllowlisted(cloudSeedEndpoint(provider))) continue;
     // Exactly one provider default: prefer the first vision-capable seed —
     // the flagship model, which also serves image turns without a switch —
     // else the first seed.
