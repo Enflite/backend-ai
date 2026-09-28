@@ -23,6 +23,8 @@ export const Errors = {
     new AppError(409, code, message, details),
   tooMany: (code = 'RATE_LIMITED', message = 'Too many requests', details?: unknown) =>
     new AppError(429, code, message, details),
+  badGateway: (code = 'BAD_GATEWAY', message = 'Bad gateway', details?: unknown) =>
+    new AppError(502, code, message, details),
   internal: (message = 'Internal server error', details?: unknown, code = 'INTERNAL') =>
     new AppError(500, code, message, details),
 };

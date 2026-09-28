@@ -52,16 +52,55 @@ Wait until `backend`, `mongodb`, `minio`, and `ollama` all show running (or heal
 
 **Step 3 — Pull the AI models**
 
-Ollama needs the actual model weights before it can chat. This downloads about 10 GB on first run, so grab coffee:
+Ollama needs the actual model weights before the app can do anything useful.
+All three models below are required for full functionality — skip one and the
+matching feature fails. This downloads about 10 GB on first run, so grab coffee:
+
+| Model | Purpose | If missing |
+|---|---|---|
+| `llama3.1:8b` | Chat — every conversation turn runs on this | Chat fails ("Can't reach the AI service") |
+| `qwen2.5vl:7b` | Vision — chat turns with attached screenshots or images are routed to it automatically (see `docs/adr/017-vision-model.md`) | Image attachments fail |
+| `nomic-embed-text` | Embeddings — document search and RAG over uploaded files | Document search returns nothing |
 
 ```powershell
 docker compose exec ollama ollama pull llama3.1:8b
-docker compose exec ollama ollama pull nomic-embed-text
 docker compose exec ollama ollama pull qwen2.5vl:7b
+docker compose exec ollama ollama pull nomic-embed-text
 ```
 
-The third model is the vision model: chat turns with attached screenshots or
-images are routed to it automatically (see `docs/adr/017-vision-model.md`).
+Verify all three landed and the server answers:
+
+```powershell
+docker compose exec ollama ollama list
+curl http://localhost:11434/api/tags
+```
+
+The second command should return JSON listing your models. If it doesn't,
+Ollama isn't reachable — check `docker compose ps` and the gotchas below.
+
+**Running Ollama natively on Windows instead of Docker?** Install it from
+https://ollama.com/download — after install it starts automatically and sits
+in the system tray. If it's not running, start it with `ollama serve` in a
+terminal (leave that window open). Then either run the setup script, which
+installs Ollama if missing, pulls all three models, and verifies:
+
+```powershell
+backend/scripts/setup-ollama-windows.ps1   # elevated PowerShell for the install step
+```
+
+or do it manually:
+
+```powershell
+ollama pull llama3.1:8b
+ollama pull qwen2.5vl:7b
+ollama pull nomic-embed-text
+ollama list
+curl http://localhost:11434/api/tags
+```
+
+Then point the backend at it with `OLLAMA_BASE_URL=http://localhost:11434`
+(in Docker Compose the backend uses `http://ollama:11434`, the Compose
+service name — that's only correct inside Compose).
 
 **Step 4 — Create your user**
 
@@ -92,7 +131,7 @@ Quick API health check: http://localhost:8080/health should respond.
 
 - **Docker Desktop isn't running** — `docker compose` fails with a cryptic error. Start Docker Desktop first and wait for it to finish booting.
 - **A port is already in use** — the stack needs 8080 (API), 8443 (frontend), 27017 (MongoDB), 9000/9001 (storage), 11434 (Ollama). The frontend refuses to start on any other port, so free up 8443 rather than working around it.
-- **Chat fails but login works** — you skipped Step 3. Run the `ollama pull` commands; chat needs `llama3.1:8b` present, and image attachments need `qwen2.5vl:7b`.
+- **Chat fails but login works** — you skipped Step 3 or one of the three models is missing. The app now says "Can't reach the AI service (Ollama) at …" and names the URL it's trying. Run `docker compose exec ollama ollama list` and compare against the Step 3 table; also check the backend logs for `OLLAMA_UNREACHABLE`.
 - **Backend dependency changes need a rebuild** — editing backend code hot-reloads fine (it's volume-mounted), but if you change `backend/package.json` dependencies, run `docker compose up -d --build` again.
 - **Migrations** — the Docker backend runs `npm run migrate` automatically on boot. If you ever run the backend natively (`cd backend; npm ci; npm run migrate; npm run dev`), run `npm run migrate` yourself after pulling new code.
 - **Slow first chat response** — normal. The model loads into memory on first use; subsequent messages are faster.

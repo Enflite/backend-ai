@@ -15,6 +15,16 @@ const CLASSIFICATION_COLOR: Record<string, string> = {
 const CLASSIFICATION_ORDER: DataClassification[] = ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'PROPRIETARY', 'CUI', 'UNKNOWN'];
 const randomId = () => crypto.randomUUID();
 
+function describeChatError(cause: unknown): string {
+  // The browser reports a dead socket or an unreachable backend as a bare
+  // TypeError ("Failed to fetch") — translate it into the actionable
+  // message instead of showing the cryptic raw text.
+  if (cause instanceof Error && cause.message === 'Failed to fetch') {
+    return "Can't reach the AI service — check the backend is running and Ollama is up with all three models (README Step 3).";
+  }
+  return cause instanceof Error ? cause.message : 'Chat request failed';
+}
+
 /** Mirror the backend's omitted-classification default: a PUBLIC-only caller
  *  defaults to PUBLIC (INTERNAL would exceed their clearance). */
 function defaultClassification(clearance: DataClassification): DataClassification {
@@ -273,7 +283,7 @@ export default function App() {
         } : item));
       });
     } catch (cause) {
-      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Chat request failed');
+      if (!controller.signal.aborted) setError(describeChatError(cause));
       setConversations((current) => current.map((item) => item.id === conversation.id ? {
         ...item,
         messages: item.messages.map((msg) => msg.id === assistantId ? { ...msg, isStreaming: false } : msg),
