@@ -85,3 +85,108 @@ pre::-webkit-scrollbar {
 svg * {
   transition: none;
 }
+
+/* ------------------------------------------------------------------ */
+/* Interactive Enflite AI avatar — pure CSS state animations           */
+/* ------------------------------------------------------------------ */
+
+.enflite-avatar {
+  position: relative;
+  border-radius: 9999px;
+  padding: 0;
+  background: #fff;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.enflite-avatar:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.enflite-avatar__img {
+  width: 100%;
+  height: 100%;
+  border-radius: 9999px;
+  object-fit: cover;
+  display: block;
+  background: #fff;
+  border: 2px solid var(--accent);
+}
+
+.enflite-avatar__ring {
+  position: absolute;
+  inset: -3px;
+  border-radius: 9999px;
+  pointer-events: none;
+}
+
+/* idle: gentle float, at rest */
+.enflite-avatar--idle {
+  animation: avatar-float 5s ease-in-out infinite;
+}
+@keyframes avatar-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+
+/* thinking: soft breathing glow while waiting for the first token */
+.enflite-avatar--thinking .enflite-avatar__ring {
+  border: 2px solid var(--accent);
+  animation: avatar-breathe 2.4s ease-in-out infinite;
+}
+@keyframes avatar-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.3; }
+  50% { transform: scale(1.1); opacity: 0.65; }
+}
+
+/* streaming: lively pulse while tokens arrive ("talking") */
+.enflite-avatar--streaming .enflite-avatar__img {
+  animation: avatar-talk 1.1s ease-in-out infinite;
+}
+@keyframes avatar-talk {
+  0%, 100% { transform: scale(1); }
+  30% { transform: scale(1.06); }
+  60% { transform: scale(0.98); }
+}
+
+/* tools: orbiting arc while tool calls run ("busy") */
+.enflite-avatar--tools .enflite-avatar__ring {
+  background: conic-gradient(from 0deg, var(--accent), transparent 32%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  animation: avatar-spin 1.1s linear infinite;
+}
+@keyframes avatar-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Activity panel slide-in */
+.activity-panel-enter {
+  animation: activity-slide-in 0.22s ease-out;
+}
+@keyframes activity-slide-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+/* Temporary highlight when jumping to a message from the activity feed */
+.message-flash {
+  animation: message-flash 1.6s ease-out;
+}
+@keyframes message-flash {
+  0%, 40% { background: #cf0c2c14; border-radius: 12px; }
+  100% { background: transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .enflite-avatar--idle,
+  .enflite-avatar--thinking .enflite-avatar__ring,
+  .enflite-avatar--streaming .enflite-avatar__img,
+  .enflite-avatar--tools .enflite-avatar__ring,
+  .activity-panel-enter,
+  .message-flash {
+    animation: none;
+  }
+}

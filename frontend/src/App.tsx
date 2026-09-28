@@ -6,6 +6,17 @@ import ModelSelector from './components/ModelSelector';
 import ProviderSwitcher from './components/ProviderSwitcher';
 import EmptyState from './components/EmptyState';
 import DocumentsPanel from './components/DocumentsPanel';
+import AssistantAvatar from './components/AssistantAvatar';
+import ActivityPanel from './components/ActivityPanel';
+import {
+  attachmentActivityEntries,
+  deriveStatusText,
+  friendlyNoticeText,
+  nextAssistantState,
+  noticeToActivityEntries,
+  sourcesActivityEntry,
+} from './activity';
+import type { ActivityEntry, AssistantState, NoticeInput } from './activity';
 import { api, ApiError, consumeOidcFragment, mapCitation, setAccessToken, streamChat } from './api';
 import type { AuthUser, Conversation, DataClassification, DocumentRecord, Message, Model, ProviderGroup, ProviderInfo, UploadedFile } from './types';
 
@@ -99,6 +110,14 @@ export default function App() {
   const [showDocuments, setShowDocuments] = useState(false);
   /** Classification applied to newly created conversations (picker in header). */
   const [draftClassification, setDraftClassification] = useState<DataClassification>('INTERNAL');
+  /** Interactive avatar + activity feed (frontend-only; no backend changes). */
+  const [assistantState, setAssistantState] = useState<AssistantState>('idle');
+  const [lastNotice, setLastNotice] = useState<NoticeInput | null>(null);
+  const [activityLog, setActivityLog] = useState<Record<string, ActivityEntry[]>>({});
+  const [showActivity, setShowActivity] = useState(false);
+  const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
+  /** Document count for the in-flight turn — feeds the "Reading your documents…" status. */
+  const turnDocCountRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) ?? null;
@@ -279,11 +298,30 @@ export default function App() {
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Unable to rename conversation'); }
   }
 
+  /** Append entries to the active conversation's activity feed (newest appended last). */
+  function appendActivity(conversationId: string, entries: ActivityEntry[]) {
+    if (!entries.length) return;
+    setActivityLog((current) => ({ ...current, [conversationId]: [...(current[conversationId] ?? []), ...entries] }));
+  }
+
+  /** Jump from an activity entry to its message: scroll + temporary highlight. */
+  function jumpToMessage(messageId: string) {
+    setShowActivity(false);
+    requestAnimationFrame(() => {
+      document.getElementById(`msg-${messageId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setFlashMessageId(messageId);
+      window.setTimeout(() => setFlashMessageId((current) => (current === messageId ? null : current)), 1700);
+    });
+  }
+
   /** Stream one assistant turn for an already-placed assistant bubble. */
   async function runAssistantTurn(conversation: Conversation, content: string, files: UploadedFile[], assistantId: string) {
     if (!selectedModel) return;
     setIsStreaming(true);
     setError('');
+    setAssistantState('thinking');
+    setLastNotice(null);
+    turnDocCountRef.current = selectedDocumentIds.length;
     const controller = new AbortController();
     abortRef.current = controller;
     try {
@@ -304,6 +342,7 @@ export default function App() {
       }
       const documentIds = [...new Set([...selectedDocumentIds, ...uploadedReadyIds])];
       if (uploadedReadyIds.length) setSelectedDocumentIds(documentIds);
+      turnDocCountRef.current = documentIds.length;
       await streamChat({
         conversationId: conversation.id,
         content,
@@ -322,16 +361,40 @@ export default function App() {
               error: message,
             } : msg),
           } : item));
+          setLastNotice(null);
           throw new Error(message);
         }
         if (streamEvent.event === 'meta') return;
+        // Interactive avatar + activity feed: fold the event into the avatar
+        // state, record feed entries for notices, and keep the last notice
+        // for the live status line.
+        setAssistantState((current) => nextAssistantState(
+          current,
+          streamEvent.event,
+          streamEvent.event === 'notice' ? streamEvent.data.code : undefined,
+        ));
+        if (streamEvent.event === 'notice') {
+          const noticeInput: NoticeInput = {
+            code: streamEvent.data.code,
+            message: streamEvent.data.message,
+            tools: streamEvent.data.tools,
+          };
+          setLastNotice(noticeInput);
+          appendActivity(conversation.id, noticeToActivityEntries(noticeInput, assistantId));
+        }
+        if (streamEvent.event === 'done') {
+          const citations = streamEvent.data.citations ?? [];
+          const entry = sourcesActivityEntry(citations.length, assistantId);
+          if (entry) appendActivity(conversation.id, [entry]);
+          setLastNotice(null);
+        }
         setConversations((current) => current.map((item) => item.id === conversation.id ? {
           ...item,
           messages: item.messages.map((msg) => msg.id === assistantId ? {
             ...msg,
             content: (streamEvent.event === 'delta' || streamEvent.event === 'message') ? msg.content + streamEvent.data.content : msg.content,
             isStreaming: streamEvent.event !== 'done',
-            notice: streamEvent.event === 'notice' ? streamEvent.data.message : (streamEvent.event === 'done' ? undefined : msg.notice),
+            notice: streamEvent.event === 'notice' ? friendlyNoticeText(streamEvent.data) : (streamEvent.event === 'done' ? undefined : msg.notice),
             citations: streamEvent.event === 'done' ? (streamEvent.data.citations ?? msg.citations) : msg.citations,
             usage: streamEvent.event === 'done' ? (streamEvent.data.usage ?? msg.usage) : msg.usage,
             model: streamEvent.event === 'done' && streamEvent.data.fallback ? `${msg.model} → ${streamEvent.data.fallback.name}` : msg.model,
@@ -346,6 +409,8 @@ export default function App() {
       } : item));
     } finally {
       setIsStreaming(false);
+      setAssistantState('idle');
+      setLastNotice(null);
       abortRef.current = null;
     }
   }
@@ -368,6 +433,10 @@ export default function App() {
       messages: [...item.messages, userMessage, assistantMessage],
       updatedAt: new Date(),
     } : item));
+    appendActivity(conversation.id, attachmentActivityEntries(
+      sendableFiles.map((item) => ({ name: item.name, type: item.type })),
+      assistantId,
+    ));
     await runAssistantTurn(conversation, effectiveContent, sendableFiles, assistantId);
   }
 
@@ -412,7 +481,22 @@ export default function App() {
         collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((value) => !value)} identity={{ name: user.displayName, role: user.roleName }} />
       <div className="flex flex-col flex-1 min-w-0">
         <header className="flex items-center justify-between px-4 py-2.5 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            {/* Interactive assistant identity: avatar with live status underneath. */}
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <AssistantAvatar state={assistantState} onClick={() => setShowActivity(true)} />
+              <div className="leading-tight hidden sm:block">
+                <div className="text-sm font-semibold" style={{ color: 'var(--foreground)' }}>Enflite AI</div>
+                <div
+                  className="text-xs truncate max-w-[160px]"
+                  style={{ color: 'var(--muted-foreground)' }}
+                  role="status"
+                  aria-live="polite"
+                >
+                  {deriveStatusText(assistantState, lastNotice, turnDocCountRef.current)}
+                </div>
+              </div>
+            </div>
             {activeConversation && <><h1 className="text-sm font-medium truncate max-w-xs">{activeConversation.title}</h1><ClassificationBadge level={activeConversation.classification} /></>}
           </div>
           <div className="flex items-center gap-3">
@@ -450,7 +534,7 @@ export default function App() {
             selectedModel ? <EmptyState model={selectedModel} onPrompt={(prompt) => void sendMessage(prompt, [])} /> : <p className="text-center py-20 text-sm">Still loading the AI — if this persists, refresh and try again.</p>
           ) : <>{activeConversation.messages.map((message, index) => {
             const isLast = index === activeConversation.messages.length - 1;
-            return <MessageBubble key={message.id} message={message}
+            return <MessageBubble key={message.id} id={`msg-${message.id}`} flash={flashMessageId === message.id} message={message}
               onCopy={(text) => { void navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
               onRegenerate={message.role === 'assistant' && isLast ? () => void regenerateLastResponse() : undefined} />;
           })}<div ref={messagesEndRef} className="h-6" /></>}
@@ -468,6 +552,14 @@ export default function App() {
         />
       )}
       {showDocuments && <DocumentsPanel user={user} documents={documents} selectedIds={selectedDocumentIds} onSelectedIds={setSelectedDocumentIds} onChanged={async () => setDocuments(await api.documents())} onClose={() => setShowDocuments(false)} />}
+      {showActivity && (
+        <ActivityPanel
+          open={showActivity}
+          onClose={() => setShowActivity(false)}
+          entries={[...(activeConversation ? activityLog[activeConversation.id] ?? [] : [])].reverse()}
+          onJump={jumpToMessage}
+        />
+      )}
       {copied && <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-lg text-xs z-50" style={{ background: 'var(--secondary)' }}>Copied to clipboard</div>}
     </div>
   );

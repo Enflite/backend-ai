@@ -182,6 +182,8 @@ export interface StreamDeltaData {
 export interface StreamNoticeData {
   code?: string;
   message: string;
+  /** Raw tool names for TOOL_PLAN / TOOL_CALLS — mapped to friendly labels by the UI. */
+  tools?: string[];
 }
 
 export interface StreamDoneData {
@@ -259,7 +261,13 @@ function parseStreamEvent(eventName: string, raw: unknown): StreamEvent | null {
     case 'notice':
       return {
         event: 'notice',
-        data: { code: asOptionalString(record.code), message: asString(record.message, 'Notice') },
+        data: {
+          code: asOptionalString(record.code),
+          message: asString(record.message, 'Notice'),
+          tools: Array.isArray(record.tools)
+            ? record.tools.filter((tool): tool is string => typeof tool === 'string')
+            : undefined,
+        },
       };
     case 'done': {
       const fallback = asRecord(record.fallback);
