@@ -775,12 +775,14 @@ describe('form tool registration and authorization', () => {
     ).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_PARAMETERS' }));
   });
 
-  it('grants syteline:forms to Admin, AI Admin, and Developer roles', async () => {
+  it('grants syteline:forms to Admin, AI Admin, Developer, and User roles (default-open)', async () => {
     const { ROLE_PERMISSIONS } = await import('../src/authz/permissions.js');
     expect(ROLE_PERMISSIONS['AI Admin']).toContain('syteline:forms');
     expect(ROLE_PERMISSIONS['Developer']).toContain('syteline:forms');
     expect(ROLE_PERMISSIONS['Admin']).toContain('syteline:forms');
-    expect(ROLE_PERMISSIONS['User']).not.toContain('syteline:forms');
+    // Default-open: every user can drive the SyteLine form-project tools.
+    // Form-project PRs still require human review (never auto-merged).
+    expect(ROLE_PERMISSIONS['User']).toContain('syteline:forms');
   });
 });
 

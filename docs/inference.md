@@ -243,7 +243,18 @@ REGISTERED → DOWNLOADING → VALIDATING → EVALUATING → PENDING_APPROVAL
   resolution consults the serving default first and re-verifies servability,
   tenant grant, and classification on every resolution — a stale default
   (model deprecated, grant revoked) fails closed, falling back to the
-  legacy first-approved model.
+  first-approved model, then to the ensured tenant default.
+- **Default-open serving.** The tenant default model
+  (`meta-llama/Meta-Llama-3.1-8B-Instruct`, flagged `isDefault` by migration
+  029) is implicitly available to every user in every tenant — no
+  `model_access` grant row required — and is the last-resort resolution leg,
+  so chat can never dead-end on `NO_APPROVED_MODEL` in normal operation.
+  Explicit per-principal revocation (`revoked: true` on the access row, via
+  `POST /admin/models/:id/access`) is the only way to deny it; deleting a
+  row no longer revokes. Non-default models stay fail-closed: they require
+  an explicit grant. The default is ensured on read
+  (`ensureTenantDefaultModel`) and self-heals on fresh/wiped databases, but
+  is never resurrected when an admin deliberately disabled it.
 - **Capability routing (Phase 6).** Each turn resolves a capability slot
   (`chat | syteline | coding | embeddings`) to its serving default via
   `backend/src/ai/gateway/capabilityRouter.ts`. Per-tenant routing policies

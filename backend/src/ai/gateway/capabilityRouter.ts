@@ -32,13 +32,16 @@
  * model it returns went through getApprovedModelForUser (approval status,
  * enabled flag, tenant grant, classification policy) inside
  * resolveServingModel. The router only decides WHICH authorized model
- * serves, never WHETHER an unauthorized one may.
+ * serves, never WHETHER an unauthorized one may. Serving is default-open:
+ * the tenant default model (see modelRegistry.ensureTenantDefaultModel) is
+ * implicitly available to every user in the tenant, so a user with no
+ * explicit grants still resolves to the default instead of failing closed.
  */
 import { Errors, AppError } from '../../errors.js';
 import { tenantOp, withTenantTx } from '../../db/mongo.js';
 import { recordAudit, recordAuditInTx } from '../../audit/audit.js';
 import { KNOWN_CAPABILITIES, resolveServingModel } from './modelLifecycle.js';
-import { getApprovedModelForUser, listApprovedModelsForUser, type ApprovedModel } from './modelRegistry.js';
+import { getApprovedModelForUser, listApprovedModelsForUser, ensureTenantDefaultModel, type ApprovedModel } from './modelRegistry.js';
 
 export type Capability = (typeof KNOWN_CAPABILITIES)[number];
 export type RoutingStrategy = 'quality' | 'latency' | 'cost';
@@ -192,17 +195,52 @@ export interface CapabilityResolution {
 /**
  * Resolve the chat default exactly the way /chat did before capability
  * routing existed: the admin's chat serving default, else the legacy
- * first-approved model. Shared so the router and the route cannot drift.
+ * first-approved model, else the ensured tenant default. Shared so the
+ * router and the route cannot drift.
+ *
+ * Default-open: a stale or ungranted admin serving default falls through
+ * to the next legs instead of failing the turn (only unexpected errors —
+ * database outage, programming bug — propagate). The ensured tenant
+ * default makes a null return possible only when no servable model exists
+ * at all (e.g. an admin disabled the default).
  */
 export async function resolveChatDefault(
   tenantId: string,
   userId: string,
   roleId: string
 ): Promise<ApprovedModel | null> {
+  try {
+    const serving = await resolveServingModel(tenantId, userId, roleId, 'chat');
+    if (serving) return serving;
+  } catch (error) {
+    if (!(error instanceof AppError) || error.code !== 'MODEL_NOT_APPROVED') throw error;
+  }
   return (
-    (await resolveServingModel(tenantId, userId, roleId, 'chat')) ??
     (await listApprovedModelsForUser(tenantId, userId, roleId))[0] ??
-    null
+    (await ensureTenantDefaultModel())
+  );
+}
+
+/**
+ * Default-open model resolution for routes. Every tenant always resolves
+ * to at least the tenant default model, so the old NO_APPROVED_MODEL dead
+ * end is unreachable in normal operation.
+ *
+ * Throws MODEL_UNAVAILABLE (an operational error, never a permissions
+ * denial) only when no servable model exists at all — e.g. an admin
+ * disabled the default model.
+ */
+export async function resolveDefaultOpenModel(
+  tenantId: string,
+  userId: string,
+  roleId: string
+): Promise<ApprovedModel> {
+  const model = await resolveChatDefault(tenantId, userId, roleId);
+  if (model) return model;
+  throw Errors.internal(
+    'No servable AI model is available for this tenant. An administrator may have disabled the default model.',
+    undefined,
+    'MODEL_UNAVAILABLE'
   );
 }
 
@@ -240,8 +278,9 @@ export async function resolveCapabilityModel(options: {
   const policy = await getRoutingPolicy(tenantId, requested);
 
   if (requested === 'chat') {
-    const model = await resolveChatDefault(tenantId, userId, roleId);
-    if (!model) throw noModelAvailable(requested);
+    // Default-open: resolveDefaultOpenModel throws MODEL_UNAVAILABLE (never
+    // a permissions denial) only when no servable model exists at all.
+    const model = await resolveDefaultOpenModel(tenantId, userId, roleId);
     return { requested, resolved: 'chat', model, fallbackUsed: false, strategy: policy.strategy };
   }
 
@@ -250,8 +289,7 @@ export async function resolveCapabilityModel(options: {
     // ingestion resolve through resolveEmbeddingProvider (see
     // docs/inference.md §3). A chat turn asking for 'embeddings' gets the
     // chat default, audited, rather than a confusing failure.
-    const model = await resolveChatDefault(tenantId, userId, roleId);
-    if (!model) throw noModelAvailable(requested);
+    const model = await resolveDefaultOpenModel(tenantId, userId, roleId);
     await recordAudit({
       tenantId,
       userId,
@@ -306,8 +344,7 @@ export async function resolveCapabilityModel(options: {
     throw noModelAvailable(requested);
   }
 
-  const fallback = await resolveChatDefault(tenantId, userId, roleId);
-  if (!fallback) throw noModelAvailable(requested);
+  const fallback = await resolveDefaultOpenModel(tenantId, userId, roleId);
   await recordAudit({
     tenantId,
     userId,

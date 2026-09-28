@@ -8,8 +8,8 @@ import { requirePermission } from '../authz/middleware.js';
 import { CLASSIFICATIONS } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
 import { recordAudit } from '../audit/audit.js';
-import { getApprovedModelForUser, listApprovedModelsForUser } from '../ai/gateway/modelRegistry.js';
-import { resolveServingModel } from '../ai/gateway/modelLifecycle.js';
+import { getApprovedModelForUser } from '../ai/gateway/modelRegistry.js';
+import { resolveDefaultOpenModel } from '../ai/gateway/capabilityRouter.js';
 
 const idSchema = z.object({ id: z.string().uuid() });
 const createSchema = z.object({
@@ -107,13 +107,12 @@ export async function conversationRoutes(fastify: FastifyInstance): Promise<void
     // PUBLIC, not INTERNAL (which they are not cleared for).
     const classification = body.data.classification ?? (auth.clearance === 'PUBLIC' ? 'PUBLIC' : 'INTERNAL');
     assertClassificationAllowed(auth.clearance, classification);
-    // Admin-configured serving default first (re-verified servable and
-    // authorized on every resolution); legacy first-approved fallback.
+    // Default-open: the admin's chat serving default, else the first
+    // approved model, else the ensured tenant default — so a user with no
+    // explicit model grants still gets a model. resolveDefaultOpenModel
+    // throws MODEL_UNAVAILABLE only when no servable model exists at all.
     const modelId =
-      body.data.modelId ??
-      (await resolveServingModel(auth.tenantId, auth.userId, auth.roleId, 'chat'))?.id ??
-      (await listApprovedModelsForUser(auth.tenantId, auth.userId, auth.roleId))[0]?.id;
-    if (!modelId) throw Errors.forbidden('NO_APPROVED_MODEL', 'No approved model is available');
+      body.data.modelId ?? (await resolveDefaultOpenModel(auth.tenantId, auth.userId, auth.roleId)).id;
     const model = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
     const now = new Date();
     const doc: ConversationDoc = {
