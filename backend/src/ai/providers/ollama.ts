@@ -73,6 +73,30 @@ function toOllamaTools(tools: ProviderToolDefinition[] | undefined) {
   }));
 }
 
+/**
+ * Network-level fetch failures (connection refused, DNS failure, server not
+ * listening) surface from undici as TypeError — never as an HTTP status.
+ * Convert them into a distinct, actionable AppError instead of letting a
+ * bare "fetch failed" (or a dead SSE socket → browser "Failed to fetch")
+ * reach the user. Deliberate aborts (user stop, request timeout) are NOT
+ * connection failures: they propagate untouched so cancellation keeps its
+ * own semantics.
+ */
+async function fetchOllama(url: string, init: RequestInit, endpoint: string): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    if (error instanceof TypeError && !init.signal?.aborted) {
+      throw Errors.badGateway(
+        'OLLAMA_UNREACHABLE',
+        `Can't reach the AI service (Ollama) at ${endpoint} — is Ollama running and are the models pulled?`,
+        { endpoint }
+      );
+    }
+    throw error;
+  }
+}
+
 export class OllamaProvider implements ModelProvider {
   readonly kind = 'ollama';
   private readonly embedding: EmbeddingProvider;
@@ -91,14 +115,14 @@ export class OllamaProvider implements ModelProvider {
         if (texts.length === 0) return [];
         const options = normalizeEmbedArg(arg);
         const timeout = options.timeoutMs ?? defaultTimeoutMs;
-        const response = await fetch(`${endpoint.replace(/\/+$/, '')}/api/embeddings`, {
+        const response = await fetchOllama(`${endpoint.replace(/\/+$/, '')}/api/embeddings`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ model: embeddingModel, input: texts }),
           signal: options.signal
             ? AbortSignal.any([options.signal, AbortSignal.timeout(timeout)])
             : AbortSignal.timeout(timeout),
-        });
+        }, endpoint);
         if (!response.ok) {
           await response.text().catch(() => '');
           throw Errors.internal('Ollama embeddings upstream error', { status: response.status }, 'OLLAMA_UPSTREAM_ERROR');
@@ -152,14 +176,14 @@ export class OllamaProvider implements ModelProvider {
     if (Object.keys(options).length > 0) body.options = options;
 
     const timeout = timeoutMs ?? this.config.defaultTimeoutMs;
-    const response = await fetch(url, {
+    const response = await fetchOllama(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: signal
         ? AbortSignal.any([signal, AbortSignal.timeout(timeout)])
         : AbortSignal.timeout(timeout),
-    });
+    }, base);
 
     if (!response.ok) {
       await response.text().catch(() => '');

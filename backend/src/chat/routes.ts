@@ -616,12 +616,29 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       // Fastify would attempt to serialize the handler's return value after the
       // raw writes, corrupting the stream.
       reply.hijack();
-      reply.raw.writeHead(200, {
+      // Hijacked replies bypass @fastify/cors, so the CORS headers a
+      // cross-origin browser client needs on this stream must be written by
+      // hand — with exactly the same allowlist semantics as the plugin:
+      // reflect the request Origin only when it is on the configured
+      // allowlist, never `*` (credentials are in play). Without these the
+      // browser blocks the stream and fetch rejects with "Failed to fetch",
+      // even though the turn completed 200 server-side.
+      const requestOrigin = req.headers.origin;
+      const allowedOrigins = config.CORS_ORIGIN.split(',').map((origin) => origin.trim());
+      const sseHeaders: Record<string, string> = {
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-store, no-transform',
         Connection: 'keep-alive',
         'x-request-id': req.requestId,
-      });
+      };
+      if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
+        sseHeaders['Access-Control-Allow-Origin'] = requestOrigin;
+        sseHeaders['Access-Control-Allow-Credentials'] = 'true';
+        // Mirror the plugin's exposedHeaders so the client can read the ids.
+        sseHeaders['Access-Control-Expose-Headers'] = 'x-request-id, x-trace-id';
+        sseHeaders.Vary = 'Origin';
+      }
+      reply.raw.writeHead(200, sseHeaders);
       const abortController = new AbortController();
       // Set when the socket closes before we finished the response: the client
       // went away mid-stream, so the partial turn must persist as interrupted —
@@ -739,6 +756,12 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           return doneDelivered;
         },
         error: async (code, message) => {
+          // Distinct, greppable operator signal: an unreachable Ollama is the
+          // #1 new-engineer failure mode (README Step 3). The message names
+          // the configured base URL.
+          if (code === 'OLLAMA_UNREACHABLE') {
+            req.log.error({ code, message, conversationId }, 'Ollama unreachable during chat turn');
+          }
           await send('error', { code, message, requestId: req.requestId });
         },
       };

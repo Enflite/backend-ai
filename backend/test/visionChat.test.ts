@@ -155,7 +155,12 @@ describe('image file validation', () => {
     const mz = Uint8Array.from([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00]);
     expectThrowCode(() => detectMimeType('setup.exe', mz), 'UNSUPPORTED_FILE_TYPE');
     expectThrowCode(() => detectMimeType('payload.bin', mz), 'UNSUPPORTED_FILE_TYPE');
-    expectThrowCode(() => detectMimeType('run.sh', new TextEncoder().encode('#!/bin/sh\necho hi')), 'UNSUPPORTED_FILE_TYPE');
+    expectThrowCode(() => detectMimeType('driver.sys', mz), 'UNSUPPORTED_FILE_TYPE');
+  });
+
+  it('accepts shell scripts as inert text (never executed)', () => {
+    expect(detectMimeType('run.sh', new TextEncoder().encode('#!/bin/sh\necho hi'))).toBe('text/plain');
+    expect(detectMimeType('deploy.ps1', new TextEncoder().encode('Write-Host "hi"'))).toBe('text/plain');
   });
 
   it('classifies image MIME types and extensions', () => {

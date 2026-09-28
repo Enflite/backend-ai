@@ -179,7 +179,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
               ref={fileInputRef}
               type="file"
               multiple
-              accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.html,.png,.jpg,.jpeg,.gif,.webp"
+              accept=".pdf,.docx,.xlsx,.pptx,.csv,.txt,.md,.html,.png,.jpg,.jpeg,.gif,.webp,.ts,.tsx,.js,.jsx,.mjs,.cjs,.py,.java,.cs,.cpp,.c,.h,.hpp,.go,.rs,.rb,.php,.swift,.kt,.scala,.sql,.json,.jsonl,.yaml,.yml,.toml,.xml,.css,.scss,.log,.sh,.bash,.ps1,.bat,.cmd,.pl,.lua,.dart,.r,.vue,.svelte"
               className="hidden"
               onChange={handleFileChange}
             />
