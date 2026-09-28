@@ -1,0 +1,104 @@
+# Enflite AI — private AI platform
+
+Enflite's private, self-hosted AI chat platform — think ChatGPT, but running entirely on our own infrastructure. It talks to models we control (Ollama by default), keeps every tenant's data isolated, and plugs into SyteLine and internal documents.
+
+This guide takes you from a fresh Windows machine to a running app in the browser. PowerShell is the primary path; macOS/Linux notes are included where commands differ.
+
+## 1. What to install first
+
+Work top to bottom. Check each one off before moving on.
+
+- [ ] **Git** — https://git-scm.com/download/win (macOS/Linux: https://git-scm.com/downloads)
+- [ ] **Node.js 22 LTS** — https://nodejs.org/en/download (the repo requires Node ≥ 20.12; 22 matches the repo's pinned toolchain)
+- [ ] **Docker Desktop** — https://www.docker.com/products/docker-desktop/ (start it after installing; on Windows it uses the WSL2 backend)
+- [ ] **pnpm** — in PowerShell: `npm install -g pnpm` (the frontend uses pnpm; the backend uses npm)
+- [ ] **Ollama** — handled automatically in Step 3 below via Docker. Prefer it natively on Windows? Run `backend/scripts/setup-ollama-windows.ps1` in an elevated PowerShell instead (manual fallback: https://ollama.com/download)
+
+Verify:
+
+```powershell
+git --version
+node --version   # v22.x
+docker --version
+pnpm --version
+```
+
+## 2. Start the app locally
+
+The blessed path runs the API and all infrastructure (MongoDB, document storage, Ollama) in Docker, and the frontend natively. You'll use two terminals: one for Docker, one for the frontend.
+
+**Step 1 — Clone the repo**
+
+```powershell
+git clone https://github.com/Enflite/backend-ai.git
+cd backend-ai
+```
+
+**Step 2 — Start the stack**
+
+```powershell
+docker compose up -d --build
+```
+
+This starts MongoDB, MinIO (document storage), Ollama (the AI model server), and the backend API. The backend installs its dependencies and runs database migrations automatically on boot. The first run takes several minutes.
+
+Check it's up:
+
+```powershell
+docker compose ps
+```
+
+Wait until `backend`, `mongodb`, `minio`, and `ollama` all show running (or healthy) before continuing.
+
+**Step 3 — Pull the AI models**
+
+Ollama needs the actual model weights before it can chat. This downloads about 5 GB on first run, so grab coffee:
+
+```powershell
+docker compose exec ollama ollama pull llama3.1:8b
+docker compose exec ollama ollama pull nomic-embed-text
+```
+
+**Step 4 — Create your user**
+
+```powershell
+docker compose exec backend npm run create-user -- --email you@enflite.com --role Admin
+```
+
+You'll be prompted for a password (typing shows nothing — that's normal). Use `--role Admin` so you can explore admin features; the default role is `User`. If you ever see "No TTY available", run the command directly in an interactive PowerShell window, not from a script.
+
+**Step 5 — Start the frontend** (new terminal)
+
+```powershell
+cd frontend
+pnpm install --frozen-lockfile
+Copy-Item .env.example .env
+pnpm dev
+```
+
+(`Copy-Item` is PowerShell's copy; macOS/Linux: `cp .env.example .env`.) The `.env` file points the app at the API on `localhost:8080` — it's already correct, no edits needed.
+
+**Step 6 — Open it and verify**
+
+Open http://localhost:8443 in your browser and log in with the email and password from Step 4. Send a chat message like "Hello" — you should get a streaming reply from the local model. That's it: the app is running.
+
+Quick API health check: http://localhost:8080/health should respond.
+
+## 3. Common gotchas
+
+- **Docker Desktop isn't running** — `docker compose` fails with a cryptic error. Start Docker Desktop first and wait for it to finish booting.
+- **A port is already in use** — the stack needs 8080 (API), 8443 (frontend), 27017 (MongoDB), 9000/9001 (storage), 11434 (Ollama). The frontend refuses to start on any other port, so free up 8443 rather than working around it.
+- **Chat fails but login works** — you skipped Step 3. Run the `ollama pull` commands; chat needs `llama3.1:8b` present.
+- **Backend dependency changes need a rebuild** — editing backend code hot-reloads fine (it's volume-mounted), but if you change `backend/package.json` dependencies, run `docker compose up -d --build` again.
+- **Migrations** — the Docker backend runs `npm run migrate` automatically on boot. If you ever run the backend natively (`cd backend; npm ci; npm run migrate; npm run dev`), run `npm run migrate` yourself after pulling new code.
+- **Slow first chat response** — normal. The model loads into memory on first use; subsequent messages are faster.
+- **Starting over** — `docker compose down -v` wipes everything including the database and downloaded models (you'll need to re-run Steps 2–4). Without `-v`, your data and models survive restarts.
+
+## 4. Where to go next
+
+- `docs/architecture.mmd` — system architecture diagram (source of truth)
+- `docs/api.md` — API endpoint reference
+- `docs/assistant-quality.md` — how the assistant should behave (the product spec)
+- `docs/development.md` — deeper dev notes (native backend, embeddings, validation commands)
+- `docs/deployment.md` — how this gets deployed beyond your laptop
+- `AGENTS.md` — repo playbook: branch/PR discipline, merge bar, honesty rules (read before your first PR)
