@@ -119,7 +119,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
                 style={{
                   background: 'var(--secondary)',
                   color: 'var(--foreground)',
-                  border: f.status === 'error' ? '1px solid #ef444480' : '1px solid transparent',
+                  border: f.status === 'error' ? '1px solid #cf0c2c80' : '1px solid transparent',
                 }}
                 title={f.error}
               >
@@ -180,7 +180,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-xs" style={{ color: text.length > 3000 ? '#ef4444' : 'var(--muted-foreground)' }}>
+            <span className="text-xs" style={{ color: text.length > 3000 ? '#cf0c2c' : 'var(--muted-foreground)' }}>
               {text.length > 0 && text.length}
             </span>
             {isStreaming ? (

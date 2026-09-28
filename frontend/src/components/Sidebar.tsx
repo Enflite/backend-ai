@@ -91,12 +91,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
         {/* Header */}
         <div className="flex items-center justify-between px-3 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded flex items-center justify-center" style={{ background: 'var(--accent)' }}>
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                <path d="M7 1L9 5H13L10 8L11 13L7 10L3 13L4 8L1 5H5L7 1Z" fill="var(--accent-foreground)" />
-              </svg>
-            </div>
-            <span className="text-sm font-semibold tracking-tight" style={{ color: 'var(--foreground)' }}>PrivateAI</span>
+            <img src="/enflite-logo.png" alt="Enflite" className="h-6 w-auto" />
           </div>
           <div className="flex items-center gap-1">
             <button onClick={onNew} className="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground" title="New conversation">
@@ -223,7 +218,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
               <div className="flex gap-2">
                 <button
                   className="flex-1 px-2 py-1 rounded text-xs font-medium"
-                  style={{ background: '#ef4444', color: '#fff' }}
+                  style={{ background: '#cf0c2c', color: '#fff' }}
                   onClick={() => { onDelete(contextMenu.id); closeContextMenu(); }}
                 >
                   Confirm
@@ -240,7 +235,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
           ) : (
             <button
               className="w-full text-left px-3 py-1.5 hover:bg-secondary flex items-center gap-2"
-              style={{ color: '#ef4444' }}
+              style={{ color: '#cf0c2c' }}
               onClick={() => setConfirmDeleteId(contextMenu.id)}
             >
               <IconTrash size={14} /> Delete
