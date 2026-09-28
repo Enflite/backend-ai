@@ -159,16 +159,21 @@ export default function MessageBubble({ message, onCopy, onRegenerate }: Message
   return (
     <div className={`flex gap-3 py-4 group ${isUser ? 'flex-row-reverse' : ''}`}>
       {/* Avatar */}
-      <div
-        className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold flex-shrink-0 self-start mt-0.5"
-        style={
-          isUser
-            ? { background: 'var(--secondary)', color: 'var(--foreground)', border: '1px solid var(--border)' }
-            : { background: 'var(--accent)', color: 'var(--accent-foreground)' }
-        }
-      >
-        {isUser ? 'U' : 'AI'}
-      </div>
+      {isUser ? (
+        <div
+          className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold flex-shrink-0 self-start mt-0.5"
+          style={{ background: 'var(--secondary)', color: 'var(--foreground)', border: '1px solid var(--border)' }}
+        >
+          U
+        </div>
+      ) : (
+        <img
+          src="/enflite-assistant.png"
+          alt="Enflite assistant"
+          className="w-8 h-8 rounded-full object-cover flex-shrink-0 self-start mt-0.5"
+          style={{ border: '2px solid var(--accent)', background: '#fff' }}
+        />
+      )}
 
       {/* Content */}
       <div className={`flex-1 min-w-0 ${isUser ? 'flex flex-col items-end' : ''}`}>

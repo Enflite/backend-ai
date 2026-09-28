@@ -20,6 +20,8 @@ import { Errors } from '../../errors.js';
 import type { ChatProvider, EmbeddingProvider } from './types.js';
 import { OpenAICompatibleProvider } from './openaiCompatible.js';
 import { OpenAICompatibleEmbeddingProvider } from './openaiEmbeddings.js';
+import { OpenAIProvider } from './openai.js';
+import { ClaudeProvider } from './claude.js';
 import { OllamaProvider } from './ollama.js';
 
 /** Minimal model fields the factory needs to pick and configure a provider. */
@@ -56,6 +58,23 @@ export function resolveChatProvider(model: ProviderModelRef): ChatProvider {
         defaultTimeoutMs,
         embeddingModel: config.OLLAMA_EMBEDDING_MODEL,
         embeddingDimensions: config.OLLAMA_EMBEDDING_DIMENSIONS,
+      });
+    case 'claude':
+      // Anthropic cloud API. The gateway authorizes the model before the
+      // factory constructs this provider; the key travels only in the
+      // x-api-key header and is never logged or surfaced.
+      return new ClaudeProvider({
+        endpoint: model.endpoint || config.ANTHROPIC_BASE_URL,
+        apiKey: config.ANTHROPIC_API_KEY,
+        defaultTimeoutMs,
+      });
+    case 'openai':
+      // OpenAI cloud API (wire-compatible with the generic provider, but
+      // a named first-class provider with its own endpoint and key).
+      return new OpenAIProvider({
+        endpoint: model.endpoint || config.OPENAI_BASE_URL,
+        apiKey: config.OPENAI_API_KEY,
+        defaultTimeoutMs,
       });
     default:
       throw Errors.forbidden('MODEL_PROVIDER_UNSUPPORTED', 'Model provider is not supported by this gateway');
@@ -104,7 +123,7 @@ export function resolveEmbeddingProvider(kind?: EmbeddingProviderKind): Embeddin
 }
 
 /** The provider kinds the platform knows how to speak to. */
-export const KNOWN_CHAT_PROVIDERS = ['vllm', 'openai-compatible', 'ollama'] as const;
+export const KNOWN_CHAT_PROVIDERS = ['vllm', 'openai-compatible', 'ollama', 'claude', 'openai'] as const;
 export type KnownChatProvider = (typeof KNOWN_CHAT_PROVIDERS)[number];
 
 export function isKnownChatProvider(value: string): value is KnownChatProvider {

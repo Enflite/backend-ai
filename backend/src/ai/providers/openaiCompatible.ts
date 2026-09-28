@@ -43,7 +43,7 @@ function toNonNegativeInt(value: unknown): number {
 }
 
 export class OpenAICompatibleProvider implements ChatProvider {
-  readonly kind = 'openai-compatible';
+  readonly kind: string = 'openai-compatible';
 
   constructor(private readonly config: OpenAICompatibleProviderConfig) {}
 

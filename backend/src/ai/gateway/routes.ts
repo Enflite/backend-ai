@@ -3,7 +3,16 @@ import { z } from 'zod';
 import { requireAuth } from '../../auth/middleware.js';
 import { requirePermission } from '../../authz/middleware.js';
 import { CLASSIFICATIONS } from '../../authz/permissions.js';
-import { listApprovedModelsForUser } from './modelRegistry.js';
+import { listApprovedModelsForUser, isClaudeConfigured, isOpenAIConfigured } from './modelRegistry.js';
+import { config } from '../../config.js';
+import {
+  PROVIDER_GROUPS,
+  PROVIDER_GROUP_INFO,
+  displayNameForModel,
+  providerGroupFor,
+  providerLabelFor,
+  type ProviderGroup,
+} from '../providers/providerDisplay.js';
 import { getDb, withTx } from '../../db/mongo.js';
 import { Errors } from '../../errors.js';
 import { recordAuditInTx } from '../../audit/audit.js';
@@ -76,14 +85,56 @@ export async function modelRoutes(fastify: FastifyInstance): Promise<void> {
       const models = approved.map((m) => ({
         id: m.id,
         name: m.name,
+        /** User-facing name — never a raw registry ID (ADR-018). */
+        displayName: displayNameForModel(m),
         version: m.version,
         contextWindow: m.contextWindow,
         capabilities: m.capabilities,
         allowedClassifications: m.allowedClassifications,
         provider: m.provider,
+        /** One of 'enflite' | 'claude' | 'openai' — drives the UI switcher. */
+        providerGroup: providerGroupFor(m.provider),
+        providerLabel: providerLabelFor(m.provider),
+        /** The provider's preferred chat model — auto-selected on switch. */
+        isProviderDefault: m.isProviderDefault ?? false,
       }));
 
       return reply.send({ models });
+    }
+  );
+
+  // Provider availability for the one-tap switcher (ADR-018). Never
+  // includes keys or key material: `configured` only reports presence.
+  // Enflite (local models) is always available; cloud providers appear
+  // disabled with an admin hint when their key is missing.
+  fastify.get(
+    '/providers',
+    {
+      preHandler: [requireAuth, requirePermission('model:use')],
+    },
+    async (req, reply) => {
+      const providers = PROVIDER_GROUPS.map((key: ProviderGroup) => {
+        const info = PROVIDER_GROUP_INFO[key];
+        if (key === 'enflite') {
+          return { ...info, configured: true, enabled: true };
+        }
+        const keyPresent =
+          key === 'claude' ? config.ANTHROPIC_API_KEY.trim().length > 0 : config.OPENAI_API_KEY.trim().length > 0;
+        const adminEnabled = key === 'claude' ? config.CLAUDE_ENABLED : config.OPENAI_ENABLED;
+        const configured = key === 'claude' ? isClaudeConfigured() : isOpenAIConfigured();
+        return {
+          ...info,
+          configured,
+          enabled: configured,
+          hint: keyPresent && !adminEnabled
+            ? `${info.label} is disabled by the server administrator`
+            : !keyPresent
+              ? `Ask your admin to set ${key === 'claude' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'}`
+              : undefined,
+        };
+      });
+
+      return reply.send({ providers });
     }
   );
 }
