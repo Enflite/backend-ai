@@ -23,21 +23,22 @@
 }
 
 :root {
-  /* Enflite brand palette (branding/enflite-style-guide.md): dark Charcoal
-     surfaces, white text, Enflite Red #CF0C2C as the single accent. */
-  --background: #1a1a1a;
-  --foreground: #ffffff;
-  --card: #252525;
-  --card-foreground: #ffffff;
+  /* Enflite brand palette (branding/enflite-style-guide.md): light sections —
+     White / Light Gray surfaces, Ink text, Body Gray secondary text,
+     Divider Gray borders, Enflite Red #CF0C2C as the single accent. */
+  --background: #ffffff;
+  --foreground: #1a1a1a;
+  --card: #ffffff;
+  --card-foreground: #1a1a1a;
   --primary: #cf0c2c;
   --primary-foreground: #ffffff;
-  --secondary: #2e2e2e;
-  --secondary-foreground: #d4d4d4;
-  --muted: #252525;
-  --muted-foreground: #a3a3a3;
+  --secondary: #f7f7f7;
+  --secondary-foreground: #1a1a1a;
+  --muted: #f7f7f7;
+  --muted-foreground: #4a4a4a;
   --accent: #cf0c2c;
   --accent-foreground: #ffffff;
-  --border: #3a3a3a;
+  --border: #e5e5e5;
   --ring: #cf0c2c;
   --radius: 6px;
 }
@@ -61,11 +62,11 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
+  background: #d4d4d4;
   border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #4a4a4a;
+  background: #a3a3a3;
 }
 
 /* Code block scrollbar */
