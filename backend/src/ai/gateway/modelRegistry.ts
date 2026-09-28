@@ -194,7 +194,12 @@ export async function listApprovedModelsForUser(tenantId: string, userId: string
     const modelIds = [...new Set(grants.map((g) => g.modelId))];
     // Default-open: the tenant default model is implicitly available to
     // every user in the tenant — no grant row needed — unless explicitly
-    // revoked for their principal.
+    // revoked for their principal. Ensure-on-read: a fresh tenant (or a
+    // wiped/never-migrated registry) gets its default model created here,
+    // so /models never comes back empty for lack of one. (The chat path
+    // ensures independently; the model list must not depend on a chat
+    // having happened first.)
+    await ensureTenantDefaultModel();
     const defaultDoc = await findServableDefaultModel(db as unknown as MinimalDb);
     if (defaultDoc && !modelIds.includes(defaultDoc._id)) {
       const revocation = await db.collection<ModelAccessDoc>('model_access').findOne(
