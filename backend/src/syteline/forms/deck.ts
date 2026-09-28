@@ -1,24 +1,43 @@
 /**
  * deck.ts — implementation-plan deck config + build.
  *
- * Generates `plan/deck.config.js` (all project content lives there; the
- * shared `plan/build_impl_deck.js` build script renders it) and runs the
- * build to produce the PPTX. Brand style: white slides, red rounded icon
- * badge, Segoe UI Light title, Calibri body, square bullets, red outlined
- * milestone circles, thin red decorative arcs, Enflite logo.
+ * Generates `plan/deck.config.js` (all project content lives there, plus the
+ * `brand` palette block) and writes the branded `plan/build_impl_deck.js`
+ * renderer (from `deckBuildScript.ts`), then runs the build to produce the
+ * PPTX. Brand style follows `branding/enflite-style-guide.md` in
+ * Enflite/Form-Project-Templates: white slides, solid Enflite Red rounded
+ * icon badge, small bold red uppercase section eyebrows above light-weight
+ * Ink headings, Segoe UI Light titles, Calibri body, thin Divider Gray
+ * rules instead of cards, transparent Enflite logo on the cover.
+ *
+ * The build script is written by `buildDeck` (overwriting the copy that
+ * ships with the project template) so every AI-generated deck uses the
+ * Enflite style with no manual steps. The logo asset itself is copied into
+ * `plan/brand/` by the scaffold.
  *
  * The build needs the project's `plan/package.json` deps (`pptxgenjs`).
  * That is installed by `buildDeck` with `npm install` unless `skipInstall`
  * is set (use when the deps are already present, e.g. in tests).
  */
 
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
+import { BRANDED_BUILD_SCRIPT } from './deckBuildScript.js';
 
 export interface DeckPhase {
   heading: string;
   bullets: string[];
+}
+
+/** One Design slide's UET table: mirrors the template's deck.config.js shape. */
+export interface DeckDesignTable {
+  sub: string;
+  label: string;
+  /** [header, width in inches] pairs; widths should add up to ~11.5. */
+  cols: Array<[string, number]>;
+  rows: string[][];
+  note?: string;
 }
 
 export interface DeckInput {
@@ -26,10 +45,11 @@ export interface DeckInput {
   title: string;
   subtitle: string;
   fileName: string;
+  /** One bullet per inner array; each string in the array is a text run of that bullet. */
   brd: string[][];
-  scope: { sub: string; flow: string[] };
-  /** One string per row, e.g. `Test | Uf_ENF_Test | UET user field | Text | Added by this project`. */
-  design: string[];
+  scope: { sub: string; flow: Array<[string, string]> };
+  /** One UET-form table per Design slide. */
+  design: DeckDesignTable[];
   develop: string[];
   formsync: string[];
   staging: string[];
@@ -50,6 +70,22 @@ function jsStringArray(rows: string[][] | string[]): string {
   return (rows as string[]).map((s) => `    ${line(s)},`).join('\n');
 }
 
+function jsDesignTable(t: DeckDesignTable): string {
+  const cols = t.cols.map(([h, w]) => `[${JSON.stringify(h)}, ${w}]`).join(', ');
+  const rows = t.rows
+    .map((r) => `      [${r.map((c) => JSON.stringify(c)).join(', ')}],`)
+    .join('\n');
+  return (
+    `    {\n` +
+    `      sub: ${JSON.stringify(t.sub)},\n` +
+    `      label: ${JSON.stringify(t.label)},\n` +
+    `      cols: [${cols}],\n` +
+    `      rows: [\n${rows}\n      ],` +
+    (t.note ? `\n      note: ${JSON.stringify(t.note)},` : '') +
+    `\n    },`
+  );
+}
+
 export function renderDeckConfig(input: DeckInput): string {
   const phases = input.phases
     .map(([h, b]) => `    [${JSON.stringify(h)}, [\n${b.map((x) => `      ${JSON.stringify(x)},`).join('\n')}\n    ]],`)
@@ -60,6 +96,16 @@ module.exports = {
   title: ${JSON.stringify(`${input.formName} — ${input.title}`)},
   subtitle: ${JSON.stringify(input.subtitle)},
   fileName: ${JSON.stringify(input.fileName)},
+  // Enflite brand palette (branding/enflite-style-guide.md): Enflite Red is
+  // exact, sampled from the logo — never substitute a brighter red.
+  brand: {
+    red: "CF0C2C",
+    ink: "1A1A1A",
+    body: "4A4A4A",
+    divider: "E5E5E5",
+    lightBg: "F7F7F7",
+    white: "FFFFFF",
+  },
   brd: [
 ${jsStringArray(input.brd)}
   ],
@@ -70,7 +116,7 @@ ${jsStringArray(input.scope.flow)}
     ],
   },
   design: [
-${jsStringArray(input.design)}
+${input.design.map((t) => jsDesignTable(t)).join('\n')}
   ],
   develop: [
 ${jsStringArray(input.develop)}
@@ -110,10 +156,26 @@ export interface BuildDeckOptions {
   timeoutMs?: number;
 }
 
-/** Write `plan/deck.config.js` and build the PPTX via `npm run build`. */
+/** Write `plan/deck.config.js` and the branded `plan/build_impl_deck.js`. */
+export function writeDeckFiles(
+  input: DeckInput,
+  projectDir: string,
+): { configPath: string; buildScriptPath: string } {
+  const planDir = join(projectDir, 'plan');
+  mkdirSync(planDir, { recursive: true });
+  const configPath = join(planDir, 'deck.config.js');
+  const buildScriptPath = join(planDir, 'build_impl_deck.js');
+  writeFileSync(configPath, renderDeckConfig(input), 'utf8');
+  // The branded renderer overwrites the template's copy so every generated
+  // deck uses the Enflite style with no manual steps.
+  writeFileSync(buildScriptPath, BRANDED_BUILD_SCRIPT, 'utf8');
+  return { configPath, buildScriptPath };
+}
+
+/** Write `plan/deck.config.js` + the branded build script, then build the PPTX via `npm run build`. */
 export function buildDeck(input: DeckInput, options: BuildDeckOptions): string {
   const planDir = join(options.projectDir, 'plan');
-  writeFileSync(join(planDir, 'deck.config.js'), renderDeckConfig(input), 'utf8');
+  writeDeckFiles(input, options.projectDir);
   const timeout = options.timeoutMs ?? 120_000;
   if (!options.skipInstall) {
     execFileSync('npm', ['install'], { cwd: planDir, timeout, stdio: 'pipe' });

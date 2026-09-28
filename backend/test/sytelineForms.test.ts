@@ -12,7 +12,9 @@
  *  5. Scaffold: new-project.sh port — substitution, branding copy,
  *     refusal rules.
  *  6. Docs: seven-phase plan structure, original-comparison verdict.
- *  7. Deck config: generated config loads and carries the project content.
+ *  7. Deck: generated config loads and carries the project content, the
+ *     exact Enflite brand palette, the branded build script (logo,
+ *     eyebrows, no cards), and an end-to-end PPTX build.
  *  8. Tool registration + authorization: the five tools need
  *     'syteline:forms'.
  *  9. STOP guard: form_add_field refuses when TRN/production originals differ.
@@ -36,6 +38,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -73,7 +76,9 @@ import {
   renderReadme,
   renderTroubleshooting,
 } from '../src/syteline/forms/projectDocs.js';
-import { renderDeckConfig } from '../src/syteline/forms/deck.js';
+import { renderDeckConfig, writeDeckFiles, type DeckInput } from '../src/syteline/forms/deck.js';
+import { BRANDED_BUILD_SCRIPT } from '../src/syteline/forms/deckBuildScript.js';
+import { execFileSync } from 'node:child_process';
 import { openPr } from '../src/syteline/forms/github.js';
 import { sytelineFormToolDefinitions } from '../src/tools/sytelineForms.js';
 import { authorizeTool, getTool } from '../src/tools/gateway.js';
@@ -587,39 +592,138 @@ describe('projectDocs', () => {
 // ---------------------------------------------------------------------------
 
 describe('deck config', () => {
+  /** Minimal valid DeckInput: flow pairs and design tables (template shapes). */
+  function deckInput(): DeckInput {
+    return {
+      formName: 'Lots',
+      title: 'Create Test Field In Purple',
+      subtitle: 'Implementation plan.',
+      fileName: 'Lots_Implementation_Plan.pptx',
+      brd: [['BRD-1', 'Add Test', 'Text field']],
+      scope: {
+        sub: 'Scope sub',
+        flow: [
+          ['Phase 0', 'Collect requirements'],
+          ['Phase A', 'UET data model'],
+        ],
+      },
+      design: [
+        {
+          sub: 'UET User Fields — one field per new value.',
+          label: 'Form: UET User Fields',
+          cols: [
+            ['User Field Name', 3.6],
+            ['Description', 7.9],
+          ],
+          rows: [['Uf_ENF_Test', 'Test field.']],
+          note: 'Confirm on the UET User Fields form.',
+        },
+      ],
+      develop: ['dev'],
+      formsync: ['fs'],
+      staging: ['st'],
+      launch: ['la'],
+      test: ['te'],
+      optimize: ['op'],
+      rollback: ['rb'],
+      phases: [
+        ['Scope', ['one']],
+        ['Design', ['two']],
+      ],
+    };
+  }
+
   it('generates a loadable deck.config.js with the project content', () => {
     const dir = join(tmpdir(), 'deck-test');
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
     const cfgPath = join(dir, 'deck.config.js');
-    writeFileSync(
-      cfgPath,
-      renderDeckConfig({
-        formName: 'Lots',
-        title: 'Create Test Field In Purple',
-        subtitle: 'Implementation plan.',
-        fileName: 'Lots_Implementation_Plan.pptx',
-        brd: [['BRD-1', 'Add Test', 'Text field']],
-        scope: { sub: 'Scope sub', flow: ['a', 'b'] },
-        design: ['row'],
-        develop: ['dev'],
-        formsync: ['fs'],
-        staging: ['st'],
-        launch: ['la'],
-        test: ['te'],
-        optimize: ['op'],
-        rollback: ['rb'],
-        phases: [['Scope', ['one']], ['Design', ['two']]],
-      }),
-      'utf8',
-    );
+    writeFileSync(cfgPath, renderDeckConfig(deckInput()), 'utf8');
     const cfg = createRequire(import.meta.url)(cfgPath);
     expect(cfg.title).toBe('Lots — Create Test Field In Purple');
     expect(cfg.fileName).toBe('Lots_Implementation_Plan.pptx');
     expect(cfg.phases).toHaveLength(2);
     expect(cfg.brd[0][0]).toBe('BRD-1');
+    // Design tables and scope flow keep the template's object/pair shapes.
+    expect(cfg.design[0].label).toBe('Form: UET User Fields');
+    expect(cfg.design[0].cols[0]).toEqual(['User Field Name', 3.6]);
+    expect(cfg.design[0].rows[0]).toEqual(['Uf_ENF_Test', 'Test field.']);
+    expect(cfg.scope.flow[0]).toEqual(['Phase 0', 'Collect requirements']);
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('carries the exact Enflite brand palette and no off-brand accents', () => {
+    const src = renderDeckConfig(deckInput());
+    expect(src).toContain('red: "CF0C2C"');
+    expect(src).toContain('ink: "1A1A1A"');
+    expect(src).toContain('body: "4A4A4A"');
+    expect(src).toContain('divider: "E5E5E5"');
+    expect(src).toContain('white: "FFFFFF"');
+    // Enflite Red is exact — never a brighter red, and no blue/green accents.
+    for (const bad of ['E31E24', 'FF0000', '0078D4', '00A651', 'FFC107', '9C27B0']) {
+      expect(src).not.toContain(bad);
+    }
+  });
+
+  it('writeDeckFiles emits the branded build script (logo, eyebrows, no cards)', () => {
+    const dir = join(tmpdir(), 'deck-files-test');
+    rmSync(dir, { recursive: true, force: true });
+    const { configPath, buildScriptPath } = writeDeckFiles(deckInput(), dir);
+    expect(existsSync(configPath)).toBe(true);
+    const script = readFileSync(buildScriptPath, 'utf8');
+    expect(script).toBe(BRANDED_BUILD_SCRIPT);
+    // Brand markers: transparent logo on the cover, exact Enflite Red,
+    // red uppercase section eyebrows.
+    expect(script).toContain('brand/enflite-logo.png');
+    expect(script).toContain('CF0C2C');
+    expect(script).toContain('MILESTONES');
+    expect(script).toContain('charSpacing');
+    // No card fills: the old scope flow cards were the only LIGHTBG-filled
+    // shapes in the renderer.
+    expect(script).not.toContain('LIGHTBG');
+    expect(script).not.toContain('E31E24');
+    // The emitted script is syntactically valid.
+    execFileSync('node', ['--check', buildScriptPath], { timeout: 15_000, stdio: 'pipe' });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('builds a branded PPTX end to end', () => {
+    // 1x1 transparent PNG stand-ins for the logo/icons (valid image bytes).
+    const png1x1 = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const dir = join(tmpdir(), 'deck-e2e-test');
+    rmSync(dir, { recursive: true, force: true });
+    const planDir = join(dir, 'plan');
+    writeDeckFiles(deckInput(), dir);
+    writeFileSync(
+      join(planDir, 'package.json'),
+      JSON.stringify({
+        name: 'deck-e2e',
+        private: true,
+        scripts: { build: 'node build_impl_deck.js' },
+        dependencies: { pptxgenjs: '3.12.0' },
+      }),
+      'utf8',
+    );
+    mkdirSync(join(planDir, 'brand'), { recursive: true });
+    writeFileSync(join(planDir, 'brand', 'enflite-logo.png'), png1x1);
+    mkdirSync(join(planDir, 'icons'), { recursive: true });
+    for (const n of [1, 2, 3, 6, 7, 8, 9, 10, 11]) {
+      writeFileSync(join(planDir, 'icons', `i${n}_white.png`), png1x1);
+    }
+    execFileSync('npm', ['install', '--no-audit', '--no-fund'], {
+      cwd: planDir,
+      timeout: 120_000,
+      stdio: 'pipe',
+    });
+    execFileSync('npm', ['run', 'build'], { cwd: planDir, timeout: 120_000, stdio: 'pipe' });
+    const pptx = join(planDir, 'Lots_Implementation_Plan.pptx');
+    expect(existsSync(pptx)).toBe(true);
+    expect(statSync(pptx).size).toBeGreaterThan(20_000);
+    rmSync(dir, { recursive: true, force: true });
+  }, 240_000);
 });
 
 // ---------------------------------------------------------------------------

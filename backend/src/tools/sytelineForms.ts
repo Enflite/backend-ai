@@ -161,8 +161,16 @@ const deckInputSchema: z.ZodType<DeckInput> = z
     subtitle: z.string().min(1),
     fileName: z.string().min(1),
     brd: z.array(z.array(z.string())),
-    scope: z.object({ sub: z.string(), flow: z.array(z.string()) }),
-    design: z.array(z.string()),
+    scope: z.object({ sub: z.string(), flow: z.array(z.tuple([z.string(), z.string()])) }),
+    design: z.array(
+      z.object({
+        sub: z.string(),
+        label: z.string(),
+        cols: z.array(z.tuple([z.string(), z.number()])),
+        rows: z.array(z.array(z.string())),
+        note: z.string().optional(),
+      }),
+    ),
     develop: z.array(z.string()),
     formsync: z.array(z.string()),
     staging: z.array(z.string()),
