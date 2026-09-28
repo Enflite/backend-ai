@@ -3,10 +3,19 @@ import Sidebar from './components/Sidebar';
 import MessageBubble from './components/Message';
 import ChatInput from './components/ChatInput';
 import ModelSelector from './components/ModelSelector';
+import ProviderSwitcher from './components/ProviderSwitcher';
 import EmptyState from './components/EmptyState';
 import DocumentsPanel from './components/DocumentsPanel';
 import { api, ApiError, consumeOidcFragment, mapCitation, setAccessToken, streamChat } from './api';
-import type { AuthUser, Conversation, DataClassification, DocumentRecord, Message, Model, UploadedFile } from './types';
+import type { AuthUser, Conversation, DataClassification, DocumentRecord, Message, Model, ProviderGroup, ProviderInfo, UploadedFile } from './types';
+
+/** localStorage key for the last-used provider group. */
+const PROVIDER_STORAGE_KEY = 'enflite-provider';
+
+function initialProvider(): ProviderGroup {
+  const stored = localStorage.getItem(PROVIDER_STORAGE_KEY);
+  return stored === 'claude' || stored === 'openai' ? stored : 'enflite';
+}
 
 const CLASSIFICATION_COLOR: Record<string, string> = {
   PUBLIC: '#15803d', INTERNAL: '#2563eb', CONFIDENTIAL: '#b45309',
@@ -79,6 +88,9 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<Model | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showModelSelector, setShowModelSelector] = useState(false);
+  /** One-tap provider switching: Enflite | Claude | OpenAI (ADR-018). */
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [activeProvider, setActiveProvider] = useState<ProviderGroup>(initialProvider);
   const [isStreaming, setIsStreaming] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState('');
@@ -91,20 +103,54 @@ export default function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) ?? null;
 
+  /** Ref mirror so loadWorkspace reads the latest provider without re-fetching. */
+  const activeProviderRef = useRef<ProviderGroup>(activeProvider);
+  useEffect(() => { activeProviderRef.current = activeProvider; }, [activeProvider]);
+
   async function loadWorkspace() {
-    const [modelResponse, conversationResponse, documentResponse] = await Promise.all([
+    const [modelResponse, conversationResponse, documentResponse, providerList] = await Promise.all([
       api.request<{ models: any[] }>('/models'),
       api.request<{ conversations: any[] }>('/conversations'),
       api.documents(),
+      api.providers().catch(() => [] as ProviderInfo[]),
     ]);
     const loadedModels = modelResponse.models.map(toModel);
     const loadedConversations = conversationResponse.conversations.map(toConversation);
     setModels(loadedModels);
+    setProviders(providerList);
+    // If the remembered provider has no usable models (e.g. its key was
+    // removed), fall back to Enflite rather than stranding the user.
     const enabledModels = loadedModels.filter((model) => model.enabled);
-    setSelectedModel((current) => enabledModels.find((model) => model.id === current?.id) ?? enabledModels[0] ?? null);
+    const groupHasModels = (group: ProviderGroup) => enabledModels.some((model) => model.providerGroup === group);
+    const effectiveProvider = groupHasModels(activeProviderRef.current) ? activeProviderRef.current : 'enflite';
+    if (effectiveProvider !== activeProviderRef.current) {
+      activeProviderRef.current = effectiveProvider;
+      setActiveProvider(effectiveProvider);
+    }
+    const groupModels = enabledModels.filter((model) => model.providerGroup === effectiveProvider);
+    const preferred = groupModels.find((model) => model.isProviderDefault) ?? groupModels[0];
+    setSelectedModel((current) =>
+      (current && current.providerGroup === effectiveProvider && groupModels.some((model) => model.id === current.id))
+        ? current
+        : preferred ?? enabledModels[0] ?? null);
     setConversations(loadedConversations);
     setDocuments(documentResponse);
     setActiveId((current) => current && loadedConversations.some((item) => item.id === current) ? current : loadedConversations[0]?.id ?? null);
+  }
+
+  /** One tap: switch provider, keep the model when it belongs to the new
+   *  group, otherwise auto-select the provider's preferred model. */
+  function switchProvider(group: ProviderGroup) {
+    if (group === activeProvider) return;
+    activeProviderRef.current = group;
+    setActiveProvider(group);
+    localStorage.setItem(PROVIDER_STORAGE_KEY, group);
+    setSelectedModel((current) => {
+      if (current && current.providerGroup === group) return current;
+      const groupModels = models.filter((model) => model.enabled && model.providerGroup === group);
+      return groupModels.find((model) => model.isProviderDefault) ?? groupModels[0] ?? current;
+    });
+    setShowModelSelector(false);
   }
 
   useEffect(() => {
@@ -366,6 +412,7 @@ export default function App() {
             {activeConversation && <><h1 className="text-sm font-medium truncate max-w-xs">{activeConversation.title}</h1><ClassificationBadge level={activeConversation.classification} /></>}
           </div>
           <div className="flex items-center gap-3">
+            <ProviderSwitcher providers={providers} active={activeProvider} onSelect={switchProvider} />
             <label className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--muted-foreground)' }} title="Classification applied to newly created conversations">
               Classification
               <select
@@ -395,7 +442,16 @@ export default function App() {
         </div></div>
         {selectedModel && <div className="flex-shrink-0 max-w-3xl mx-auto w-full"><ChatInput onSend={sendMessage} onStop={() => abortRef.current?.abort()} isStreaming={isStreaming} model={selectedModel} onModelClick={() => setShowModelSelector(true)} /></div>}
       </div>
-      {showModelSelector && selectedModel && <ModelSelector models={models} selected={selectedModel} onSelect={(model) => void selectModel(model)} onClose={() => setShowModelSelector(false)} />}
+      {showModelSelector && selectedModel && (
+        <ModelSelector
+          models={models.filter((model) => model.providerGroup === activeProvider)}
+          selected={selectedModel}
+          groupLabel={providers.find((p) => p.key === activeProvider)?.label ?? 'Enflite'}
+          residencyNote={providers.find((p) => p.key === activeProvider)?.residencyLabel ?? 'Stays on your network'}
+          onSelect={(model) => void selectModel(model)}
+          onClose={() => setShowModelSelector(false)}
+        />
+      )}
       {showDocuments && <DocumentsPanel user={user} documents={documents} selectedIds={selectedDocumentIds} onSelectedIds={setSelectedDocumentIds} onChanged={async () => setDocuments(await api.documents())} onClose={() => setShowDocuments(false)} />}
       {copied && <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-lg text-xs z-50" style={{ background: 'var(--secondary)' }}>Copied to clipboard</div>}
     </div>

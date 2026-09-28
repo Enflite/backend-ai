@@ -132,9 +132,11 @@ describe('ensureTenantDefaultModel', () => {
       return null;
     });
     await ensureTenantDefaultModel();
+    // The fixture carries the pre-fix docker endpoint while config points at
+    // localhost: the self-heal refreshes it to the configured OLLAMA_BASE_URL.
     expect(modelsCollection().updateOne).toHaveBeenCalledWith(
       { _id: 'default-model-id' },
-      { $set: { isDefault: true } }
+      { $set: { isDefault: true, endpoint: 'http://localhost:11434' } }
     );
   });
 
@@ -152,7 +154,14 @@ describe('ensureTenantDefaultModel', () => {
     });
     const model = await ensureTenantDefaultModel();
     expect(model!.id).toBe('custom-default-id');
-    expect(modelsCollection().updateOne).not.toHaveBeenCalled();
+    // The operator-flagged doc keeps its identity, but its stale docker
+    // endpoint is refreshed to the configured OLLAMA_BASE_URL so chat can
+    // actually reach Ollama on a native deployment.
+    expect(modelsCollection().updateOne).toHaveBeenCalledWith(
+      { _id: 'custom-default-id' },
+      { $set: { endpoint: 'http://localhost:11434' } }
+    );
+    expect(model!.endpoint).toBe('http://localhost:11434');
   });
 
   it('does NOT resurrect a default that an admin disabled', async () => {

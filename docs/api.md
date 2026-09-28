@@ -232,6 +232,7 @@ The purge runs in-process every `RETENTION_PURGE_INTERVAL_HOURS` (see
 | Method | Path | Auth / Permission | Purpose |
 |---|---|---|---|
 | GET | `/models` | auth + `model:use` | Models approved and permitted for the caller (already filtered by tenant, role, clearance); always includes the tenant default model (default-open serving) |
+| GET | `/providers` | auth + `model:use` | Provider availability for the one-tap switcher: `enflite` (always), `claude`, `openai` (only when configured) with `label`, `tagline`, `dataResidency`, `residencyNote`, `configured`, `enabled`, and an admin `hint` for unconfigured providers — never includes keys or key material |
 | GET | `/admin/models` | auth + `model:manage` | Full registry listing (admin fields) |
 | POST | `/admin/models` | auth + `model:manage` | Register a model (enters lifecycle at `REGISTERED`) |
 | PATCH | `/admin/models/:id` | auth + `model:manage` | Edit registry metadata |
@@ -250,6 +251,15 @@ The model registry is tenant-agnostic; per-tenant serving is resolved at
 request time (see ADR-006). Lifecycle states: `REGISTERED → DOWNLOADING →
 VALIDATING → EVALUATING → PENDING_APPROVAL → APPROVED → CANARY → ACTIVE →
 DEPRECATED → RETIRED` (plus `DISABLED`); see ADR-008.
+
+`GET /models` items carry user-facing provider fields (ADR-018):
+`displayName` (friendly name, never a raw registry ID), `providerGroup`
+(`enflite` | `claude` | `openai`), `providerLabel` (`Enflite` | `Claude` |
+`OpenAI`), and `isProviderDefault` (the provider's preferred chat model,
+auto-selected on provider switch). Cloud provider models are default-open
+within the tenant but capped at the INTERNAL classification — prompts leave
+the operator's infrastructure, so CONFIDENTIAL and above require an explicit
+admin widening of the model's `allowedClassifications`.
 
 ## Eval (admin)
 

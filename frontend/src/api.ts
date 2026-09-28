@@ -1,4 +1,4 @@
-import type { AuthUser, Citation, DataClassification, DocumentRecord, RagResult, TokenUsage } from './types';
+import type { AuthUser, Citation, DataClassification, DocumentRecord, ProviderGroup, ProviderInfo, RagResult, TokenUsage } from './types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/+$/, '');
 let accessToken: string | null = null;
@@ -103,7 +103,27 @@ export const api = {
     });
     return body.results;
   },
+  /** Provider availability for the one-tap switcher — never carries keys. */
+  async providers(): Promise<ProviderInfo[]> {
+    const body = await request<{ providers: any[] }>('/providers');
+    return body.providers.map(mapProvider);
+  },
 };
+
+/** Maps the backend provider payload to the UI ProviderInfo shape. */
+export function mapProvider(value: any): ProviderInfo {
+  const key = (value.key === 'claude' || value.key === 'openai' ? value.key : 'enflite') as ProviderGroup;
+  return {
+    key,
+    label: String(value.label ?? key),
+    description: String(value.tagline ?? ''),
+    residency: value.dataResidency === 'cloud' ? 'cloud' : 'local',
+    residencyLabel: String(value.residencyNote ?? ''),
+    configured: value.configured === true,
+    enabled: value.enabled === true,
+    hint: typeof value.hint === 'string' ? value.hint : undefined,
+  };
+}
 
 /** Sets the bearer token directly (used for the OIDC fragment handoff). */
 export function setAccessToken(token: string): void {

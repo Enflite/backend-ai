@@ -12,11 +12,15 @@ const CLASSIFICATION_COLOR: Record<string, string> = {
 interface ModelSelectorProps {
   models: Model[];
   selected: Model;
+  /** Active provider group label (e.g. "Enflite") for the subtitle. */
+  groupLabel: string;
+  /** Data-residency note for the active provider (e.g. "Stays on your network"). */
+  residencyNote: string;
   onSelect: (model: Model) => void;
   onClose: () => void;
 }
 
-export default function ModelSelector({ models, selected, onSelect, onClose }: ModelSelectorProps) {
+export default function ModelSelector({ models, selected, groupLabel, residencyNote, onSelect, onClose }: ModelSelectorProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center" onClick={onClose}>
       <div className="absolute inset-0" style={{ background: 'rgba(0,0,0,0.5)' }} />
@@ -27,7 +31,7 @@ export default function ModelSelector({ models, selected, onSelect, onClose }: M
       >
         <div className="px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
           <h3 className="text-sm font-semibold" style={{ color: 'var(--foreground)' }}>Select Model</h3>
-          <p className="text-xs mt-0.5" style={{ color: 'var(--muted-foreground)' }}>All models run on internal infrastructure</p>
+          <p className="text-xs mt-0.5" style={{ color: 'var(--muted-foreground)' }}>{groupLabel} · {residencyNote}</p>
         </div>
         <div className="p-2">
           {models.map((model) => {
@@ -44,7 +48,7 @@ export default function ModelSelector({ models, selected, onSelect, onClose }: M
                 <div className="mt-0.5">
                   <div
                     className="w-2 h-2 rounded-full mt-1"
-                    style={{ background: unavailable ? '#6b7280' : model.provider === 'local' ? 'var(--accent)' : '#f59e0b' }}
+                    style={{ background: unavailable ? '#6b7280' : model.providerGroup === 'enflite' ? 'var(--accent)' : '#f59e0b' }}
                   />
                 </div>
                 <div className="flex-1 min-w-0">

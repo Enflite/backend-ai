@@ -138,6 +138,9 @@ async function findServableDefaultModel(db: MinimalDb): Promise<ModelDoc | null>
  * Seed shape for the platform default model (mirrors migration 002's seed
  * with migration 028's Ollama repoint). Used only by ensureTenantDefaultModel
  * when the `models` collection has no default at all.
+ *
+ * The endpoint comes from config.OLLAMA_BASE_URL — never a hardcoded docker
+ * URL — so native (non-docker) deployments seed a reachable endpoint.
  */
 function defaultModelSeed(now: Date): Record<string, unknown> {
   return {
@@ -145,7 +148,7 @@ function defaultModelSeed(now: Date): Record<string, unknown> {
     name: DEFAULT_MODEL_NAME,
     version: '1.0',
     provider: 'ollama',
-    endpoint: 'http://ollama:11434',
+    endpoint: config.OLLAMA_BASE_URL,
     modelIdentifier: 'llama3.1:8b',
     status: 'ACTIVE',
     license: 'llama3.1',
@@ -171,11 +174,46 @@ function defaultModelSeed(now: Date): Record<string, unknown> {
 }
 
 /**
+ * The docker-compose Ollama URL baked into pre-fix seeds (and migration
+ * 028). On a native (non-docker) deployment the chat path uses the model
+ * doc's endpoint, so a doc still pointing here could never reach Ollama no
+ * matter what OLLAMA_BASE_URL was set to — and the admin API had no way to
+ * change it. When the configured OLLAMA_BASE_URL differs, a doc pointing at
+ * exactly this URL is stale (never a deliberate choice: 'ollama' is the
+ * compose service name) and is refreshed on read. Admin-customized
+ * endpoints — anything other than this exact URL — are never touched.
+ */
+const STALE_DOCKER_OLLAMA_ENDPOINT = 'http://ollama:11434';
+
+function normalizeEndpoint(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value.replace(/\/+$/, '') : null;
+}
+
+/** True when the doc's endpoint is the stale docker URL and config says otherwise. */
+export function isStaleOllamaEndpoint(docEndpoint: unknown): boolean {
+  const doc = normalizeEndpoint(docEndpoint);
+  const configured = normalizeEndpoint(config.OLLAMA_BASE_URL);
+  return doc === STALE_DOCKER_OLLAMA_ENDPOINT && configured !== null && configured !== STALE_DOCKER_OLLAMA_ENDPOINT;
+}
+
+/**
+ * Refresh a stale docker Ollama endpoint on a platform seed doc in memory.
+ * Returns true when the doc was stale; the caller folds the endpoint into
+ * its own $set so there is exactly one write.
+ */
+function staleOllamaEndpointRefresh(doc: ModelDoc): boolean {
+  if (!isStaleOllamaEndpoint(doc.endpoint)) return false;
+  doc.endpoint = config.OLLAMA_BASE_URL;
+  return true;
+}
+
+/**
  * Ensure the tenant default model exists and is servable (create-on-read).
  * Idempotent: safe to call on every resolution miss.
  *
  * - Returns the servable default when one exists (self-healing the
- *   `isDefault` flag on the canonical seed doc when needed).
+ *   `isDefault` flag on the canonical seed doc when needed, and refreshing
+ *   a stale docker Ollama endpoint to the configured OLLAMA_BASE_URL).
  * - Returns null WITHOUT creating anything when the default-named doc
  *   exists but is not servable: an admin deliberately disabled it, and
  *   resurrecting it would override that decision.
@@ -186,8 +224,11 @@ export async function ensureTenantDefaultModel(): Promise<ApprovedModel | null> 
   const db = (await getDb()) as unknown as MinimalDb;
   const existing = await findServableDefaultModel(db);
   if (existing) {
-    if (existing.isDefault !== true) {
-      await db.collection<ModelDoc>('models').updateOne({ _id: existing._id }, { $set: { isDefault: true } });
+    const updates: Record<string, unknown> = {};
+    if (existing.isDefault !== true) updates.isDefault = true;
+    if (staleOllamaEndpointRefresh(existing)) updates.endpoint = existing.endpoint;
+    if (Object.keys(updates).length > 0) {
+      await db.collection<ModelDoc>('models').updateOne({ _id: existing._id }, { $set: updates });
     }
     return toApprovedModel(existing);
   }
@@ -232,6 +273,9 @@ async function findServableVisionModel(db: MinimalDb): Promise<ModelDoc | null> 
  * Seed shape for the platform vision model. Served by Ollama under the
  * `qwen2.5vl:7b` tag; image attachments are routed to this model
  * automatically. Context window is the model's native 32k.
+ *
+ * The endpoint comes from config.OLLAMA_BASE_URL — never a hardcoded docker
+ * URL — so native (non-docker) deployments seed a reachable endpoint.
  */
 function visionModelSeed(now: Date): Record<string, unknown> {
   return {
@@ -239,7 +283,7 @@ function visionModelSeed(now: Date): Record<string, unknown> {
     name: VISION_MODEL_NAME,
     version: '1.0',
     provider: 'ollama',
-    endpoint: 'http://ollama:11434',
+    endpoint: config.OLLAMA_BASE_URL,
     modelIdentifier: VISION_MODEL_OLLAMA_TAG,
     status: 'ACTIVE',
     license: 'apache-2.0',
@@ -270,7 +314,9 @@ function visionModelSeed(now: Date): Record<string, unknown> {
  * Idempotent: safe to call on every resolution miss.
  *
  * - Returns the servable vision model when one exists (self-healing the
- *   `isVisionDefault` flag on the canonical seed doc when needed).
+ *   `isVisionDefault` flag on the canonical seed doc when needed, and
+ *   refreshing a stale docker Ollama endpoint to the configured
+ *   OLLAMA_BASE_URL).
  * - Returns null WITHOUT creating anything when the vision-named doc
  *   exists but is not servable: an admin deliberately disabled it, and
  *   resurrecting it would override that decision.
@@ -281,8 +327,11 @@ export async function ensureVisionModel(): Promise<ApprovedModel | null> {
   const db = (await getDb()) as unknown as MinimalDb;
   const existing = await findServableVisionModel(db);
   if (existing) {
-    if (existing.isVisionDefault !== true) {
-      await db.collection<ModelDoc>('models').updateOne({ _id: existing._id }, { $set: { isVisionDefault: true } });
+    const updates: Record<string, unknown> = {};
+    if (existing.isVisionDefault !== true) updates.isVisionDefault = true;
+    if (staleOllamaEndpointRefresh(existing)) updates.endpoint = existing.endpoint;
+    if (Object.keys(updates).length > 0) {
+      await db.collection<ModelDoc>('models').updateOne({ _id: existing._id }, { $set: updates });
     }
     return toApprovedModel(existing);
   }
@@ -350,19 +399,23 @@ export async function listApprovedModelsForUser(tenantId: string, userId: string
     // revoked. (Admin-registered cloud models stay fail-closed; only
     // `seededProvider` docs get this treatment.) Ensure-on-read so /models
     // lists Claude/OpenAI models as soon as their API key is configured.
-    await ensureCloudProviderModels();
-    const cloudSeeds = await db
-      .collection<ModelDoc>('models')
-      .find({ seededProvider: { $in: ['claude', 'openai'] }, status: { $in: [...SERVABLE_STATUSES] }, enabled: true })
-      .sort({ name: 1 })
-      .toArray();
-    for (const doc of cloudSeeds) {
-      if (modelIds.includes(doc._id)) continue;
-      const revocation = await db.collection<ModelAccessDoc>('model_access').findOne(
-        { tenantId, modelId: doc._id, $or: principalOr(userId, roleId), revoked: true },
-        { projection: { _id: 1 } }
-      );
-      if (!revocation) modelIds.push(doc._id);
+    // Skipped entirely when no cloud provider is configured — the common
+    // case — so the default path pays no extra queries.
+    if (isClaudeConfigured() || isOpenAIConfigured()) {
+      await ensureCloudProviderModels();
+      const cloudSeeds = await db
+        .collection<ModelDoc>('models')
+        .find({ seededProvider: { $in: ['claude', 'openai'] }, status: { $in: [...SERVABLE_STATUSES] }, enabled: true })
+        .sort({ name: 1 })
+        .toArray();
+      for (const doc of cloudSeeds) {
+        if (modelIds.includes(doc._id)) continue;
+        const revocation = await db.collection<ModelAccessDoc>('model_access').findOne(
+          { tenantId, modelId: doc._id, $or: principalOr(userId, roleId), revoked: true },
+          { projection: { _id: 1 } }
+        );
+        if (!revocation) modelIds.push(doc._id);
+      }
     }
     if (modelIds.length === 0) return [];
     const docs = await db
@@ -564,11 +617,10 @@ export async function ensureCloudProviderModels(): Promise<void> {
     // Respect a locked-down egress config: never seed a cloud model whose
     // endpoint the gateway would refuse to call.
     if (!seeds.every((s) => endpointOriginAllowlisted(s.endpoint))) continue;
-    let providerDefaultAssigned = false;
-    // Exactly one provider default: prefer the first text-only seed, else
-    // the first seed (a vision-capable default also serves image turns
-    // without a model switch).
-    const defaultSpec = seeds.find((s) => !s.vision) ?? seeds[0];
+    // Exactly one provider default: prefer the first vision-capable seed —
+    // the flagship model, which also serves image turns without a switch —
+    // else the first seed.
+    const defaultSpec = seeds.find((s) => s.vision) ?? seeds[0];
     for (const spec of seeds) {
       try {
         await db.collection<ModelDoc>('models').insertOne(cloudSeedDoc(spec, now, spec === defaultSpec));

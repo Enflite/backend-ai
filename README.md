@@ -127,11 +127,52 @@ Open http://localhost:8443 in your browser and log in with the email and passwor
 
 Quick API health check: http://localhost:8080/health should respond.
 
+## AI providers: Enflite, Claude, OpenAI
+
+The chat header has a one-tap provider switcher: **Enflite | Claude | OpenAI**.
+Switching swaps the model list to that provider's models — no settings to dig
+through. The active provider is always visible on the switcher.
+
+- **Enflite** is this platform's own name for the models it serves itself —
+  local Ollama first of all (that's the default, and it needs no key). You
+  will never see the word "Ollama" in the app; it's "Enflite" everywhere a
+  user looks.
+- **Claude** and **OpenAI** are cloud providers. They appear in the switcher
+  only after an admin sets their API key (see below); without a key they show
+  as disabled with a hint, never as a dead button.
+
+**Data residency — read this before switching.** Enflite keeps your prompts on
+your own infrastructure. Selecting Claude or OpenAI sends your prompts and
+attachments to Anthropic's or OpenAI's cloud. The switcher labels each provider
+"Local" or "Cloud" so this is visible at the moment you choose. Cloud models are
+also capped at the INTERNAL classification by default — an admin must
+explicitly widen a cloud model to serve CONFIDENTIAL or above.
+
+**Adding cloud keys** (admin / operator). Set these in the backend environment
+(or your secret manager), then restart the backend:
+
+```powershell
+ANTHROPIC_API_KEY=<redacted>   # enables Claude in the switcher
+OPENAI_API_KEY=<redacted>          # enables OpenAI in the switcher
+# Optional: CLAUDE_ENABLED=false / OPENAI_ENABLED=false to hide a provider
+# even when its key is set. Custom endpoints: ANTHROPIC_BASE_URL, OPENAI_BASE_URL.
+```
+
+Keys travel only in the provider API request headers. They are never logged,
+never returned by any API (the `/providers` endpoint reports only whether a
+provider is configured), and never appear in error messages. Image turns stay
+on your active provider when it has a vision-capable model — Claude uses Claude
+Sonnet 4, OpenAI uses GPT-4o, Enflite uses the local vision model — and the app
+always tells you which model is reading your images, never silently.
+
+See `docs/adr/018-provider-switching.md` for the design.
+
 ## 3. Common gotchas
 
 - **Docker Desktop isn't running** — `docker compose` fails with a cryptic error. Start Docker Desktop first and wait for it to finish booting.
 - **A port is already in use** — the stack needs 8080 (API), 8443 (frontend), 27017 (MongoDB), 9000/9001 (storage), 11434 (Ollama). The frontend refuses to start on any other port, so free up 8443 rather than working around it.
 - **Chat fails but login works** — you skipped Step 3 or one of the three models is missing. The app now says "Can't reach the AI service (Ollama) at …" and names the URL it's trying. Run `docker compose exec ollama ollama list` and compare against the Step 3 table; also check the backend logs for `OLLAMA_UNREACHABLE`.
+- **Native backend chats hit the wrong Ollama URL** — older installs seeded the model registry with the docker URL (`http://ollama:11434`), which a native backend can't reach. The app now self-heals this: on read, a model still pointing at the docker URL is repointed to your configured `OLLAMA_BASE_URL` automatically (admin-customized endpoints are never touched). If you patched your database by hand before, nothing further is needed.
 - **Backend dependency changes need a rebuild** — editing backend code hot-reloads fine (it's volume-mounted), but if you change `backend/package.json` dependencies, run `docker compose up -d --build` again.
 - **Migrations** — the Docker backend runs `npm run migrate` automatically on boot. If you ever run the backend natively (`cd backend; npm ci; npm run migrate; npm run dev`), run `npm run migrate` yourself after pulling new code.
 - **Slow first chat response** — normal. The model loads into memory on first use; subsequent messages are faster.
