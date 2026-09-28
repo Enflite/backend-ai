@@ -128,7 +128,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
             if (convs.length === 0) return null;
             return (
               <div key={group}>
-                <p className="px-2 py-1.5 text-xs font-medium uppercase tracking-widest" style={{ color: 'var(--muted-foreground)' }}>
+                <p className="px-2 py-1.5 text-xs font-bold uppercase tracking-widest" style={{ color: 'var(--accent)' }}>
                   {group}
                 </p>
                 {convs.map((conv) => (

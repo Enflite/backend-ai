@@ -2,11 +2,11 @@ import type { Model } from '../types';
 
 const CLASSIFICATION_ORDER: Record<string, number> = { PUBLIC: 0, INTERNAL: 1, CONFIDENTIAL: 2, PROPRIETARY: 3, CUI: 4 };
 const CLASSIFICATION_COLOR: Record<string, string> = {
-  PUBLIC: '#22c55e',
-  INTERNAL: '#3b82f6',
-  CONFIDENTIAL: '#f59e0b',
+  PUBLIC: '#15803d',
+  INTERNAL: '#2563eb',
+  CONFIDENTIAL: '#b45309',
   PROPRIETARY: '#cf0c2c',
-  CUI: '#a855f7',
+  CUI: '#7e22ce',
 };
 
 interface ModelSelectorProps {
@@ -51,7 +51,7 @@ export default function ModelSelector({ models, selected, onSelect, onClose }: M
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>{model.name}</span>
                     {unavailable ? (
-                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: '#6b728020', color: '#9ca3af' }}>Disabled</span>
+                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: '#6b728020', color: '#6b7280' }}>Disabled</span>
                     ) : selected.id === model.id && (
                       <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'rgba(207,12,44,0.15)', color: 'var(--accent)' }}>Active</span>
                     )}

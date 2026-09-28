@@ -9,8 +9,8 @@ import { api, ApiError, consumeOidcFragment, mapCitation, setAccessToken, stream
 import type { AuthUser, Conversation, DataClassification, DocumentRecord, Message, Model, UploadedFile } from './types';
 
 const CLASSIFICATION_COLOR: Record<string, string> = {
-  PUBLIC: '#22c55e', INTERNAL: '#3b82f6', CONFIDENTIAL: '#f59e0b',
-  PROPRIETARY: '#cf0c2c', CUI: '#a855f7', UNKNOWN: '#6b7280',
+  PUBLIC: '#15803d', INTERNAL: '#2563eb', CONFIDENTIAL: '#b45309',
+  PROPRIETARY: '#cf0c2c', CUI: '#7e22ce', UNKNOWN: '#6b7280',
 };
 const CLASSIFICATION_ORDER: DataClassification[] = ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'PROPRIETARY', 'CUI', 'UNKNOWN'];
 const randomId = () => crypto.randomUUID();
@@ -366,7 +366,7 @@ export default function App() {
             </label>
             <button className="text-sm px-3 py-1.5 rounded-md" style={{ border: '1px solid var(--border)' }} onClick={() => setShowDocuments(true)}>Documents{selectedDocumentIds.length ? ` (${selectedDocumentIds.length})` : ''}</button><UserMenu user={user} onLogout={async () => { await api.logout(); setUser(null); setConversations([]); setDocuments([]); }} /></div>
         </header>
-        {error && <div role="alert" className="px-4 py-2 text-sm flex justify-between" style={{ color: '#fca5a5', background: '#7f1d1d55' }}><span>{error}</span><button onClick={() => setError('')}>Dismiss</button></div>}
+        {error && <div role="alert" className="px-4 py-2 text-sm flex justify-between" style={{ color: '#a50a24', background: '#cf0c2c12' }}><span>{error}</span><button onClick={() => setError('')}>Dismiss</button></div>}
         <div className="flex-1 overflow-y-auto"><div className="max-w-3xl mx-auto px-4">
           {!activeConversation || !activeConversation.messages.length ? (
             selectedModel ? <EmptyState model={selectedModel} onPrompt={(prompt) => void sendMessage(prompt, [])} /> : <p className="text-center py-20 text-sm">Still loading the AI — if this persists, refresh and try again.</p>
@@ -411,7 +411,7 @@ function Login({ onLogin, error }: { onLogin: (email: string, password: string) 
     event.preventDefault(); setBusy(true); setLocalError('');
     try { await onLogin(email, password); } catch (cause) { setLocalError(cause instanceof Error ? cause.message : 'Sign in failed'); } finally { setBusy(false); }
   }}><div><img src="/enflite-logo.png" alt="Enflite" className="h-9 w-auto mb-3" /><h1 className="text-xl font-semibold">Enflite</h1><p className="text-sm mt-1" style={{ color: 'var(--muted-foreground)' }}>Sign in with your enterprise account</p></div>
-    {(localError || error) && <p role="alert" className="text-sm" style={{ color: '#fca5a5' }}>{localError || error}</p>}
+    {(localError || error) && <p role="alert" className="text-sm" style={{ color: '#a50a24' }}>{localError || error}</p>}
     {ssoEnabled && <button type="button" onClick={() => { window.location.href = api.oidcLoginUrl(); }} className="w-full rounded-md py-2 text-sm font-medium" style={{ background: 'var(--secondary)', color: 'var(--foreground)', border: '1px solid var(--border)' }}>Sign in with SSO</button>}
     {ssoEnabled && <div className="flex items-center gap-3 text-xs" style={{ color: 'var(--muted-foreground)' }}><span className="flex-1" style={{ borderTop: '1px solid var(--border)' }} /><span>or with password</span><span className="flex-1" style={{ borderTop: '1px solid var(--border)' }} /></div>}
     <label className="block text-sm">Email<input autoComplete="username" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} className="mt-1 w-full rounded-md px-3 py-2 bg-transparent" style={{ border: '1px solid var(--border)' }} /></label>
@@ -428,5 +428,5 @@ function ClassificationBadge({ level }: { level: string }) {
 function UserMenu({ user, onLogout }: { user: AuthUser; onLogout: () => Promise<void> }) {
   const [open, setOpen] = useState(false);
   const initials = user.displayName.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase();
-  return <div className="relative"><button aria-label="Account menu" onClick={() => setOpen((value) => !value)} className="w-8 h-8 rounded-full text-xs font-semibold" style={{ background: 'var(--secondary)' }}>{initials}</button>{open && <div className="absolute right-0 top-10 rounded-lg py-1 z-50 w-56" style={{ background: 'var(--card)', border: '1px solid var(--border)' }}><div className="px-3 py-2"><p className="text-sm font-medium">{user.displayName}</p><p className="text-xs truncate" style={{ color: 'var(--muted-foreground)' }}>{user.email}</p><p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>{user.roleName} · {user.clearance}</p></div><button className="w-full text-left px-3 py-2 text-sm" style={{ color: '#fca5a5', borderTop: '1px solid var(--border)' }} onClick={() => void onLogout()}>Sign out</button></div>}</div>;
+  return <div className="relative"><button aria-label="Account menu" onClick={() => setOpen((value) => !value)} className="w-8 h-8 rounded-full text-xs font-semibold" style={{ background: 'var(--secondary)' }}>{initials}</button>{open && <div className="absolute right-0 top-10 rounded-lg py-1 z-50 w-56" style={{ background: 'var(--card)', border: '1px solid var(--border)' }}><div className="px-3 py-2"><p className="text-sm font-medium">{user.displayName}</p><p className="text-xs truncate" style={{ color: 'var(--muted-foreground)' }}>{user.email}</p><p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>{user.roleName} · {user.clearance}</p></div><button className="w-full text-left px-3 py-2 text-sm" style={{ color: '#a50a24', borderTop: '1px solid var(--border)' }} onClick={() => void onLogout()}>Sign out</button></div>}</div>;
 }

@@ -113,7 +113,7 @@ function CodeBlock({ content, language }: { content: string; language: string })
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
-      <pre className="overflow-x-auto p-4 text-xs font-mono leading-relaxed" style={{ background: 'var(--card)', color: '#a8d8b9' }}>
+      <pre className="overflow-x-auto p-4 text-xs font-mono leading-relaxed" style={{ background: 'var(--card)', color: 'var(--foreground)' }}>
         <code>{content}</code>
       </pre>
     </div>
@@ -201,7 +201,7 @@ export default function MessageBubble({ message, onCopy, onRegenerate }: Message
                   </p>
                 )}
                 {message.error && (
-                  <div className="mt-2 px-3 py-2 rounded-md text-xs flex items-center justify-between gap-3" style={{ background: '#7f1d1d55', color: '#fca5a5' }} role="alert">
+                  <div className="mt-2 px-3 py-2 rounded-md text-xs flex items-center justify-between gap-3" style={{ background: '#cf0c2c12', color: '#a50a24' }} role="alert">
                     <span>{message.error}</span>
                     {onRegenerate && (
                       <button onClick={onRegenerate} className="underline underline-offset-2 flex-shrink-0">Retry</button>

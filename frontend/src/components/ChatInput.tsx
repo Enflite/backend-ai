@@ -130,10 +130,10 @@ export default function ChatInput({ onSend, onStop, isStreaming, disabled, model
                   <span className="animate-pulse" style={{ color: 'var(--accent)' }}>Uploading…</span>
                 )}
                 {f.status === 'error' && (
-                  <span style={{ color: '#fca5a5' }}>{f.error ?? 'Upload blocked'}</span>
+                  <span style={{ color: '#a50a24' }}>{f.error ?? 'Upload blocked'}</span>
                 )}
                 {f.status !== 'uploading' && (
-                  <button onClick={() => removeFile(f.id)} className="ml-1 hover:text-red-400" style={{ color: 'var(--muted-foreground)' }} aria-label={`Remove ${f.name}`}>
+                  <button onClick={() => removeFile(f.id)} className="ml-1 hover:text-red-700" style={{ color: 'var(--muted-foreground)' }} aria-label={`Remove ${f.name}`}>
                     <IconX />
                   </button>
                 )}
