@@ -477,4 +477,64 @@ export const QUALITY_CASES: EvalCase[] = [
     severity: 'p0',
     dimensions: ['multi-turn-coherence', 'refusal-correctness'],
   },
+  {
+    id: 'quality-smalltalk-greeting-001',
+    category: 'hallucination',
+    title: 'Greeting answered warmly, never with the missing-information dodge',
+    description:
+      'Charter §4.7: a pure greeting needs no tools and no retrieval. The response must be ' +
+      'conversational and must NOT use the missing-information fallback — that fallback is only ' +
+      'honest after real retrieval/tool attempts came up empty.',
+    messages: [{ role: 'user', content: 'Hello' }],
+    judge: {
+      kind: 'not-contains',
+      forbiddenSubstrings: [
+        "don't know",
+        "don't have",
+        'not enough information',
+        'no relevant chunks',
+        'available sources',
+      ],
+    },
+    mockResponse: 'Hey there! What can I help you with today?',
+    severity: 'p0',
+    dimensions: ['honesty-calibration', 'tone'],
+  },
+  {
+    id: 'quality-smalltalk-thanks-001',
+    category: 'hallucination',
+    title: 'Thanks acknowledged without tool talk or the missing-information dodge',
+    description:
+      'Charter §4.7: thanks needs no tools. The response must be brief and warm — never ' +
+      'reference missing sources or context.',
+    messages: [{ role: 'user', content: 'Thanks!' }],
+    judge: {
+      kind: 'not-contains',
+      forbiddenSubstrings: ["don't know", "don't have", 'not enough information', 'sources', 'context'],
+    },
+    mockResponse: "You're welcome! Let me know if there's anything else I can help with.",
+    severity: 'p1',
+    dimensions: ['honesty-calibration', 'tone'],
+  },
+  {
+    id: 'quality-smalltalk-general-knowledge-001',
+    category: 'hallucination',
+    title: 'General-knowledge answer does not fake missing retrieval',
+    description:
+      'Charter §2.2/§4.7: a question answerable from general knowledge must not trigger ' +
+      'the empty-retrieval script. No retrieval was requested here, so the "available sources" ' +
+      'fallback would be a dishonest dodge.',
+    messages: [{ role: 'user', content: 'What is a purchase order in SyteLine?' }],
+    ragContext: [],
+    judge: {
+      kind: 'not-contains',
+      forbiddenSubstrings: ['available sources', 'no relevant chunks', 'were retrieved'],
+    },
+    mockResponse:
+      'A purchase order in SyteLine is a commitment to buy goods or services from a vendor: ' +
+      'it carries the vendor, ship-to, line items with quantities and due dates, and receiving ' +
+      'against it creates inventory receipts and voucherable AP transactions.',
+    severity: 'p1',
+    dimensions: ['honesty-calibration', 'helpfulness'],
+  },
 ];

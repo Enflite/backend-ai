@@ -42,7 +42,7 @@
 import { SYTELINE_EXPERT_KNOWLEDGE } from './sytelineExpertKnowledge.js';
 
 /** Version of the default system prompt; bump when the text changes. */
-export const SYSTEM_PROMPT_VERSION = '2.6.0';
+export const SYSTEM_PROMPT_VERSION = '2.7.0';
 
 export interface SystemPromptOptions {
   /**
@@ -129,6 +129,7 @@ const STATIC_HEAD = [
   '- Cite with [N], where N is the citation="N" number of a real retrieved chunk shown to you (e.g. <untrusted_document citation="2" ...> is cited as [2]). A citation must point to a real chunk — decorative citations are a defect.',
   '- When retrieved context is thin or missing, say what you don\'t know, say what would answer the question, and offer to look further. Never fill the gap with plausible-sounding text.',
   '- If you receive a retrieval notice stating no relevant chunks were found, tell the user clearly: say "I don\'t know from the available sources" in your own words. Do not invent document contents, quotes, or citations.',
+  '- The "I don\'t know" response is ONLY for turns where you actually attempted retrieval or tool calls and they came up empty. Never use it as a generic dodge, and never for greetings, small talk, or questions you can answer from general knowledge or the conversation history.',
   '',
   'AMBIGUITY',
   '- Ask a brief clarifying question only when the request is genuinely ambiguous AND guessing wrong is costly (destructive, expensive, hard to undo).',
@@ -194,7 +195,8 @@ function buildDynamicTail(options: SystemPromptOptions): string[] {
 
   const toolGuidance = toolsAvailable
     ? 'Prefer doing over describing: use a tool when a tool answers better than prose. ' +
-      'Never claim a tool action was taken ("I\'ve updated the record") unless a tool call actually performed it.' +
+      'Never claim a tool action was taken ("I\'ve updated the record") unless a tool call actually performed it. ' +
+      'Greetings, thanks, and farewells need no tools: answer those conversationally and briefly instead of reaching for them.' +
       (options.sytelineToolsAvailable
         ? ' For SyteLine ERP questions, investigate like an analyst: state your plan in a line, ' +
           'then chain dependent queries (sales order → lines → item availability → open purchase ' +
@@ -266,6 +268,42 @@ function buildDynamicTail(options: SystemPromptOptions): string[] {
  */
 export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
   return [STATIC_HEAD, buildDynamicTail(options).join('\n')].join('\n\n');
+}
+
+/**
+ * Slim system prompt for small-talk turns (see chat/smalltalk.ts): greetings,
+ * thanks, farewells, and pleasantries. ~130 tokens instead of ~1,100+ — a
+ * large time-to-first-token win on CPU-only hosts, where every prompt token
+ * is prefilled without GPU acceleration.
+ *
+ * Deliberately NOT assembled through the prefix-cache contract
+ * (buildCacheableSystemPrompt): the contract asserts the full byte-stable
+ * static head, which is exactly what this prompt omits. Small-talk turns
+ * share no prefix with working turns, so there is nothing for vLLM's prefix
+ * cache to reuse — the win here is prompt length, not cache hits.
+ *
+ * The prompt states the turn's nature explicitly because the observed failure
+ * mode was the model inventing tool work for a greeting and then apologizing
+ * for "not having enough information". On this path the model is told
+ * plainly: no tools, no sources, just be a friendly colleague.
+ */
+const SMALLTALK_PROMPT = [
+  'You are the Enflite AI assistant — an AI colleague helping enterprise users get their work done.',
+  'You are an AI, not a human. Never claim to be human.',
+  '',
+  'CASUAL TURN',
+  '- This is a greeting, thanks, farewell, or other pleasantry: no tools, documents, or records are involved.',
+  '- Respond warmly and briefly — one or two sentences. Match the user\'s energy.',
+  '- Never say you lack information, sources, or context: this turn needs none, so that response would be a defect.',
+  '- Do not mention tools, tool calls, documents, or your capabilities unless the user asks about them.',
+  '',
+  'TONE',
+  '- Warm, direct, professional. A little personality is welcome; never forced.',
+].join('\n');
+
+/** The small-talk system prompt: byte-stable, no interpolation, no secrets. */
+export function buildSmallTalkPrompt(): string {
+  return SMALLTALK_PROMPT;
 }
 
 /** Minimal HTML-escaping so untrusted values cannot break out of zone tags. */

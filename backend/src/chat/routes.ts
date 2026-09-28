@@ -15,9 +15,10 @@ import { retrieveAuthorizedContext } from '../rag/retrieval.js';
 import { resolveChatDocuments } from './imageAttachments.js';
 import { recordAudit } from '../audit/audit.js';
 import { toolRegistry, zodToJsonSchema } from '../tools/gateway.js';
-import { wrapRetrievedContext, buildNoEvidenceNotice } from './systemPrompt.js';
+import { wrapRetrievedContext, buildNoEvidenceNotice, buildSmallTalkPrompt } from './systemPrompt.js';
 import { buildCacheableSystemPrompt } from '../ai/gateway/prefixCache.js';
 import { detectCapability } from './capabilityDetect.js';
+import { isSmallTalk } from './smalltalk.js';
 import { runAgenticLoop, type AgenticLoopSink } from './agenticLoop.js';
 import { assembleCodeContext, normalizeCodeFiles } from './codeContext.js';
 import { listMemories } from '../memory/store.js';
@@ -352,6 +353,38 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     const resolvedDocs = await resolveChatDocuments(auth, parsed.data.documentIds);
     const imageAttachments = resolvedDocs.images;
     const hasImages = imageAttachments.length > 0;
+    // Small-talk bypass: pure chit-chat (greetings, thanks, farewells) carries
+    // no actionable question, so offering the full tool registry only invites
+    // the failure mode observed live — the model treating "Hello" as a
+    // filename and calling repo.readFile. The turn still flows through the
+    // normal loop machinery (SSE, DLP, audit, persistence); it just gets no
+    // tools and a slim prompt, which also collapses time-to-first-token on
+    // CPU-only hosts. Any attachment disqualifies the bypass: images need the
+    // vision path, document IDs need RAG, code files need the coding path.
+    const smallTalkTurn =
+      !hasImages &&
+      (parsed.data.documentIds?.length ?? 0) === 0 &&
+      (parsed.data.codeFiles?.length ?? 0) === 0 &&
+      isSmallTalk(parsed.data.content);
+    // Tools actually offered to the model this turn: empty on the small-talk
+    // path. Capability *detection* above still uses the full registry so a
+    // "hello, what's the status of order X?" turn routes to SyteLine — the
+    // gate only suppresses tool *offering*, never detection.
+    const turnProviderTools = smallTalkTurn ? [] : providerTools;
+    if (smallTalkTurn) {
+      // Operator visibility: a turn with no tools offered is otherwise
+      // indistinguishable from a permission-stripped turn in the audit trail.
+      await recordAudit({
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        requestId: req.requestId,
+        action: 'SMALLTALK_BYPASS',
+        resource: 'chat',
+        classification,
+        success: true,
+        metadata: {},
+      });
+    }
     // Phase 6 capability routing: image attachments force the 'vision'
     // capability; otherwise an explicit `capability` on the request wins,
     // else the turn's capability is detected from its own text.
@@ -573,8 +606,8 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       // only — never secrets). The gateway pins it at index 0 of every
       // provider call and re-adds it after each truncation round, so it is
       // never dropped no matter how long the history grows.
-      const sytelineToolsAvailable = providerTools.some((tool) => tool.function.name.startsWith('syteline.'));
-      const repoToolsAvailable = providerTools.some((tool) => tool.function.name.startsWith('repo.'));
+      const sytelineToolsAvailable = turnProviderTools.some((tool) => tool.function.name.startsWith('syteline.'));
+      const repoToolsAvailable = turnProviderTools.some((tool) => tool.function.name.startsWith('repo.'));
       // Coding turns get the CODING WORK section: ground claims in shown files,
       // never invent paths or APIs, deliver changes as unified diffs.
       const codingMode = requestedCapability === 'coding' || codeFileInputs.length > 0;
@@ -599,19 +632,24 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       } catch (err) {
         req.log.warn({ err, requestId: req.requestId }, 'user memory lookup failed; continuing without it');
       }
+      // Small-talk turns get the slim casual prompt (no static charter head, no
+      // tool guidance, no knowledge packs); working turns get the full
+      // charter-encoded prompt through the prefix-cache contract.
       const buildTurnSystemPrompt = (modelName: string, modelVersion?: string) =>
-        buildCacheableSystemPrompt({
-          modelName,
-          modelVersion,
-          toolsAvailable: providerTools.length > 0,
-          sytelineToolsAvailable,
-          codingMode,
-          repoToolsAvailable,
-          // Vision turns get the VISION INPUT section: read what is actually
-          // visible, quote error text exactly, diagnose screenshots.
-          visionMode: hasImages,
-          userMemory: userMemorySection,
-        }).text;
+        smallTalkTurn
+          ? buildSmallTalkPrompt()
+          : buildCacheableSystemPrompt({
+              modelName,
+              modelVersion,
+              toolsAvailable: turnProviderTools.length > 0,
+              sytelineToolsAvailable,
+              codingMode,
+              repoToolsAvailable,
+              // Vision turns get the VISION INPUT section: read what is actually
+              // visible, quote error text exactly, diagnose screenshots.
+              visionMode: hasImages,
+              userMemory: userMemorySection,
+            }).text;
       const chatSystemPrompt = buildTurnSystemPrompt(model.name, model.version);
 
       // Context-window management: sliding window that always keeps the system
@@ -794,7 +832,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           auth,
           initialModel: { id: modelId, name: model.name, contextWindow: model.contextWindow, version: model.version },
           buildSystemPrompt: buildTurnSystemPrompt,
-          providerTools,
+          providerTools: turnProviderTools,
           messages: windowed.messages,
           signal: abortController.signal,
           telemetry,

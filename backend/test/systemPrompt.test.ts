@@ -3,11 +3,43 @@ import {
   buildSystemPrompt,
   buildStaticPromptHead,
   buildNoEvidenceNotice,
+  buildSmallTalkPrompt,
   wrapRetrievedContext,
   wrapToolResult,
   SYSTEM_PROMPT_VERSION,
 } from '../src/chat/systemPrompt.js';
 import { applyContextWindow, SYSTEM_PROMPT } from '../src/ai/gateway/gateway.js';
+
+describe('buildSmallTalkPrompt', () => {
+  it('is versioned alongside the main prompt', () => {
+    expect(SYSTEM_PROMPT_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it('is slim: no static charter head, no tool guidance, no knowledge packs', () => {
+    const prompt = buildSmallTalkPrompt();
+    // ~130 tokens instead of ~1,100+: the whole point is a small prefill.
+    expect(prompt.length).toBeLessThan(1200);
+    expect(prompt).not.toContain('CONTENT ZONES');
+    expect(prompt).not.toContain('TOOL-CALL DISCIPLINE');
+    expect(prompt).not.toContain('SYTELINE EXPERT KNOWLEDGE');
+    expect(prompt).toContain('CASUAL TURN');
+  });
+
+  it('forbids the missing-information dodge on small-talk turns', () => {
+    const prompt = buildSmallTalkPrompt();
+    expect(prompt).toContain('Never say you lack information, sources, or context');
+  });
+
+  it('is byte-stable across calls', () => {
+    expect(buildSmallTalkPrompt()).toBe(buildSmallTalkPrompt());
+  });
+
+  it('identifies as the Enflite AI assistant', () => {
+    const prompt = buildSmallTalkPrompt();
+    expect(prompt).toContain('Enflite AI assistant');
+    expect(prompt).toContain('You are an AI, not a human');
+  });
+});
 
 describe('buildSystemPrompt', () => {
   it('is versioned', () => {
@@ -24,6 +56,17 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('You are an AI, not a human');
     expect(prompt).toContain('Never claim to be human');
     expect(prompt).toContain('never claim capabilities you do not have');
+  });
+
+  it('encodes the missing-evidence rule: "I don\'t know" only after real empty retrieval (charter §2.2)', () => {
+    const prompt = buildSystemPrompt({});
+    expect(prompt).toContain('ONLY for turns where you actually attempted retrieval or tool calls');
+    expect(prompt).toContain('Never use it as a generic dodge');
+  });
+
+  it('tells the model greetings need no tools', () => {
+    const prompt = buildSystemPrompt({ toolsAvailable: true });
+    expect(prompt).toContain('Greetings, thanks, and farewells need no tools');
   });
 
   it('carries tenant-safe model metadata when provided', () => {
@@ -354,7 +397,7 @@ describe('chat route system-prompt wiring', () => {
       model: testModel,
       telemetry: {},
     }));
-    const res = await postChat({ content: 'hi' });
+    const res = await postChat({ content: 'what is the capital of France?' });
     expect(res.statusCode).toBe(200);
     const input = gatewayStream.mock.calls[0]![0] as { systemPrompt: string; messages: Array<{ role: string; content: string }> };
     expect(input.systemPrompt).toContain('Enflite AI assistant');
@@ -383,7 +426,7 @@ describe('chat route system-prompt wiring', () => {
       model: testModel,
       telemetry: {},
     }));
-    await postChat({ content: 'hi' });
+    await postChat({ content: 'what is the capital of France?' });
     const input = gatewayStream.mock.calls[0]![0] as { systemPrompt: string };
     // The route builds via buildCacheableSystemPrompt: the prompt starts with
     // the byte-stable static head so vLLM reuses its prefix blocks, and the
