@@ -5,6 +5,10 @@ interface MessageProps {
   message: Message;
   onCopy: (text: string) => void;
   onRegenerate?: () => void;
+  /** DOM anchor id for activity-feed jump-to. */
+  id?: string;
+  /** Briefly highlight the bubble (activity-feed jump target). */
+  flash?: boolean;
 }
 
 function parseContent(content: string): Array<{ type: 'text' | 'code'; content: string; language?: string }> {
@@ -152,12 +156,12 @@ function CitationsBlock({ citations }: { citations: Citation[] }) {
   );
 }
 
-export default function MessageBubble({ message, onCopy, onRegenerate }: MessageProps) {
+export default function MessageBubble({ message, onCopy, onRegenerate, id, flash }: MessageProps) {
   const isUser = message.role === 'user';
   const parts = parseContent(message.content);
 
   return (
-    <div className={`flex gap-3 py-4 group ${isUser ? 'flex-row-reverse' : ''}`}>
+    <div id={id} className={`flex gap-3 py-4 group ${isUser ? 'flex-row-reverse' : ''}${flash ? ' message-flash' : ''}`}>
       {/* Avatar */}
       {isUser ? (
         <div
