@@ -227,6 +227,37 @@ describe('listApprovedModelsForUser (default-open)', () => {
     const models = await listApprovedModelsForUser(TENANT, USER, ROLE);
     expect(models).toHaveLength(0);
   });
+
+  it('seeds the default model on read when the registry is empty (fresh tenant)', async () => {
+    // Regression: /models must never come back empty just because no model
+    // doc exists yet — the default is ensured on read, not only at chat time.
+    const models = modelsCollection();
+    let seeded: Record<string, any> | null = null;
+    models.insertOne.mockImplementation(async (doc: any) => {
+      seeded = doc;
+      return { insertedId: doc._id };
+    });
+    models.findOne.mockImplementation(async (filter: any) => {
+      // Servable legs see the seeded doc once it exists; before that the
+      // registry is empty. The plain name lookup (no status leg) stays empty
+      // so the seed insert is actually attempted.
+      if (filter.status && seeded) return seeded;
+      if (filter.isDefault === true && seeded) return seeded;
+      return null;
+    });
+    accessCollection().find.mockImplementationOnce(() => ({
+      toArray: vi.fn().mockResolvedValue([]), // no grants
+      sort: vi.fn(),
+    }));
+    models.find.mockImplementationOnce(() => ({
+      sort: () => ({ toArray: vi.fn().mockResolvedValue(seeded ? [seeded] : []) }),
+    }));
+    const result = await listApprovedModelsForUser(TENANT, USER, ROLE);
+    expect(models.insertOne).toHaveBeenCalledTimes(1);
+    expect(seeded!.name).toBe(DEFAULT_MODEL_NAME);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.name).toBe(DEFAULT_MODEL_NAME);
+  });
 });
 
 describe('getApprovedModelForUser (default-open)', () => {
