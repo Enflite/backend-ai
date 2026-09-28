@@ -19,4 +19,5 @@ export * from './naming.js';
 export * from './scaffold.js';
 export * from './projectDocs.js';
 export * from './deck.js';
+export * from './deckBuildScript.js';
 export * from './github.js';
