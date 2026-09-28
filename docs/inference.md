@@ -79,15 +79,26 @@ Windows-first deployments.
 - **Two ways to run it.**
   - *Native Windows (recommended for Enflite hosts):* run
     `backend/scripts/setup-ollama-windows.ps1` — it installs Ollama,
-    pulls `llama3.1:8b` (chat) and `nomic-embed-text` (embeddings), and
-    verifies with `ollama list`. The backend then uses the default
-    `OLLAMA_BASE_URL=http://localhost:11434`.
+    pulls `llama3.1:8b` (chat), `nomic-embed-text` (embeddings), and
+    `qwen2.5vl:7b` (vision), and verifies with `ollama list`. The backend
+    then uses the default `OLLAMA_BASE_URL=http://localhost:11434`.
   - *Docker compose:* the compose file bundles an `ollama` service
     (pinned `ollama/ollama` image, persistent `ollama-data` volume, GPU
     passthrough documented as commented `deploy.resources`). The backend
-    reaches it at `OLLAMA_BASE_URL=http://ollama:11434`.
+    reaches it at `OLLAMA_BASE_URL=http://ollama:11434`. After the stack
+    is up, pull the models it needs: `docker compose exec ollama ollama
+    pull llama3.1:8b && docker compose exec ollama ollama pull
+    nomic-embed-text && docker compose exec ollama ollama pull
+    qwen2.5vl:7b`.
 - The gateway calls Ollama through `OllamaProvider` (`/api/chat` NDJSON
   streaming, `/api/embeddings`).
+- **Vision model (image attachments).** Chat turns with attached images
+  (PNG/JPEG/WebP/GIF) are routed to the platform vision model
+  (`qwen2.5vl:7b`, seeded as `qwen/Qwen2.5-VL-7B-Instruct`) via the
+  `vision` capability — automatically, even when the request names the
+  text chat model. The text default (`llama3.1:8b`) is text-only and never
+  receives image payloads; a missing/unusable vision model fails the turn
+  closed rather than silently answering blind. See ADR-017.
 - **Egress allowlist.** Model endpoints are validated against
   `AI_PROVIDER_ALLOWED_ORIGINS` twice: at model *registration* time
   (`assertEndpointAllowed`, exported from the gateway for the admin API) and

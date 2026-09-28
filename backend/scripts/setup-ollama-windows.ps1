@@ -7,7 +7,7 @@
   and runs natively on Windows with GPU support. This script:
     1. Checks whether Ollama is installed (downloads the official installer
        if not),
-    2. Pulls the platform's default chat and embedding models,
+    2. Pulls the platform's default chat, embedding, and vision models,
     3. Verifies the install with `ollama list`.
 
   After running it, point the backend at this host:
@@ -25,6 +25,7 @@
 param(
   [string]$ChatModel = 'llama3.1:8b',
   [string]$EmbeddingModel = 'nomic-embed-text',
+  [string]$VisionModel = 'qwen2.5vl:7b',
   [switch]$SkipInstall
 )
 
@@ -81,7 +82,7 @@ Write-Host 'Waiting for the Ollama server...'
 Wait-OllamaReady
 Write-Host 'Ollama server is up.'
 
-foreach ($model in @($ChatModel, $EmbeddingModel)) {
+foreach ($model in @($ChatModel, $EmbeddingModel, $VisionModel)) {
   Write-Host "Pulling model: $model (this can take a while on first run)..."
   & ollama pull $model
   if ($LASTEXITCODE -ne 0) {

@@ -41,7 +41,14 @@ import { Errors, AppError } from '../../errors.js';
 import { tenantOp, withTenantTx } from '../../db/mongo.js';
 import { recordAudit, recordAuditInTx } from '../../audit/audit.js';
 import { KNOWN_CAPABILITIES, resolveServingModel } from './modelLifecycle.js';
-import { getApprovedModelForUser, listApprovedModelsForUser, ensureTenantDefaultModel, type ApprovedModel } from './modelRegistry.js';
+import {
+  getApprovedModelForUser,
+  listApprovedModelsForUser,
+  ensureTenantDefaultModel,
+  ensureVisionModel,
+  isVisionCapableModel,
+  type ApprovedModel,
+} from './modelRegistry.js';
 
 export type Capability = (typeof KNOWN_CAPABILITIES)[number];
 export type RoutingStrategy = 'quality' | 'latency' | 'cost';
@@ -252,6 +259,75 @@ function noModelAvailable(requested: Capability): Error {
 }
 
 /**
+ * Resolve the platform vision model for a turn carrying image attachments.
+ *
+ * Unlike the other capabilities this NEVER falls back to the text chat
+ * default: the default model (llama3.1:8b) is text-only and must never
+ * receive image payloads. Resolution order:
+ *
+ * 1. The admin-configured vision serving default (verified servable and
+ *    authorized for this caller by resolveServingModel) — and verified to
+ *    actually advertise vision capability, so a misconfigured text-only
+ *    default can never receive image payloads.
+ * 2. The platform vision model (ensure-on-read seed), re-verified for this
+ *    caller via getApprovedModelForUser so an explicit revocation still
+ *    denies.
+ *
+ * Fails closed (NO_APPROVED_MODEL) when no servable vision model exists —
+ * an admin disabled the vision model deliberately.
+ */
+export async function resolveVisionModel(options: {
+  tenantId: string;
+  userId: string;
+  roleId: string;
+  requestId?: string;
+}): Promise<ApprovedModel> {
+  const { tenantId, userId, roleId, requestId } = options;
+  try {
+    const serving = await resolveServingModel(tenantId, userId, roleId, 'vision');
+    if (serving) {
+      // A serving default is admin-configured, not capability-checked: a
+      // text-only model in the vision slot must never receive image payloads.
+      if (isVisionCapableModel(serving)) return serving;
+      await recordAudit({
+        tenantId,
+        userId,
+        requestId,
+        action: 'MODEL_CAPABILITY_FALLBACK',
+        resource: 'model',
+        resourceId: serving.id,
+        success: false,
+        reason: `vision serving default "${serving.name}" is not vision-capable; falling back to platform vision model`,
+        metadata: { capability: 'vision', misconfiguredModel: serving.name },
+      });
+    }
+  } catch (error) {
+    // Only the expected "stale default" failure falls through to the
+    // platform vision model. Anything else (outage, programming bug) must
+    // surface rather than masquerade as a healthy resolution.
+    if (!(error instanceof AppError) || error.code !== 'MODEL_NOT_APPROVED') throw error;
+    await recordAudit({
+      tenantId,
+      userId,
+      requestId,
+      action: 'MODEL_CAPABILITY_FALLBACK',
+      resource: 'model',
+      resourceId: 'none',
+      success: false,
+      reason: `stale vision serving default: ${error.message}; falling back to platform vision model`,
+      metadata: { capability: 'vision', resolutionFailure: error.message },
+    });
+  }
+  const ensured = await ensureVisionModel();
+  if (ensured) {
+    return getApprovedModelForUser(ensured.id, tenantId, userId, roleId);
+  }
+  throw noModelAvailable('vision');
+}
+
+export { isVisionCapableModel };
+
+/**
  * Resolve the model serving a turn for a capability.
  *
  * - 'chat' resolves exactly as before (chat serving default, then legacy
@@ -284,8 +360,15 @@ export async function resolveCapabilityModel(options: {
     return { requested, resolved: 'chat', model, fallbackUsed: false, strategy: policy.strategy };
   }
 
-  if (requested === 'embeddings') {
-    // The embeddings slot is not a chat model: document retrieval and
+  if (requested === 'vision') {
+    // Vision turns never fall back to the text chat default: the default
+    // model is text-only and must never receive image payloads. Fails closed
+    // (NO_APPROVED_MODEL) when no servable vision model exists.
+    const model = await resolveVisionModel({ tenantId, userId, roleId, requestId });
+    return { requested, resolved: 'vision', model, fallbackUsed: false, strategy: policy.strategy };
+  }
+
+  if (requested === 'embeddings') {    // The embeddings slot is not a chat model: document retrieval and
     // ingestion resolve through resolveEmbeddingProvider (see
     // docs/inference.md §3). A chat turn asking for 'embeddings' gets the
     // chat default, audited, rather than a confusing failure.

@@ -77,6 +77,10 @@ export async function extractDocument(
   bytes: Uint8Array,
   mimeType: string
 ): Promise<ExtractedSection[]> {
+  // Images are vision inputs, not text documents: they carry no extractable
+  // text. The ingestion pipeline marks image documents READY without chunks;
+  // the raw bytes are served to vision-capable models at chat time.
+  if (mimeType.startsWith('image/')) return [];
   if (mimeType === 'text/plain' || mimeType === 'text/csv' || mimeType === 'text/markdown') {
     return enforceTextLimit([{ text: decodeText(bytes), sourceLocation: 'document' }]);
   }

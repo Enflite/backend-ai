@@ -8,9 +8,11 @@ import { requirePermission } from '../authz/middleware.js';
 import { CLASSIFICATIONS, Classification, AuthContext } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
 import { applyContextWindow, GatewayTelemetry, ProviderToolDefinition, streamMetadata } from '../ai/gateway/gateway.js';
+import type { ChatImage } from '../ai/providers/types.js';
 import { getApprovedModelForUser } from '../ai/gateway/modelRegistry.js';
-import { resolveCapabilityModel, resolveDefaultOpenModel, type CapabilityResolution } from '../ai/gateway/capabilityRouter.js';
+import { isVisionCapableModel, resolveCapabilityModel, resolveDefaultOpenModel, resolveVisionModel, type CapabilityResolution } from '../ai/gateway/capabilityRouter.js';
 import { retrieveAuthorizedContext } from '../rag/retrieval.js';
+import { resolveChatDocuments } from './imageAttachments.js';
 import { recordAudit } from '../audit/audit.js';
 import { toolRegistry, zodToJsonSchema } from '../tools/gateway.js';
 import { wrapRetrievedContext, buildNoEvidenceNotice } from './systemPrompt.js';
@@ -35,9 +37,12 @@ const chatBodySchema = z.object({
   classification: z.enum(CLASSIFICATIONS).optional(),
   documentIds: z.array(z.string().uuid()).max(100).optional(),
   // Optional capability hint for Phase 6 routing ('chat' | 'syteline' |
-  // 'coding' | 'embeddings'). When omitted the turn's capability is detected
-  // from the message text. An explicit modelId still wins over routing.
-  capability: z.enum(['chat', 'syteline', 'coding', 'embeddings']).optional(),
+  // 'coding' | 'embeddings' | 'vision'). When omitted the turn's capability
+  // is detected from the message text — except when image attachments are
+  // present, which force 'vision' regardless. An explicit modelId still wins
+  // over routing, unless the turn carries images and the selected model
+  // cannot view them (then the vision model serves, with a notice).
+  capability: z.enum(['chat', 'syteline', 'coding', 'embeddings', 'vision']).optional(),
   // Optional repo files for grounded coding help ("explain this code").
   // Assembled into a path-labeled, budget-capped context block; the model
   // must cite these paths and never invent others.
@@ -339,11 +344,61 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     // SyteLine family is actually available to this caller.
     const providerTools = buildProviderTools(auth, classification);
     const sytelineToolsOffered = providerTools.some((tool) => tool.function.name.startsWith('syteline.'));
-    // Phase 6 capability routing: an explicit `capability` on the request
-    // wins; otherwise the turn's capability is detected from its own text.
-    const requestedCapability = parsed.data.capability ?? detectCapability(parsed.data.content, { sytelineToolsOffered });
+    // Vision inputs: split the turn's selected document IDs into authorized
+    // image attachments (bytes loaded, size-bounded) and text document IDs
+    // for the RAG path. Images never enter RAG — they have no text chunks by
+    // design, and a "no evidence" notice must not fire for them.
+    const resolvedDocs = await resolveChatDocuments(auth, parsed.data.documentIds);
+    const imageAttachments = resolvedDocs.images;
+    const hasImages = imageAttachments.length > 0;
+    // Phase 6 capability routing: image attachments force the 'vision'
+    // capability; otherwise an explicit `capability` on the request wins,
+    // else the turn's capability is detected from its own text.
+    const requestedCapability = hasImages
+      ? 'vision'
+      : (parsed.data.capability ?? detectCapability(parsed.data.content, { sytelineToolsOffered }));
     let capabilityResolution: CapabilityResolution | undefined;
-    if (!modelId) {
+    let visionSwitchNotice: string | null = null;
+    if (hasImages) {
+      // Vision turns: the text chat default is text-only and must never
+      // receive image payloads. An explicitly selected model is kept only
+      // when it advertises vision capability; otherwise the platform vision
+      // model serves the turn — with a notice, never silently.
+      let selectedVisionModel: Awaited<ReturnType<typeof getApprovedModelForUser>> | null = null;
+      if (modelId) {
+        try {
+          const selected = await getApprovedModelForUser(modelId, auth.tenantId, auth.userId, auth.roleId);
+          if (isVisionCapableModel(selected)) selectedVisionModel = selected;
+        } catch (error) {
+          // Only the expected "not approved for this caller" failure falls
+          // through to the vision model. Anything else (database outage,
+          // programming bug) must surface, not masquerade as a model switch.
+          if (!(error instanceof AppError) || error.code !== 'MODEL_NOT_APPROVED') {
+            throw error;
+          }
+        }
+      }
+      const visionModel = selectedVisionModel ?? (await resolveVisionModel({
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        roleId: auth.roleId,
+        requestId: req.requestId,
+      }));
+      if (!selectedVisionModel && modelId && modelId !== visionModel.id) {
+        const count = imageAttachments.length;
+        visionSwitchNotice =
+          `Reading your image${count === 1 ? '' : 's'} with ${visionModel.name} — ` +
+          `the selected model can't view images.`;
+      }
+      modelId = visionModel.id;
+      capabilityResolution = {
+        requested: 'vision',
+        resolved: 'vision',
+        model: visionModel,
+        fallbackUsed: false,
+        strategy: 'quality',
+      };
+    } else if (!modelId) {
       // Capability-routed model: the best authorized model for the turn's
       // capability, with audited fallback to the chat default when the
       // capability model is unavailable. The user never sees this machinery
@@ -410,7 +465,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
 
       // The SQL query sorted DESC + LIMIT then reversed; the MongoDB version
       // does the same so the 50 most recent messages come back oldest-first.
-      const history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = (
+      const history: Array<{ role: 'user' | 'assistant' | 'system'; content: string; images?: ChatImage[] }> = (
         await tenantOp(auth.tenantId, (db) =>
           db
             .collection<MessageDoc>('messages')
@@ -444,11 +499,15 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       history.push({ role: 'user', content: parsed.data.content });
 
       let citations: Awaited<ReturnType<typeof retrieveAuthorizedContext>>['citations'] = [];
-      if (parsed.data.documentIds?.length) {
+      // Only non-image documents go through RAG. Image attachments are
+      // vision inputs (no text chunks by design), so an image-only turn must
+      // NOT produce the "no evidence" notice — that instruction is for
+      // missing text, not for pictures the model can see.
+      if (resolvedDocs.textDocumentIds.length > 0) {
         const retrievalStart = Date.now();
         let retrieval: Awaited<ReturnType<typeof retrieveAuthorizedContext>>;
         try {
-          retrieval = await retrieveAuthorizedContext(auth, parsed.data.content, parsed.data.documentIds);
+          retrieval = await retrieveAuthorizedContext(auth, parsed.data.content, resolvedDocs.textDocumentIds);
         } catch (error) {
           recordRetrieval('error', (Date.now() - retrievalStart) / 1000);
           throw error;
@@ -484,6 +543,17 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           const userTurn = history.pop()!;
           history.push({ role: 'user', content: assembled.context });
           history.push(userTurn);
+        }
+      }
+
+      // Vision inputs ride on the turn's actual user message (the last
+      // user-role entry after RAG/code-context insertion). They are NOT
+      // persisted to the message transcript — the bytes live in object
+      // storage and the document row is the durable record.
+      if (hasImages) {
+        const currentUserTurn = [...history].reverse().find((message) => message.role === 'user');
+        if (currentUserTurn) {
+          currentUserTurn.images = imageAttachments.map((attachment) => attachment.image);
         }
       }
 
@@ -526,6 +596,9 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           sytelineToolsAvailable,
           codingMode,
           repoToolsAvailable,
+          // Vision turns get the VISION INPUT section: read what is actually
+          // visible, quote error text exactly, diagnose screenshots.
+          visionMode: hasImages,
           userMemory: userMemorySection,
         }).text;
       const chatSystemPrompt = buildTurnSystemPrompt(model.name, model.version);
@@ -627,6 +700,15 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
       }))) {
         // Nobody is listening; skip straight to persistence/cleanup.
         abortController.abort();
+      }
+      // Vision turns that switched away from the selected text model say so
+      // out loud — a silent model switch would be a trust violation.
+      if (visionSwitchNotice) {
+        await send('notice', {
+          code: 'MODEL_VISION_SWITCH',
+          message: visionSwitchNotice,
+          model: { id: model.id, name: model.name },
+        });
       }
 
       const telemetry: GatewayTelemetry = {};

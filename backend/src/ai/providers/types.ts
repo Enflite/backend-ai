@@ -27,6 +27,27 @@ export interface ChatMessage {
   }>;
   tool_call_id?: string;
   name?: string;
+  /**
+   * Vision inputs attached to a user message. Only vision-capable models may
+   * receive them: providers map these to `images` (Ollama) or `image_url`
+   * content parts (OpenAI-compatible). Text-only models must never be
+   * offered a message carrying images — the chat route resolves a vision
+   * model for turns that attach images.
+   */
+  images?: ChatImage[];
+}
+
+/**
+ * One vision input: raw image bytes, base64-encoded (no `data:` URL prefix),
+ * plus the MIME type so providers can build data URLs when the API needs
+ * them. The bytes come from the platform's own object storage, already
+ * validated at upload (magic bytes) and scanned for malware during ingestion.
+ */
+export interface ChatImage {
+  /** Base64-encoded image bytes (no data-URL prefix). */
+  data: string;
+  /** MIME type, e.g. 'image/png'. */
+  mimeType: string;
 }
 
 /** OpenAI-compatible function tool definition sent to the provider. */

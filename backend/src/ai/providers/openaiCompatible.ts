@@ -13,6 +13,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type {
+  ChatMessage,
   ChatProvider,
   ProviderEvent,
   StreamChatOptions,
@@ -47,6 +48,31 @@ export class OpenAICompatibleProvider implements ChatProvider {
   constructor(private readonly config: OpenAICompatibleProviderConfig) {}
 
   /**
+   * Maps platform chat messages to OpenAI chat-completion messages. Messages
+   * without images pass through unchanged; a message with vision inputs is
+   * converted to a content-parts array (text part first, then one `image_url`
+   * part per image with a `data:` URL). Tool calls and tool-result fields are
+   * preserved verbatim alongside the content parts.
+   */
+  private toApiMessages(messages: ChatMessage[]): unknown[] {
+    return messages.map((message) => {
+      if (!message.images?.length) return message;
+      const parts: Array<Record<string, unknown>> = [];
+      if (typeof message.content === 'string' && message.content !== '') {
+        parts.push({ type: 'text', text: message.content });
+      }
+      for (const image of message.images) {
+        parts.push({
+          type: 'image_url',
+          image_url: { url: `data:${image.mimeType};base64,${image.data}` },
+        });
+      }
+      const { images: _dropped, ...rest } = message;
+      return { ...rest, content: parts };
+    });
+  }
+
+  /**
    * Streams an OpenAI-compatible chat completion as discrete events.
    *
    * This is a genuine provider integration: requests go to the configured
@@ -76,7 +102,12 @@ export class OpenAICompatibleProvider implements ChatProvider {
       headers['Authorization'] = `Bearer ${apiKey}`;
     }
 
-    const body: Record<string, unknown> = { model, messages, stream: true, stream_options: { include_usage: true } };
+    const body: Record<string, unknown> = {
+      model,
+      messages: this.toApiMessages(messages),
+      stream: true,
+      stream_options: { include_usage: true },
+    };
     if (tools?.length) {
       body.tools = tools;
       body.tool_choice = 'auto';

@@ -4,6 +4,8 @@ import { tenantOp } from '../db/mongo.js';
 import { Errors } from '../errors.js';
 import { ObjectStorage, s3Storage } from '../storage/storage.js';
 import { ExtractedSection, extractDocument } from './extraction.js';
+import { isImageMimeType } from './fileValidation.js';
+import { parseImageDimensions } from './imageMeta.js';
 import { MalwareScanner, malwareScanner, scanMayProceed } from './malware.js';
 
 import type { EmbeddingProvider } from '../ai/providers/types.js';
@@ -48,6 +50,9 @@ interface IngestionDocumentState {
   errorCode: string | null;
   updatedAt: Date;
   deletedAt?: Date | null;
+  /** Image-only metadata, set when vision inputs reach READY. */
+  imageWidth?: number | null;
+  imageHeight?: number | null;
 }
 
 /** Shape of the `document_chunks` MongoDB documents (ADR-014). */
@@ -217,6 +222,31 @@ export async function ingestDocument(
       return 'QUARANTINED';
     }
     await throwIfCanceled();
+
+    // Images are vision inputs, not text documents: after the malware scan
+    // they skip text extraction, embedding, and chunking entirely. The raw
+    // bytes stay in object storage; the chat path loads them (with per-turn
+    // byte caps) for vision-capable models. Dimensions are parsed from the
+    // container headers for operator metadata — a parse failure is recorded
+    // as null, never as an ingestion error.
+    if (isImageMimeType(document.mimeType)) {
+      const dimensions = parseImageDimensions(document.mimeType, bytes);
+      await tenantOp(tenantId, (db) =>
+        db.collection<IngestionDocumentState>('documents').updateOne(
+          { _id: documentId, tenantId },
+          {
+            $set: {
+              status: 'READY',
+              errorCode: null,
+              updatedAt: new Date(),
+              imageWidth: dimensions?.width ?? null,
+              imageHeight: dimensions?.height ?? null,
+            },
+          }
+        )
+      );
+      return 'READY';
+    }
 
     const chunks = chunkSections(await dependencies.extractor(bytes, document.mimeType));
     if (chunks.length === 0) throw Errors.badRequest('EMPTY_DOCUMENT', 'No extractable document text found');
