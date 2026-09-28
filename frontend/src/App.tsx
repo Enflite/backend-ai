@@ -139,15 +139,19 @@ export default function App() {
   }
 
   /** One tap: switch provider, keep the model when it belongs to the new
-   *  group, otherwise auto-select the provider's preferred model. */
+   *  group, otherwise auto-select the provider's preferred model. A group
+   *  with no servable models (e.g. key set but seeds blocked by the egress
+   *  allowlist) is not switchable — switching would desync the switcher
+   *  from the model that actually serves the turn. */
   function switchProvider(group: ProviderGroup) {
     if (group === activeProvider) return;
+    const groupModels = models.filter((model) => model.enabled && model.providerGroup === group);
+    if (groupModels.length === 0) return;
     activeProviderRef.current = group;
     setActiveProvider(group);
     localStorage.setItem(PROVIDER_STORAGE_KEY, group);
     setSelectedModel((current) => {
       if (current && current.providerGroup === group) return current;
-      const groupModels = models.filter((model) => model.enabled && model.providerGroup === group);
       return groupModels.find((model) => model.isProviderDefault) ?? groupModels[0] ?? current;
     });
     setShowModelSelector(false);
@@ -412,7 +416,18 @@ export default function App() {
             {activeConversation && <><h1 className="text-sm font-medium truncate max-w-xs">{activeConversation.title}</h1><ClassificationBadge level={activeConversation.classification} /></>}
           </div>
           <div className="flex items-center gap-3">
-            <ProviderSwitcher providers={providers} active={activeProvider} onSelect={switchProvider} />
+            <ProviderSwitcher
+              providers={providers.map((p) => {
+                const hasModels = models.some((m) => m.enabled && m.providerGroup === p.key);
+                return {
+                  ...p,
+                  enabled: p.enabled && hasModels,
+                  hint: hasModels ? p.hint : 'No models available for this provider — ask your admin',
+                };
+              })}
+              active={activeProvider}
+              onSelect={switchProvider}
+            />
             <label className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--muted-foreground)' }} title="Classification applied to newly created conversations">
               Classification
               <select
