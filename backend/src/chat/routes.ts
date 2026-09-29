@@ -439,10 +439,13 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
         const count = imageAttachments.length;
         const visionGroup = providerGroupFor(visionModel.provider);
         const sameProvider = visionGroup === selectedGroup;
+        // The vision model's own provider label — while OLLAMA_ENABLED=false
+        // image turns are read by the Claude vision model, not Enflite.
+        const visionProviderLabel = providerLabelFor(visionModel.provider);
         visionSwitchNotice = sameProvider
           ? `Reading your image${count === 1 ? '' : 's'} with ${displayNameForModel(visionModel)} — ` +
             `the selected model can't view images.`
-          : `Reading your image${count === 1 ? '' : 's'} with ${displayNameForModel(visionModel)} (Enflite) — ` +
+          : `Reading your image${count === 1 ? '' : 's'} with ${displayNameForModel(visionModel)} (${visionProviderLabel}) — ` +
             `${selectedLabel} has no vision model available right now.`;
       }
       modelId = visionModel.id;

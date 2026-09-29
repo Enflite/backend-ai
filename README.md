@@ -141,6 +141,19 @@ through. The active provider is always visible on the switcher.
   only after an admin sets their API key (see below); without a key they show
   as disabled with a hint, never as a dead button.
 
+**Launch mode: Claude-only.** The app currently ships with
+`OLLAMA_ENABLED=false` (the default), which parks the whole local stack
+behind a feature flag while the launch runs on Claude: the Enflite provider
+option is hidden, Ollama models are never listed or served, image turns are
+read by Claude Sonnet 4, and no Ollama connection is attempted at startup
+(the backend logs one informational line saying Ollama is disabled). When
+the local stack is ready, set `OLLAMA_ENABLED=true` (accepts
+`true`/`1`/`yes`) and restart the backend — privacy-aware local routing,
+local embeddings, and the Enflite switcher option all come back, and a
+sensitive turn with no reachable local model fails closed again with
+`503 PRIVACY_LOCAL_MODEL_UNAVAILABLE` instead of silently routing to
+Claude.
+
 **Data residency — read this before switching.** Enflite keeps your prompts on
 your own infrastructure. Selecting Claude or OpenAI sends your prompts and
 attachments to Anthropic's or OpenAI's cloud. The switcher labels each provider
@@ -154,7 +167,10 @@ sensitive data *after the full prompt is assembled* — history, retrieved
 document chunks, tool results, memory, PII. Anything touching customer,
 finance, or proprietary data stays on local Enflite (even overriding a
 manual Claude pick, with a friendly notice); clean turns go to Claude
-automatically. Repo source code stays Claude-routable by default (explicit,
+automatically. Exception while `OLLAMA_ENABLED=false` (Claude-only launch):
+with no local stack to keep data on, sensitive turns are served by Claude
+silently — no user-facing notice — but the routing decision stays in the
+audit trail for admins. Repo source code stays Claude-routable by default (explicit,
 flippable tenant flag). Web access follows the same boundary:
 Claude-routed turns get Claude's built-in web search, sensitive turns stay
 local and offline. Admins can adjust the enforced categories or disable

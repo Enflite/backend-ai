@@ -114,6 +114,7 @@ type MinimalDb = {
     findOne(filter: unknown, options?: unknown): Promise<T | null>;
     find(filter: unknown): { sort(spec: unknown): { toArray(): Promise<T[]> } };
     updateOne(filter: unknown, update: unknown): Promise<unknown>;
+    updateMany(filter: unknown, update: unknown): Promise<unknown>;
     insertOne(doc: unknown): Promise<unknown>;
   };
 };
@@ -221,6 +222,9 @@ function staleOllamaEndpointRefresh(doc: ModelDoc): boolean {
  *   (wiped/dev database); a duplicate-key race re-reads instead of failing.
  */
 export async function ensureTenantDefaultModel(): Promise<ApprovedModel | null> {
+  // Claude-only launch: the tenant default is the Claude model, never the
+  // Ollama seed — no Ollama doc is created, resolved, or flagged default.
+  if (!config.OLLAMA_ENABLED) return ensureTenantDefaultCloudModel();
   const db = (await getDb()) as unknown as MinimalDb;
   const existing = await findServableDefaultModel(db);
   if (existing) {
@@ -246,6 +250,41 @@ export async function ensureTenantDefaultModel(): Promise<ApprovedModel | null> 
     const raced = await findServableDefaultModel(db);
     return raced ? toApprovedModel(raced) : null;
   }
+}
+
+/**
+ * Tenant default for the Claude-only launch (OLLAMA_ENABLED=false).
+ *
+ * The default is the configured Claude model — flagged `isDefault` so
+ * later reads find it by flag. An admin-flagged default of any still-
+ * servable provider wins; a stale Ollama default flag (from before the
+ * flag was flipped) is retired because an Ollama doc cannot serve while
+ * the flag is off. No Ollama doc is ever created on this path.
+ *
+ * Returns null when no servable default exists (Claude not configured):
+ * the caller surfaces MODEL_UNAVAILABLE rather than a dead model.
+ */
+async function ensureTenantDefaultCloudModel(): Promise<ApprovedModel | null> {
+  const db = (await getDb()) as unknown as MinimalDb;
+  await db
+    .collection<ModelDoc>('models')
+    .updateMany({ provider: 'ollama', isDefault: true }, { $set: { isDefault: false } });
+  const existing = await findServableDefaultModel(db);
+  if (existing && existing.provider !== 'ollama') {
+    return toApprovedModel(existing);
+  }
+  if (!isClaudeConfigured()) return null;
+  await ensureCloudProviderModels();
+  const claude = await db.collection<ModelDoc>('models').findOne({
+    provider: 'claude',
+    status: { $in: [...SERVABLE_STATUSES] },
+    enabled: true,
+  });
+  if (!claude) return null;
+  if (claude.isDefault !== true) {
+    await db.collection<ModelDoc>('models').updateOne({ _id: claude._id }, { $set: { isDefault: true } });
+  }
+  return toApprovedModel({ ...claude, isDefault: true });
 }
 
 /** The servable vision default model doc, if one exists. Prefers an
@@ -324,6 +363,10 @@ function visionModelSeed(now: Date): Record<string, unknown> {
  *   exists; a duplicate-key race re-reads instead of failing.
  */
 export async function ensureVisionModel(): Promise<ApprovedModel | null> {
+  // Claude-only launch: the Qwen vision seed must never be created —
+  // image turns resolve the configured Claude vision model instead (see
+  // resolveVisionModel in capabilityRouter.ts).
+  if (!config.OLLAMA_ENABLED) return null;
   const db = (await getDb()) as unknown as MinimalDb;
   const existing = await findServableVisionModel(db);
   if (existing) {
@@ -384,15 +427,19 @@ export async function listApprovedModelsForUser(tenantId: string, userId: string
     // Default-open vision: the platform vision model is implicitly available
     // to every user in the tenant — no grant row needed — unless explicitly
     // revoked for their principal. Ensure-on-read so /models lists it even
-    // before the first image turn seeded it.
-    await ensureVisionModel();
-    const visionDoc = await findServableVisionModel(db as unknown as MinimalDb);
-    if (visionDoc && !modelIds.includes(visionDoc._id)) {
-      const revocation = await db.collection<ModelAccessDoc>('model_access').findOne(
-        { tenantId, modelId: visionDoc._id, $or: principalOr(userId, roleId), revoked: true },
-        { projection: { _id: 1 } }
-      );
-      if (!revocation) modelIds.push(visionDoc._id);
+    // before the first image turn seeded it. Skipped entirely while
+    // OLLAMA_ENABLED=false: the Qwen seed is never created and image turns
+    // resolve the Claude vision model instead.
+    if (config.OLLAMA_ENABLED) {
+      await ensureVisionModel();
+      const visionDoc = await findServableVisionModel(db as unknown as MinimalDb);
+      if (visionDoc && !modelIds.includes(visionDoc._id)) {
+        const revocation = await db.collection<ModelAccessDoc>('model_access').findOne(
+          { tenantId, modelId: visionDoc._id, $or: principalOr(userId, roleId), revoked: true },
+          { projection: { _id: 1 } }
+        );
+        if (!revocation) modelIds.push(visionDoc._id);
+      }
     }
     // Default-open cloud providers: every servable platform cloud seed is
     // implicitly available — no grant row needed — unless explicitly
@@ -501,15 +548,19 @@ export function isOpenAIConfigured(): boolean {
 }
 
 /**
- * A cloud-provider model doc may only serve traffic while its provider is
- * configured (API key set, not admin-disabled). Enforced at approval time —
- * the UI hides disabled providers, but the API must reject them too, even
- * when a client passes a cloud model id directly (e.g. a stored
- * conversation model). Non-cloud providers are unaffected.
+ * A provider's model docs may only be listed or served while the provider
+ * is enabled. Cloud providers are enabled by API key (not admin-disabled);
+ * the local Ollama provider is enabled by the OLLAMA_ENABLED flag.
+ * Enforced at approval time — the UI hides disabled providers, but the API
+ * must reject them too, even when a client passes a model id directly
+ * (e.g. a stored conversation model). Other providers are unaffected.
  */
 export function cloudProviderServingAllowed(provider: string): boolean {
   if (provider === 'claude') return isClaudeConfigured();
   if (provider === 'openai') return isOpenAIConfigured();
+  // Claude-only launch: while OLLAMA_ENABLED=false no Ollama doc — seeded
+  // or admin-registered — may be listed or served.
+  if (provider === 'ollama') return config.OLLAMA_ENABLED;
   return true;
 }
 

@@ -20,6 +20,14 @@ const { getDbMock, tenantOpMock } = vi.hoisted(() => {
   return { getDbMock, tenantOpMock };
 });
 
+// These suites pin the local-stack behavior (Ollama seeds, Qwen vision
+// seed): the local stack is on here; flag-off behavior is covered in
+// ollamaFlag.test.ts.
+vi.mock('../src/config.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../src/config.js')>();
+  return { ...mod, config: { ...mod.config, OLLAMA_ENABLED: true } };
+});
+
 vi.mock('../src/db/mongo.js', () => ({
   getDb: getDbMock,
   tenantOp: tenantOpMock,

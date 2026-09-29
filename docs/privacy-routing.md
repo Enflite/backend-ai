@@ -102,6 +102,17 @@ plain-language message asking the admin to approve a local model —
 sensitive context is never sent to Claude as a fallback. This is the
 default-deny backbone of the whole policy.
 
+### OLLAMA_ENABLED=false (Claude-only launch)
+
+The one exception is the operator's explicit choice to run without the
+local stack: while `OLLAMA_ENABLED=false`, a sensitive turn is served by
+the default Claude model instead of failing closed. This is **silent from
+the user's perspective** — no user-facing notice frame, no activity-feed
+entry — but the routing decision is written to the audit trail
+(`PRIVACY_ROUTING_LOCAL_DISABLED`, with detection reasons and the serving
+model) so admins can see it. Flip `OLLAMA_ENABLED=true` and the
+fail-closed guarantee above applies again in full.
+
 ## Web access
 
 **Web access = Claude's built-in web search on non-sensitive turns;

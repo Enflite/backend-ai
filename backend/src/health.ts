@@ -3,10 +3,10 @@ import { getDb } from './db/mongo.js';
 import { config } from './config.js';
 import { s3Storage } from './storage/storage.js';
 
-export type DependencyStatus = 'ok' | 'degraded' | 'unavailable' | 'not_configured';
+export type DependencyStatus = 'ok' | 'degraded' | 'unavailable' | 'not_configured' | 'disabled';
 
 export interface DependencyCheck {
-  /** ok | degraded | unavailable | not_configured (dependency not set up). */
+  /** ok | degraded | unavailable | not_configured (dependency not set up) | disabled (operator-gated off). */
   status: DependencyStatus;
   /** True when this dependency gates readiness: a non-ok critical check → 503. */
   critical: boolean;
@@ -90,8 +90,13 @@ async function checkEmbeddings(): Promise<DependencyCheck> {
   // `unavailable` while /ready stays 200.
   // The default provider is Ollama, whose base URL comes from
   // OLLAMA_BASE_URL — EMBEDDING_BASE_URL is only set for the
-  // openai-compatible path.
+  // openai-compatible path. While OLLAMA_ENABLED=false the Ollama
+  // embeddings backend is operator-disabled: report it as such without
+  // attempting any connection.
   const isOllama = config.EMBEDDING_PROVIDER === 'ollama';
+  if (isOllama && !config.OLLAMA_ENABLED) {
+    return { status: 'disabled', critical: false, detail: 'OLLAMA_ENABLED=false' };
+  }
   const baseUrl = isOllama ? config.OLLAMA_BASE_URL : config.EMBEDDING_BASE_URL;
   if (!baseUrl) {
     return { status: 'not_configured', critical: false };

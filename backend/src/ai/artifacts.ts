@@ -17,7 +17,7 @@
  * for the deployment runbook.
  */
 import { config } from '../config.js';
-import { Errors } from '../errors.js';
+import { AppError, Errors } from '../errors.js';
 
 export interface OllamaModelStatus {
   name: string;
@@ -33,6 +33,21 @@ function devOnlyGuard(): void {
       'Model artifact management is for local development only and dev providers are not enabled on this server'
     );
   }
+}
+
+/**
+ * Fail closed when the operator disabled local Ollama inference: model
+ * artifact operations (list/pull) must not dial a host the operator
+ * turned off. The error names the flag so the fix is obvious.
+ */
+function ollamaEnabledGuard(operation: string): void {
+  if (config.OLLAMA_ENABLED) return;
+  throw new AppError(
+    503,
+    'OLLAMA_DISABLED',
+    `Local Ollama inference is disabled (OLLAMA_ENABLED=false): ${operation} is unavailable. ` +
+      `Set OLLAMA_ENABLED=true to re-enable the local Enflite provider.`
+  );
 }
 
 function allowedModelOrThrow(name: string): string {
@@ -57,12 +72,14 @@ function allowedModelOrThrow(name: string): string {
  */
 export function assertLocalPullAllowed(name: string): string {
   devOnlyGuard();
+  ollamaEnabledGuard('Ollama model pulls');
   return allowedModelOrThrow(name);
 }
 
 /** List locally cached Ollama models (weight-download gate applies). */
 export async function listLocalModels(): Promise<OllamaModelStatus[]> {
   devOnlyGuard();
+  ollamaEnabledGuard('Ollama model listing');
   const response = await fetch(`${config.OLLAMA_BASE_URL.replace(/\/+$/, '')}/api/tags`, {
     signal: AbortSignal.timeout(15000),
   });

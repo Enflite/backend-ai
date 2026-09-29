@@ -646,16 +646,21 @@ describe('/admin/models/artifacts (local dev only)', () => {
   const originalFetch = globalThis.fetch;
   const originalAllowDev = config.ALLOW_DEV_PROVIDERS;
   const originalNames = config.OLLAMA_ALLOWED_MODELS;
+  const originalOllamaEnabled = config.OLLAMA_ENABLED;
 
   beforeEach(() => {
     config.ALLOW_DEV_PROVIDERS = true;
     config.OLLAMA_ALLOWED_MODELS = 'llama3.1:8b,nomic-embed-text';
+    // These tests exercise the local-stack artifact paths; the
+    // OLLAMA_ENABLED=false behavior is covered in ollamaFlag.test.ts.
+    config.OLLAMA_ENABLED = true;
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
     config.ALLOW_DEV_PROVIDERS = originalAllowDev;
     config.OLLAMA_ALLOWED_MODELS = originalNames;
+    config.OLLAMA_ENABLED = originalOllamaEnabled;
   });
 
   it('refuses artifact access when dev providers are disabled', async () => {

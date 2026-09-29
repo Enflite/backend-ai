@@ -110,7 +110,9 @@ export async function modelRoutes(fastify: FastifyInstance): Promise<void> {
 
   // Provider availability for the one-tap switcher (ADR-018). Never
   // includes keys or key material: `configured` only reports presence.
-  // Enflite (local models) is always available; cloud providers appear
+  // Enflite (local models) is operator-gated by OLLAMA_ENABLED: while the
+  // flag is off it is omitted from the list entirely so the switcher only
+  // ever shows providers that can actually serve. Cloud providers appear
   // disabled with an admin hint when their key is missing.
   fastify.get(
     '/providers',
@@ -118,7 +120,9 @@ export async function modelRoutes(fastify: FastifyInstance): Promise<void> {
       preHandler: [requireAuth, requirePermission('model:use')],
     },
     async (req, reply) => {
-      const providers = PROVIDER_GROUPS.map((key: ProviderGroup) => {
+      const providers = PROVIDER_GROUPS.filter(
+        (key: ProviderGroup) => key !== 'enflite' || config.OLLAMA_ENABLED
+      ).map((key: ProviderGroup) => {
         const info = PROVIDER_GROUP_INFO[key];
         if (key === 'enflite') {
           return { ...info, configured: true, enabled: true };

@@ -14,6 +14,7 @@ import {
 } from '../src/ai/providers/factory.js';
 import {
   assertAllowedModelSource,
+  assertLocalPullAllowed,
   listLocalModels,
   pullLocalModel,
 } from '../src/ai/artifacts.js';
@@ -266,17 +267,22 @@ describe('provider factory gates', () => {
   const originalEmbeddingProvider = config.EMBEDDING_PROVIDER;
   const originalBaseUrl = config.EMBEDDING_BASE_URL;
   const originalEmbeddingModel = config.EMBEDDING_MODEL;
+  const originalOllamaEnabled = config.OLLAMA_ENABLED;
 
   beforeEach(() => {
     // Explicit per-test selection; the suite also asserts the real default
-    // (ollama) below, so no test may depend on ambient config here.
+    // (ollama) below, so no test may depend on ambient config here. The
+    // local stack is enabled for these tests — the disabled-flag behavior
+    // is covered in the next describe block.
     config.EMBEDDING_PROVIDER = 'openai-compatible';
+    config.OLLAMA_ENABLED = true;
   });
 
   afterEach(() => {
     config.EMBEDDING_PROVIDER = originalEmbeddingProvider;
     config.EMBEDDING_BASE_URL = originalBaseUrl;
     config.EMBEDDING_MODEL = originalEmbeddingModel;
+    config.OLLAMA_ENABLED = originalOllamaEnabled;
   });
 
   it('resolves the vllm/openai-compatible providers (still supported)', () => {
@@ -284,7 +290,7 @@ describe('provider factory gates', () => {
     expect(resolveChatProvider(modelRef('openai-compatible')).kind).toBe('openai-compatible');
   });
 
-  it('resolves ollama chat with no dev flag — it is the primary provider', () => {
+  it('resolves ollama chat while OLLAMA_ENABLED=true', () => {
     expect(resolveChatProvider(modelRef('ollama')).kind).toBe('ollama');
   });
 
@@ -330,21 +336,66 @@ describe('provider factory gates', () => {
   });
 });
 
+describe('ollama feature flag disabled (OLLAMA_ENABLED=false)', () => {
+  const originalOllamaEnabled = config.OLLAMA_ENABLED;
+  const originalEmbeddingProvider = config.EMBEDDING_PROVIDER;
+
+  beforeEach(() => {
+    config.OLLAMA_ENABLED = false;
+    config.EMBEDDING_PROVIDER = 'ollama';
+  });
+
+  afterEach(() => {
+    config.OLLAMA_ENABLED = originalOllamaEnabled;
+    config.EMBEDDING_PROVIDER = originalEmbeddingProvider;
+  });
+
+  it('refuses to build an Ollama chat provider and names the flag', () => {
+    try {
+      resolveChatProvider(modelRef('ollama'));
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'OLLAMA_DISABLED', statusCode: 503 });
+      expect((error as Error).message).toContain('OLLAMA_ENABLED');
+      return;
+    }
+    throw new Error('expected OLLAMA_DISABLED, but nothing threw');
+  });
+
+  it('refuses to build an Ollama embeddings provider and names the flag', () => {
+    try {
+      resolveEmbeddingProvider('ollama');
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'OLLAMA_DISABLED', statusCode: 503 });
+      expect((error as Error).message).toContain('OLLAMA_ENABLED');
+      return;
+    }
+    throw new Error('expected OLLAMA_DISABLED, but nothing threw');
+  });
+
+  it('leaves non-Ollama providers untouched', () => {
+    expect(resolveChatProvider(modelRef('vllm')).kind).toBe('openai-compatible');
+    expect(resolveChatProvider(modelRef('claude')).kind).toBe('claude');
+  });
+});
+
 describe('model artifact controls', () => {
   const originalAllowDev = config.ALLOW_DEV_PROVIDERS;
   const originalNames = config.OLLAMA_ALLOWED_MODELS;
   const originalSources = config.MODEL_SOURCE_ALLOWLIST;
+  const originalOllamaEnabled = config.OLLAMA_ENABLED;
 
   beforeEach(() => {
     config.ALLOW_DEV_PROVIDERS = true;
     config.OLLAMA_ALLOWED_MODELS = 'llama3.1:8b,nomic-embed-text';
     config.MODEL_SOURCE_ALLOWLIST = 'https://huggingface.co';
+    config.OLLAMA_ENABLED = true;
   });
 
   afterEach(() => {
     config.ALLOW_DEV_PROVIDERS = originalAllowDev;
     config.OLLAMA_ALLOWED_MODELS = originalNames;
     config.MODEL_SOURCE_ALLOWLIST = originalSources;
+    config.OLLAMA_ENABLED = originalOllamaEnabled;
   });
 
   it('blocks artifact helpers entirely when the dev flag is off', async () => {
@@ -353,6 +404,12 @@ describe('model artifact controls', () => {
     await expect(async () => {
       for await (const _ of pullLocalModel('llama3.1:8b')) { /* drain */ }
     }).rejects.toMatchObject({ code: 'MODEL_ARTIFACT_DEV_ONLY' });
+  });
+
+  it('refuses artifact operations while OLLAMA_ENABLED=false (dev flag on)', async () => {
+    config.OLLAMA_ENABLED = false;
+    await expect(listLocalModels()).rejects.toMatchObject({ code: 'OLLAMA_DISABLED', statusCode: 503 });
+    expect(() => assertLocalPullAllowed('llama3.1:8b')).toThrowError(/OLLAMA_ENABLED/);
   });
 
   it('refuses to pull a model outside the allowlist', async () => {
