@@ -32,6 +32,9 @@ vi.mock('../src/config.js', async (importOriginal) => {
       CLAUDE_ENABLED: true,
       OPENAI_API_KEY: '',
       OPENAI_ENABLED: true,
+      // All three provider groups are listed here; the flag-off omission
+      // is covered in ollamaFlag.test.ts.
+      OLLAMA_ENABLED: true,
     },
   };
 });

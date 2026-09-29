@@ -36,6 +36,14 @@ vi.mock('../src/ai/gateway/capabilityRouter.js', () => ({
   resolveVisionModel: vi.fn(),
 }));
 
+// The Ollama feature flag is ON for this suite: these tests cover the
+// local-routing and fail-closed paths with the local stack enabled.
+// Flag-off behavior lives in ollamaFlag.test.ts.
+vi.mock('../src/config.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../src/config.js')>();
+  return { ...mod, config: { ...mod.config, OLLAMA_ENABLED: true } };
+});
+
 import { tenantOp } from '../src/db/mongo.js';
 import { recordAudit } from '../src/audit/audit.js';
 import {

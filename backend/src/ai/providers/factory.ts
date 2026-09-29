@@ -16,7 +16,7 @@
  * Linux deployments.
  */
 import { config } from '../../config.js';
-import { Errors } from '../../errors.js';
+import { AppError, Errors } from '../../errors.js';
 import type { ChatProvider, EmbeddingProvider } from './types.js';
 import { OpenAICompatibleProvider } from './openaiCompatible.js';
 import { OpenAICompatibleEmbeddingProvider } from './openaiEmbeddings.js';
@@ -35,6 +35,24 @@ export interface ProviderModelRef {
 }
 
 /**
+ * Fail closed when the operator disabled local Ollama inference: nothing
+ * may construct an Ollama client (chat or embeddings) while
+ * OLLAMA_ENABLED=false — not the gateway, not indexing, not the CLI.
+ * The error names the flag so the fix is obvious. This is an intentional
+ * operator choice (launch runs Claude-only), not an outage, so the 503
+ * message says so.
+ */
+function assertOllamaEnabled(operation: string): void {
+  if (config.OLLAMA_ENABLED) return;
+  throw new AppError(
+    503,
+    'OLLAMA_DISABLED',
+    `Local Ollama inference is disabled (OLLAMA_ENABLED=false): ${operation} is unavailable. ` +
+      `Set OLLAMA_ENABLED=true to re-enable the local Enflite provider.`
+  );
+}
+
+/**
  * Resolve the chat provider for a registry model. The gateway calls this
  * AFTER authorizing the model (approval, endpoint allowlist, classification
  * policy) — the factory only picks the wire protocol.
@@ -50,9 +68,12 @@ export function resolveChatProvider(model: ProviderModelRef): ChatProvider {
         defaultTimeoutMs,
       });
     case 'ollama':
-      // Primary inference provider. No dev-only gate: the gateway
-      // authorizes the model (approval, endpoint allowlist, classification)
-      // before the factory ever constructs a provider.
+      // Primary inference provider when OLLAMA_ENABLED=true. No dev-only
+      // gate: the gateway authorizes the model (approval, endpoint
+      // allowlist, classification) before the factory ever constructs a
+      // provider — but a disabled flag fails closed before any client is
+      // built, so nothing ever dials a host the operator turned off.
+      assertOllamaEnabled('Ollama chat');
       return new OllamaProvider({
         endpoint: model.endpoint,
         defaultTimeoutMs,
@@ -109,7 +130,11 @@ export function resolveEmbeddingProvider(kind?: EmbeddingProviderKind): Embeddin
       });
     }
     case 'ollama': {
-      // Primary embedding provider. No dev-only gate (see chat case above).
+      // Primary embedding provider when OLLAMA_ENABLED=true. No dev-only
+      // gate (see chat case above) — but a disabled flag fails closed with
+      // a flag-named error so indexing/embedding operations report the
+      // actual cause instead of a connection timeout.
+      assertOllamaEnabled('Ollama embeddings');
       return new OllamaProvider({
         endpoint: config.OLLAMA_BASE_URL,
         defaultTimeoutMs: config.EMBEDDING_TIMEOUT_MS,

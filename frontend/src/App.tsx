@@ -18,6 +18,7 @@ import {
 } from './activity';
 import type { ActivityEntry, AssistantState, NoticeInput } from './activity';
 import { api, ApiError, consumeOidcFragment, mapCitation, setAccessToken, streamChat } from './api';
+import { resolveEffectiveProviderGroup } from './providerGroups';
 import type { AuthUser, Conversation, DataClassification, DocumentRecord, Message, Model, ProviderGroup, ProviderInfo, UploadedFile } from './types';
 
 /** localStorage key for the last-used provider group. */
@@ -138,10 +139,11 @@ export default function App() {
     setModels(loadedModels);
     setProviders(providerList);
     // If the remembered provider has no usable models (e.g. its key was
-    // removed), fall back to Enflite rather than stranding the user.
+    // removed, or Enflite was omitted because OLLAMA_ENABLED=false), fall
+    // back to the first group with servable models — Claude first — rather
+    // than stranding the user on an unusable provider.
     const enabledModels = loadedModels.filter((model) => model.enabled);
-    const groupHasModels = (group: ProviderGroup) => enabledModels.some((model) => model.providerGroup === group);
-    const effectiveProvider = groupHasModels(activeProviderRef.current) ? activeProviderRef.current : 'enflite';
+    const effectiveProvider = resolveEffectiveProviderGroup(activeProviderRef.current, enabledModels);
     if (effectiveProvider !== activeProviderRef.current) {
       activeProviderRef.current = effectiveProvider;
       setActiveProvider(effectiveProvider);

@@ -311,6 +311,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename
     await server.listen({ port: config.PORT, host: '0.0.0.0' });
     await recoverIngestionJobs();
     console.log(`Server listening on 0.0.0.0:${config.PORT}`);
+    // Claude-only launch: exactly one informational line when the local
+    // stack is operator-disabled — no Ollama connection is attempted, no
+    // startup failure, no noisy warning.
+    if (!config.OLLAMA_ENABLED) {
+      console.log(
+        'Ollama is disabled (OLLAMA_ENABLED=false): serving with Claude; ' +
+          'local Enflite chat, embeddings, and vision models are unavailable.'
+      );
+    }
   } catch (err) {
     server.log.error(err);
     process.exit(1);

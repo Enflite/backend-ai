@@ -74,6 +74,28 @@ const envSchema = z.object({
       z.boolean()
     )
     .default(true),
+  // Local Ollama inference (the "Enflite" provider: chat, embeddings, and
+  // vision). DISABLED BY DEFAULT while the launch runs Claude-only: with
+  // this off, Ollama chat/embeddings/vision models, model listings, and the
+  // Enflite provider selector option are all unavailable, no Ollama
+  // connection is attempted at startup, and image turns are served by the
+  // configured Claude vision model instead. Flip on when the local stack
+  // is ready; it accepts true/1/yes (case-insensitive), everything else
+  // means off.
+  OLLAMA_ENABLED: z
+    .preprocess((val) => {
+      // Note: the .default(false) below only applies when the raw env var
+      // is undefined — an empty string reaches this function, so it must
+      // map to false explicitly rather than back to undefined.
+      if (val === undefined || val === null) return undefined;
+      if (val === true) return true;
+      if (typeof val === 'string') {
+        const lowered = val.trim().toLowerCase();
+        if (lowered === 'true' || lowered === '1' || lowered === 'yes') return true;
+      }
+      return false;
+    }, z.boolean())
+    .default(false),
   AI_PROVIDER_ALLOWED_ORIGINS: z
     .string()
     .default('http://localhost:8000,http://vllm:8000,http://localhost:11434,http://ollama:11434,https://api.anthropic.com,https://api.openai.com'),
@@ -130,8 +152,11 @@ const envSchema = z.object({
   EMBEDDING_API_KEY: z.string().optional().default(''),
   EMBEDDING_DIMENSIONS: z.coerce.number().int().min(1).max(4096).default(1536),
   // Which embedding backend the factory resolves. 'ollama' is the default
-  // (primary inference provider, Windows-native); 'openai-compatible' is
-  // the high-throughput path (vLLM /v1/embeddings or another approved
+  // (primary inference provider, Windows-native) but only while
+  // OLLAMA_ENABLED=true: with the flag off the factory refuses to build an
+  // Ollama embeddings provider and indexing/embedding operations fail with
+  // a clear OLLAMA_ENABLED message. 'openai-compatible' is the
+  // high-throughput path (vLLM /v1/embeddings or another approved
   // endpoint).
   //
   // PINNED-DIMENSION WARNING: the embedding model name/version/dimensions

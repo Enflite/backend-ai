@@ -38,6 +38,7 @@
  * explicit grants still resolves to the default instead of failing closed.
  */
 import { Errors, AppError } from '../../errors.js';
+import { config } from '../../config.js';
 import { tenantOp, withTenantTx } from '../../db/mongo.js';
 import { recordAudit, recordAuditInTx } from '../../audit/audit.js';
 import { KNOWN_CAPABILITIES, resolveServingModel } from './modelLifecycle.js';
@@ -275,6 +276,11 @@ function noModelAvailable(requested: Capability): Error {
  *    caller via getApprovedModelForUser so an explicit revocation still
  *    denies.
  *
+ * While OLLAMA_ENABLED=false (Claude-only launch) step 2 is replaced: the
+ * Qwen seed is never created and image turns resolve the configured Claude
+ * vision model instead. A text-only model must never receive image
+ * payloads on either path.
+ *
  * Fails closed (NO_APPROVED_MODEL) when no servable vision model exists —
  * an admin disabled the vision model deliberately.
  */
@@ -320,6 +326,15 @@ export async function resolveVisionModel(options: {
       metadata: { capability: 'vision', resolutionFailure: error.message },
     });
   }
+  // Claude-only launch: never create or resolve the Qwen seed — the
+  // configured Claude vision model serves image turns.
+  if (!config.OLLAMA_ENABLED) {
+    const claudeVision = await findServableVisionModelForGroup('claude');
+    if (claudeVision) {
+      return getApprovedModelForUser(claudeVision._id, tenantId, userId, roleId);
+    }
+    throw noModelAvailable('vision');
+  }
   const ensured = await ensureVisionModel();
   if (ensured) {
     return getApprovedModelForUser(ensured.id, tenantId, userId, roleId);
@@ -336,9 +351,13 @@ export { isVisionCapableModel };
  * servable vision model: 'enflite' reuses the platform vision model,
  * 'claude'/'openai' resolve their own vision-capable seeds (ensured on
  * read). When the group has no servable vision model — provider not
- * configured, or the model revoked — the turn falls back to the Enflite
+ * configured, or the model revoked — the turn falls back to the platform
  * vision model rather than failing: the chat route tells the user which
  * model is reading their images, never silently.
+ *
+ * While OLLAMA_ENABLED=false the platform vision model is the configured
+ * Claude vision model (the Qwen seed is never created); the 'enflite'
+ * group resolves through resolveVisionModel and lands on Claude as well.
  */
 export async function resolveVisionModelForGroup(options: {
   tenantId: string;

@@ -54,6 +54,7 @@
 
 import { tenantOp } from '../../db/mongo.js';
 import { AppError } from '../../errors.js';
+import { config } from '../../config.js';
 import {
   ensureTenantDefaultModel,
   findServableChatModelForGroup,
@@ -487,7 +488,10 @@ export interface PrivacyRoutingInput {
  * Never throws for missing settings or an unconfigured Claude: those fall
  * back to the preliminary (local) model. It DOES throw (fail closed) when
  * the turn is sensitive and no local model can serve it — sensitive context
- * must never fall back to a cloud model.
+ * must never fall back to a cloud model — EXCEPT when the operator
+ * deliberately disabled the local stack (OLLAMA_ENABLED=false, Claude-only
+ * launch): then the sensitive turn is served by the default cloud model,
+ * silently (no user-facing notice) but audit-logged.
  */
 export async function applyPrivacyRouting(input: PrivacyRoutingInput): Promise<PrivacyRoutingDecision> {
   const setting = await getPrivacyAutoRouting(input.tenantId).catch(() => defaultSetting(input.tenantId));
@@ -557,9 +561,40 @@ export async function applyPrivacyRouting(input: PrivacyRoutingInput): Promise<P
         notice: privacyOverrideNotice(enforcedCategories),
       };
     }
-    // No local model available: fail closed. Sensitive context must never
-    // fall back to a cloud model — the turn is rejected with a clear error
-    // instead of leaking to Claude.
+    // No local model available. Two cases:
+    //
+    // - OLLAMA_ENABLED=false (Claude-only launch, the operator's explicit
+    //   choice): the turn is served by the default cloud model. This is
+    //   silent from the user's perspective — no user-facing notice frame,
+    //   no activity-feed entry — but the routing decision is written to
+    //   the audit trail so admins can see it.
+    // - OLLAMA_ENABLED=true but Ollama is unreachable: fail closed.
+    //   Sensitive context must never fall back to a cloud model — the turn
+    //   is rejected with a clear error instead of leaking to Claude.
+    if (!config.OLLAMA_ENABLED) {
+      const cloudModel = await resolveDefaultOpenModel(input.tenantId, input.userId, input.roleId);
+      await recordAudit({
+        tenantId: input.tenantId,
+        userId: input.userId,
+        requestId: input.requestId,
+        ip: input.ip,
+        action: 'PRIVACY_ROUTING_LOCAL_DISABLED',
+        success: true,
+        metadata: {
+          reasons,
+          categories: enforcedCategories,
+          model: cloudModel.id,
+          modelIdentifier: cloudModel.modelIdentifier,
+        },
+      });
+      return {
+        ...base,
+        model: cloudModel,
+        privacyOverridden: true,
+        autoRoutedToCloud: true,
+        notice: null,
+      };
+    }
     await recordAudit({
       tenantId: input.tenantId,
       userId: input.userId,

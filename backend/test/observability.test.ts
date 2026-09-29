@@ -156,12 +156,13 @@ describe('/ready dependency checks', () => {
     expect(report.checks.database.latencyMs).toBeGreaterThanOrEqual(0);
     expect(dbCommand).toHaveBeenCalledWith({ ping: 1 });
     // No OBJECT_STORAGE_ENDPOINT in the test env. Embeddings default to
-    // Ollama at OLLAMA_BASE_URL (http://localhost:11434), which answers
-    // nothing in CI: the check reports `unavailable` (non-critical) while
-    // /ready stays 200.
+    // Ollama at OLLAMA_BASE_URL — but OLLAMA_ENABLED=false in the test env
+    // (Claude-only launch default), so the check reports `disabled`
+    // WITHOUT attempting any Ollama connection (non-critical) while /ready
+    // stays 200.
     expect(report.checks.objectStorage.status).toBe('not_configured');
     expect(report.checks.objectStorage.critical).toBe(false);
-    expect(report.checks.embeddings.status).toBe('unavailable');
+    expect(report.checks.embeddings.status).toBe('disabled');
     expect(report.checks.embeddings.critical).toBe(false);
   });
 
