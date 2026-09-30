@@ -1,0 +1,1 @@
+{"clean_urls":false,"headers":{"/assets/**":{"Cache-Control":"public, max-age=31536000, immutable"}},"root":"dist/","routes":{"/**":"index.html"}}
