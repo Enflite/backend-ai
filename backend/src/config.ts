@@ -309,6 +309,36 @@ const envSchema = z.object({
   // for `syteline.form_start_project`). Unset: the tool fails fast.
   SYTELINE_FORM_TEMPLATES_DIR: z.string().optional(),
   // ---------------------------------------------------------------------------
+  // Agentic SyteLine UI automation (syteline.ui.* tools: browser driver,
+  // per-user encrypted credential store, session manager). DISABLED BY
+  // DEFAULT: SYTELINE_UI_ENABLED=false is the fail-closed master kill-switch
+  // — every UI tool fails fast when it is off. The credential store key is
+  // validated at point of use (fail closed there too), never at boot, so an
+  // unconfigured deployment still starts.
+  // ---------------------------------------------------------------------------
+  SYTELINE_UI_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(false),
+  // https URL of the SyteLine web client (login landing page). Unset: UI
+  // session tools fail fast.
+  SYTELINE_UI_URL: z.string().url().optional(),
+  // Tenant service-account fallback for browser login, used only when the
+  // requesting user has no stored credentials. Never logged, never returned.
+  SYTELINE_UI_USERNAME: z.string().optional().default(''),
+  SYTELINE_UI_PASSWORD: z.string().optional().default(''),
+  // Key for the AES-256-GCM credential store: 32+ bytes as hex or base64.
+  // Documented placeholder values are rejected at point of use.
+  CREDENTIAL_STORE_KEY: z.string().optional().default(''),
+  // Browser session lifetime: idle TTL and absolute max duration.
+  SYTELINE_UI_SESSION_IDLE_MS: z.coerce.number().int().min(1000).max(3600000).default(300000),
+  SYTELINE_UI_SESSION_MAX_MS: z.coerce.number().int().min(60000).max(14400000).default(1800000),
+  // Per browser-driver step timeout; sits inside AI_TOOL_TIMEOUT_MS.
+  SYTELINE_UI_STEP_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(30000),
+  // Local root for tenant-scoped screenshot evidence (evidence ids only ever
+  // reach the model). TODO: migrate to the object-storage abstraction when UI
+  // automation needs multi-instance evidence.
+  SYTELINE_UI_EVIDENCE_DIR: z.string().min(1).default('./ui-evidence'),
+  // ---------------------------------------------------------------------------
   // Enterprise OIDC login (Phase 5b): Authorization Code + PKCE as the
   // primary enterprise login path, alongside password login. When
   // OIDC_ENABLED, the required fields are validated at boot (fail fast);
