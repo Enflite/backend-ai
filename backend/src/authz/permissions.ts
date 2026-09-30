@@ -39,6 +39,7 @@ export const PERMISSIONS = [
   'tool:use',
   'syteline:read',
   'syteline:forms',
+  'syteline:ui',
   'repo:read',
   'repo:manage',
   'audit:read',
@@ -87,6 +88,9 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'tool:use',
     'syteline:read',
     'syteline:forms',
+    // UI automation drives SyteLine as the user: privileged, granted here
+    // (and seeded by migration 031) but never to User or Developer roles.
+    'syteline:ui',
     'feedback:curate',
     'finetune:manage',
     'repo:read',

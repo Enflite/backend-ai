@@ -275,8 +275,11 @@ export function createSseSender(raw: SseRawSocket, options: SseSenderOptions = {
  * turn. Only tools the caller is permitted to use AND whose classification
  * policy admits the turn's classification are exposed — the model can never
  * talk the server into running a tool the user couldn't run directly.
+ *
+ * Exported for tests: permission filtering is a security boundary and must
+ * stay covered (e.g. syteline.ui.* is never offered without syteline:ui).
  */
-function buildProviderTools(auth: AuthContext, classification: Classification): ProviderToolDefinition[] {
+export function buildProviderTools(auth: AuthContext, classification: Classification): ProviderToolDefinition[] {
   if (!auth.permissions.includes('tool:use')) return [];
   return toolRegistry
     // Per-tool permission is enforced in application code here, at offer
