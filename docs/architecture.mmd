@@ -52,6 +52,7 @@ flowchart TB
     subgraph Ext["External integrations (boundaries)"]
         Scan["[PARTIAL] Malware scanner boundary<br/>MALWARE_SCAN_MODE=http | disabled-development<br/>backend/src/documents/malware.ts"]
         Syte["[CURRENT] SyteLine ERP (read-only)<br/>HttpSyteLineAdapter :: getItem<br/>backend/src/tools/gateway.ts"]
+        SyteUI["[FUTURE] SyteLine web client (UI automation)<br/>Playwright in-process driver :: syteline.ui.*<br/>backend/src/syteline/ui/ (see diagram j)"]
         RepoIdx["[CURRENT] Repo code index<br/>repo.search / repo.readFile<br/>backend/src/repos/ :: pgvector HNSW"]
         IdP["[FUTURE] External IdP<br/>backend/src/auth/identityProvider.ts<br/>(P2-e)"]
     end
@@ -85,6 +86,7 @@ flowchart TB
     Embed --> PG
     Docs --> Scan
     Tools --> Syte
+    Tools --> SyteUI
     Tools --> RepoIdx
     RepoIdx --> PG
     Auth -.-> IdP
@@ -441,3 +443,50 @@ flowchart TB
     S -.->|"✕"| NET
 
     FP2i["[FUTURE] P2-i: explicit egress policy tests<br/>deny-by-default — prove no AI/tool code path<br/>can reach an unlisted origin; violations<br/>audited and blocked"]
+
+%% ---------------------------------------------------------------------
+%% (j) SYTELINE UI AUTOMATION — backend/src/syteline/ui/ + tools/sytelineUi.ts
+%% Agentic browser driving of the SyteLine web client. See ADR-019 and
+%% docs/syteline-ui.md. Real Playwright behavior is REQUIRES REAL
+%% SYTELINE; FakeDriver behavior is VALIDATED IN CI.
+%% ---------------------------------------------------------------------
+flowchart TB
+    LOOP["[FUTURE] Chat agentic loop (diagram d)<br/>destructive tools → explicit confirmation gate<br/>backend/src/chat/agenticLoop.ts"]
+
+    subgraph UIT["[FUTURE] syteline.ui.* tools<br/>backend/src/tools/sytelineUi.ts<br/>permission: syteline:ui (Admin / AI Admin only)"]
+        direction TB
+        UIC["saveCredentials / deleteCredentials<br/>listCredentials"]
+        UIS["startSession / endSession"]
+        UIN["gotoForm / readScreen / screenshot<br/>(evidence ids only, never pixels to model)"]
+        UIW["fillField / clickButton / runTaskPlan<br/>destructive:true → explicit confirmation"]
+    end
+
+    subgraph SM["[FUTURE] UiSessionManager<br/>backend/src/syteline/ui/sessionManager.ts<br/>≤1 session per (tenantId, userId)<br/>idle TTL + absolute max duration"]
+        SES["session records<br/>{ sessionId, userId, tenantId,<br/>startedAt, lastUsedAt }"]
+    end
+
+    subgraph DRV["[FUTURE] UiDriver interface<br/>backend/src/syteline/ui/driver.ts<br/>goto / fillField / clickButton / readScreen /<br/>screenshot / waitForText / close (AbortSignal)"]
+        PWD["playwrightDriver.ts<br/>Chromium, lazy optional import<br/>fail fast when Playwright unavailable"]
+        FKD["fakeDriver.ts<br/>deterministic in-memory FakeDriver<br/>tests + CI"]
+    end
+
+    subgraph CRED["[FUTURE] Encrypted credential store<br/>backend/src/secrets/credentialCrypto.ts<br/>AES-256-GCM, key = CREDENTIAL_STORE_KEY<br/>fail closed when absent/malformed"]
+        COLL[("syteline_credentials (Mongo, tenant-scoped)<br/>username cleartext · password encrypted<br/>{ iv, ciphertext, authTag }<br/>save = rotate (upsert per user)")]
+    end
+
+    SYT2(["[FUTURE] SyteLine web client (Mongoose)<br/>SYTELINE_UI_URL<br/>REQUIRES REAL SYTELINE"])
+    AUD2["[CURRENT] Audit<br/>backend/src/audit/audit.ts"]
+    PR2["[CURRENT] Privacy routing<br/>syteline.* never offered on cloud turns<br/>docs/privacy-routing.md"]
+
+    LOOP --> UIT
+    UIT --> SM
+    SM --> SES
+    SM --> DRV
+    DRV --> PWD
+    DRV --> FKD
+    PWD --> SYT2
+    UIC --> CRED
+    SM -.->|"decrypt at login only<br/>zero-fill after use"| CRED
+    UIT --> AUD2
+    SM --> AUD2
+    PR2 -.->|"tool-offering gate"| UIT

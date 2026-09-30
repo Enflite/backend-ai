@@ -188,6 +188,51 @@ merged by automation.
 | `syteline.form_build_deck` | Generate `plan/deck.config.js` and build the implementation-plan PPTX |
 | `syteline.form_open_pr` | Create the repo, push, and open the review PR (never merges) |
 
+### SyteLine UI automation tools
+
+Agentic browser driving of the SyteLine web client (see ADR-019 and
+`docs/syteline-ui.md`): the assistant logs in as the user, navigates to
+forms, fills fields, clicks buttons, and reads results back. Every tool
+requires `syteline:ui` (Admin / AI Admin only — never the User role) in
+addition to `tool:use`, and the whole family is behind the
+`SYTELINE_UI_ENABLED` kill switch (default `false`): tools fail fast
+when the feature is off. Privacy routing treats the family as
+`syteline.*` — never offered on cloud turns when customer or finance
+categories are enforced (see `docs/privacy-routing.md`).
+
+`destructive:true` tools never auto-execute: the agentic loop's
+explicit-confirmation gate applies, with no bypass for UI writes.
+Real Playwright behavior is **REQUIRES REAL SYTELINE**; FakeDriver
+behavior is **VALIDATED IN CI**.
+
+| Tool | Destructive | Purpose |
+|---|---|---|
+| `syteline.ui.startSession` | no | Acquire the user's browser session (≤1 per user) and log in to `SYTELINE_UI_URL`; explicit user request only |
+| `syteline.ui.gotoForm` | no | Navigate to a form via the SyteLine form URL convention; `formName` must match `^[A-Za-z0-9_]+$` |
+| `syteline.ui.readScreen` | no | Return the ARIA/accessible snapshot text of the current screen |
+| `syteline.ui.screenshot` | no | Store evidence server-side (tenant-scoped); returns `{ evidenceId, capturedAt }` — raw pixels never reach the model |
+| `syteline.ui.fillField` | **yes** | Fill a field by accessible label: `{ label, value }` |
+| `syteline.ui.clickButton` | **yes** | Click a button by accessible label (may submit/save): `{ label }` |
+| `syteline.ui.runTaskPlan` | **yes** | Execute a bounded (max 25 steps), zod-validated task-plan DSL: ordered steps of `{ action: 'gotoForm', form }`, `{ action: 'fillField', label, value }`, `{ action: 'clickButton', label }`, `{ action: 'readScreen' }`, `{ action: 'assertText', text }` — sequential, stops at first failure, per-step outcomes; each step audit-logged with argument keys only |
+| `syteline.ui.endSession` | no | Close the browser and write the session-summary audit |
+| `syteline.ui.saveCredentials` | **yes** | Save/rotate the caller's own SyteLine credentials (`userId` from auth context, never arguments); `secretParams: ['password']` |
+| `syteline.ui.deleteCredentials` | **yes** | Revoke the caller's stored credentials |
+| `syteline.ui.listCredentials` | no | `username` / `label` / `updatedAt` only — never secret material |
+
+`SYTELINE_CREDENTIAL_SAVED` / `SYTELINE_CREDENTIAL_DELETED` /
+`SYTELINE_UI_LOGIN` audit events carry the username only, never the
+secret.
+
+#### `secretParams` redaction
+
+`ToolDefinition` supports an optional `secretParams?: string[]`. When
+set, those parameter keys are persisted as `"[REDACTED]"` in
+`tool_executions` **and** in audit metadata — secrets in tool arguments
+never reach any store in clear. `syteline.ui.saveCredentials` declares
+`secretParams: ['password']`. The redaction happens in
+`runToolCall` (`backend/src/tools/gateway.ts`); callers and the model
+see the normal arguments, only the persisted copies are redacted.
+
 ## Repositories & code search
 
 Multi-repo code indexing for coding turns (see `docs/repo-indexing.md`).
