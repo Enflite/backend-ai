@@ -490,3 +490,47 @@ flowchart TB
     UIT --> AUD2
     SM --> AUD2
     PR2 -.->|"tool-offering gate"| UIT
+
+%% ---------------------------------------------------------------------
+%% (k) SYTELINE TASK AGENTS — backend/src/syteline/tasks/ + tools/sytelineTasks.ts
+%% Task layer above the UI-automation lane (diagram j). Plain-language
+%% intake → server-side runner (atomic claim, model-generated
+%% zod-validated plan, sequential execution through the §3–§4 engine as
+%% the requester) → evidence-backed report. See ADR-020 and
+%% docs/syteline-ui.md ("Task agents"). Real browser behavior is
+%% REQUIRES REAL SYTELINE; lifecycle/claim/planning are VALIDATED IN CI.
+%% ---------------------------------------------------------------------
+flowchart TB
+    CHAT["[FUTURE] Chat agentic loop (diagram d)<br/>syteline.task.create { title, goal, autoApproveWrites? }"]
+
+    subgraph TI["[FUTURE] Task intake + kanban data model<br/>backend/src/tools/sytelineTasks.ts<br/>permission: syteline:ui (Admin / AI Admin only)"]
+        direction TB
+        TTC["syteline.task.create / cancel<br/>create: non-destructive, ownership from auth ctx<br/>cancel: destructive:true (owner or admin)"]
+        TTL["syteline.task.list { status? }<br/>syteline.task.get { taskId }<br/>kanban board's API contract (board UI out of scope)"]
+    end
+
+    subgraph TR["[FUTURE] Task runner<br/>backend/src/syteline/tasks/taskRunner.ts<br/>poll SYTELINE_TASK_RUNNER_INTERVAL_MS<br/>atomic claim: assigned → in_progress<br/>kill switch SYTELINE_TASK_RUNNER_ENABLED (default false)"]
+        direction TB
+        TRP["1. Plan — model (gateway, non-streaming)<br/>JSON plan in runTaskPlan DSL, zod-validated<br/>invalid plan → blocked"]
+        TRE["2. Execute — requester's UI session<br/>(their saved creds, no cross-user)<br/>steps sequential, keys-only audit,<br/>screenshot evidenceId per step,<br/>stop at first failure → blocked"]
+        TRR["3. Report — resultSummary + per-step outcomes<br/>to task record; conversation message<br/>when conversationId set"]
+    end
+
+    subgraph TC[(" [FUTURE] syteline_tasks (Mongo, tenant-scoped)<br/>requesterUserId · title · goal · status<br/>assigned / in_progress / completed / blocked / cancelled<br/>plan · steps[] { action, status, evidenceIds[] }<br/>autoApproveWrites · resultSummary · blockedReason")]
+    end
+
+    WAA["[FUTURE] autoApproveWrites gate<br/>false (default): read-only recon →<br/>blocked / awaiting-write-approval<br/>true: task-scoped explicit write confirmation"]
+    UILANE["[FUTURE] UI-automation lane (diagram j)<br/>UiSessionManager + runTaskPlan engine<br/>runner acquires the REQUESTER's session here"]
+    TAUD["[CURRENT] Audit<br/>backend/src/audit/audit.ts"]
+    TPR["[CURRENT] Privacy routing<br/>syteline.* never offered on cloud turns<br/>docs/privacy-routing.md"]
+
+    CHAT --> TI
+    TI --> TC
+    TR --> TC
+    TI -->|"creates assigned task"| TR
+    TR -->|"plan · execute · report"| TC
+    TR -->|"acquire session + run plan steps"| UILANE
+    WAA -.->|"scoped write approval"| TR
+    TI --> TAUD
+    TR --> TAUD
+    TPR -.->|"tool-offering gate"| TI

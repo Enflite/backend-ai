@@ -233,6 +233,53 @@ never reach any store in clear. `syteline.ui.saveCredentials` declares
 `runToolCall` (`backend/src/tools/gateway.ts`); callers and the model
 see the normal arguments, only the persisted copies are redacted.
 
+### SyteLine task-agent tools
+
+AI agents that complete SyteLine tasks for the requester (see ADR-020
+and `docs/syteline-ui.md` "Task agents"): plain-language intake —
+"create this PO", "check why this order is late and update it", "run
+the morning buyer routine" — into the tenant-scoped `syteline_tasks`
+queue, executed by a server-side runner that plans (model-generated,
+zod-validated `runTaskPlan` DSL), drives the SyteLine web client as
+the requester through the `syteline.ui.*` engine, and reports back with
+evidence. Statuses (`assigned` / `in_progress` / `completed` /
+`blocked` / `cancelled`) are the kanban board's data model —
+`syteline.task.list` is the board's API.
+
+Every tool requires `syteline:ui` (Admin / AI Admin only — never the
+User role) in addition to `tool:use`; the whole family rides the
+`SYTELINE_UI_ENABLED` kill switch (default `false`), and the runner
+itself additionally requires `SYTELINE_TASK_RUNNER_ENABLED=true`
+(default `false` — tasks stay `assigned` and nothing runs when off).
+Privacy routing treats the family as `syteline.*` — never offered on
+cloud turns when customer or finance categories are enforced (see
+`docs/privacy-routing.md`).
+
+`autoApproveWrites: true` on `syteline.task.create` is the human's
+explicit, task-scoped write confirmation: the task's write steps
+execute without further per-step prompts. The default `false` runs
+read-only reconnaissance (`gotoForm` / `readScreen`), then reports a
+proposed write plan and marks the task `blocked` with
+`blockedReason: 'awaiting-write-approval'`. An agent always executes
+as the task's requester (their own saved credentials) — never as
+someone else. Real browser behavior is **REQUIRES REAL SYTELINE**;
+task lifecycle, atomic claim, planning, and the approval gate are
+**VALIDATED IN CI**.
+
+| Tool | Destructive | Purpose |
+|---|---|---|
+| `syteline.task.create` | no | Create an `assigned` task: `{ title, goal, autoApproveWrites? }` (default `false`); ownership (`requesterUserId`) from the auth context, never from arguments |
+| `syteline.task.list` | no | List the requester's tasks (or, for admins, the tenant's); optional `status` filter |
+| `syteline.task.get` | no | Full task record: status, zod-validated plan, per-step log with `{ action, status, evidenceIds[] }`, `resultSummary` / `blockedReason` |
+| `syteline.task.cancel` | **yes** | Cancel a task (ends work in flight); requester or admin only |
+
+Task audit events: `SYTELINE_TASK_CREATED` / `SYTELINE_TASK_STARTED`
+/ `SYTELINE_TASK_STEP` (argument keys only, never values) /
+`SYTELINE_TASK_COMPLETED` / `SYTELINE_TASK_BLOCKED` (reason) /
+`SYTELINE_TASK_CANCELLED`. Same secret hygiene as the UI family:
+usernames and task ids in clear are fine; passwords and field values
+never.
+
 ## Repositories & code search
 
 Multi-repo code indexing for coding turns (see `docs/repo-indexing.md`).
