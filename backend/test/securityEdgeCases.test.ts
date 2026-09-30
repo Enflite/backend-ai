@@ -249,11 +249,24 @@ describe('destructive tool confirmation gate', () => {
     if (index >= 0) registry.splice(index, 1);
   });
 
-  it('documents that no production tool is currently destructive', () => {
+  it('documents which production tools are destructive', () => {
     const production = toolRegistry.filter((t) => t.name !== 'test.wipeCache');
     expect(production.length).toBeGreaterThan(0);
-    for (const tool of production) {
-      expect(tool.destructive).toBe(false);
+    const destructive = production
+      .filter((t) => t.destructive)
+      .map((t) => t.name)
+      .sort();
+    // The only destructive production tools are the SyteLine UI write actions.
+    // Each one requires the syteline:ui permission and explicit confirmation.
+    expect(destructive).toEqual([
+      'syteline.ui.clickButton',
+      'syteline.ui.deleteCredentials',
+      'syteline.ui.fillField',
+      'syteline.ui.runTaskPlan',
+      'syteline.ui.saveCredentials',
+    ]);
+    for (const tool of production.filter((t) => t.destructive)) {
+      expect(tool.permission).toBe('syteline:ui');
     }
   });
 

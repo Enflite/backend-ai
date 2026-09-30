@@ -10,6 +10,7 @@ import { canModelProcess } from '../policy/engine.js';
 import { getSyteLineAdapter } from './syteline.js';
 import { repoToolDefinitions } from './repos.js';
 import { sytelineFormToolDefinitions } from './sytelineForms.js';
+import { sytelineUiToolDefinitions } from './sytelineUi.js';
 
 /**
  * Context handed to every tool execution. Carries the caller's auth (tenant,
@@ -21,6 +22,8 @@ import { sytelineFormToolDefinitions } from './sytelineForms.js';
 export interface ToolExecutionContext {
   auth: AuthContext;
   classification: Classification;
+  /** Correlates the tool's own audit events with the caller's request. */
+  requestId?: string;
 }
 
 /** Document shape for the `tool_executions` collection. `_id` is an app-generated UUID string (ADR-014). */
@@ -53,6 +56,14 @@ export interface ToolDefinition<T = unknown> {
    * other tool use.
    */
   permission?: Permission;
+  /**
+   * Parameter keys that must never persist in cleartext (e.g. 'password').
+   * runToolCall redacts these keys (as "[REDACTED]") in the persisted
+   * tool_executions.parameters and in audit metadata before any write.
+   * Secrets stay top-level in tool schemas by convention so a shallow
+   * redaction is sufficient.
+   */
+  secretParams?: string[];
   schema: z.ZodType<T>;
   execute(input: T, ctx: ToolExecutionContext, signal: AbortSignal): Promise<unknown>;
 }
@@ -203,6 +214,10 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
   // 'syteline:forms' permission gates the whole family; the AI operates
   // Git/project files only — SyteLine/UET/FormSync steps stay human.
   ...sytelineFormToolDefinitions,
+  // Agentic SyteLine UI automation (browser driver). The 'syteline:ui'
+  // permission gates the whole family (Admin / AI Admin only); write actions
+  // are destructive and ride the agentic loop's confirmation gate.
+  ...sytelineUiToolDefinitions,
 ];
 
 export function getTool(name: string): ToolDefinition<any> {
@@ -284,6 +299,52 @@ function toolErrorCode(error: unknown): string {
 }
 
 /**
+ * Redact secret parameter keys (declared via ToolDefinition.secretParams,
+ * e.g. 'password') from tool parameters before they persist to the
+ * tool_executions collection. Shallow by design: tool schemas keep secrets
+ * at the top level by convention.
+ */
+export function redactSecretParams(
+  secretParams: readonly string[] | undefined,
+  parameters: unknown,
+): unknown {
+  if (!secretParams || secretParams.length === 0) return parameters;
+  if (typeof parameters !== 'object' || parameters === null || Array.isArray(parameters)) {
+    return parameters;
+  }
+  const redacted: Record<string, unknown> = { ...(parameters as Record<string, unknown>) };
+  for (const key of secretParams) {
+    if (key in redacted) redacted[key] = '[REDACTED]';
+  }
+  return redacted;
+}
+
+/**
+ * Best-effort redaction for the malformed-arguments path, where the raw
+ * argument string never parses into an object: mask `"key": "..."` pairs
+ * for each declared secret key so a password can never persist verbatim.
+ */
+function redactSecretsFromRaw(raw: string, secretParams: readonly string[] | undefined): string {
+  let out = raw;
+  for (const key of secretParams ?? []) {
+    out = out.replace(
+      new RegExp(`("${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\s*:\\s*)"[^"]*"`, 'g'),
+      '$1"[REDACTED]"',
+    );
+  }
+  return out;
+}
+
+/** Look up a tool's secretParams without throwing for unknown tools. */
+function secretParamsFor(toolName: string): readonly string[] | undefined {
+  try {
+    return getTool(toolName).secretParams;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Shared audited tool invocation used by both the direct /tools/:name/execute
  * endpoint and the chat agentic loop. Every attempt — denied, succeeded, or
  * failed — writes a tool_executions row and a TOOL_EXECUTION audit record with
@@ -319,7 +380,7 @@ export async function runToolCall(options: {
       userId: auth.userId,
       toolName: name,
       action: 'execute',
-      parameters: { raw: options.rawArguments.slice(0, 4000) },
+      parameters: { raw: redactSecretsFromRaw(options.rawArguments.slice(0, 4000), secretParamsFor(name)) },
       authorizationDecision: 'DENIED',
       classification,
       status: 'DENIED',
@@ -364,7 +425,11 @@ export async function runToolCall(options: {
     userId: auth.userId,
     toolName: name,
     action: 'execute',
-    parameters: prepared.input as Record<string, unknown>,
+    // Secret-declared parameter keys never persist in cleartext.
+    parameters: redactSecretParams(
+      prepared.definition.secretParams,
+      prepared.input,
+    ) as Record<string, unknown>,
     authorizationDecision: 'ALLOWED',
     classification,
     status: 'PENDING',
@@ -390,7 +455,7 @@ export async function runToolCall(options: {
   });
   try {
     const output = await Promise.race([
-      prepared.definition.execute(prepared.input, { auth, classification }, toolSignal),
+      prepared.definition.execute(prepared.input, { auth, classification, requestId: requestId ?? 'none' }, toolSignal),
       deadline,
     ]);
     await db
