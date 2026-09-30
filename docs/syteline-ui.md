@@ -37,6 +37,8 @@ values you should keep: placeholders are rejected at boot.
 | `SYTELINE_UI_SESSION_IDLE_MS` | no | `300000` (5 min) | Browser session idle TTL. |
 | `SYTELINE_UI_SESSION_MAX_MS` | no | `1800000` (30 min) | Absolute max browser session duration. |
 | `SYTELINE_UI_STEP_TIMEOUT_MS` | no | `30000` (30 s) | Per-driver-step timeout (inside `AI_TOOL_TIMEOUT_MS`). |
+| `SYTELINE_TASK_RUNNER_ENABLED` | no | `false` | Master kill switch for the task-agent runner. When off, tasks stay `assigned` and nothing runs — even if task tools are used. |
+| `SYTELINE_TASK_RUNNER_INTERVAL_MS` | no | `15000` (15 s) | Poll interval for the task runner to pick up `assigned` tasks. |
 
 `CREDENTIAL_STORE_KEY` generation (run once, store in the secret
 manager):
@@ -134,6 +136,181 @@ Every acquire and release writes an audit event (see below). Session
 records carry `{ sessionId, userId, tenantId, startedAt, lastUsedAt }`
 — sessions are never shared across users or tenants.
 
+## Task agents
+
+One level above driving the browser by hand: **AI agents that complete
+SyteLine tasks for you.** Hand the system a task in plain language —
+"create this PO", "check why this order is late and update it", "run
+the morning buyer routine" — and a server-side agent picks it up,
+plans the steps, drives SyteLine as you (your saved-credential login),
+does the work, and reports back with evidence. Design: ADR-020. The
+UI-automation engine above (driver, session manager, credential store,
+step semantics, approval gates) is the execution layer underneath;
+this section is the task layer on top.
+
+> **Honesty note:** like the driver itself, the task runner is
+> **REQUIRES REAL SYTELINE** for real ERP work — it has never been
+> exercised against a live SyteLine web client in this sandbox. Task
+> lifecycle, claiming, planning, and the approval gate are
+> **VALIDATED IN CI** via the deterministic FakeDriver.
+
+### How to hand the AI a task
+
+In chat (Admin/AI-Admin role — task tools require `syteline:ui`):
+
+```
+You:  Create a task: generate PO 450123 for vendor ACME, 500 units of
+      item WIDGET-1, and confirm it. autoApproveWrites: true.
+You:  Create a task: check why sales order SO-8841 is late and update
+      it. autoApproveWrites: false — recon first, tell me what you'd do.
+You:  List my tasks that are blocked.
+You:  Show me task <taskId> — what steps ran, and the evidence.
+You:  Cancel task <taskId>.
+```
+
+`title` is the short label (kanban card title); `goal` is the natural-
+language objective the agent plans from. Tasks you create are owned by
+you — `requesterUserId` comes from the auth context, never from tool
+arguments. The agent always executes **as you**: your saved SyteLine
+credentials, your UI session, never anyone else's.
+
+### Task lifecycle (the kanban data model)
+
+Tasks live in the tenant-scoped `syteline_tasks` collection. Statuses
+map directly onto the kanban columns from Jake's 2026-09-22 ask:
+
+| Status | Kanban column | Meaning |
+|---|---|---|
+| `assigned` | Assigned | Created, waiting for the runner |
+| `in_progress` | In progress | Claimed by the runner and executing |
+| `completed` | Completed | All steps ran; `resultSummary` written |
+| `blocked` | Blocked | Stopped — see `blockedReason` (plan failed validation, a step failed, or awaiting write approval) |
+| `cancelled` | — | Cancelled by the requester or an admin |
+
+Lifecycle per task: **plan → execute → report**.
+
+1. **Plan.** The runner calls the model with your goal and the
+   available UI actions and requires a JSON task plan in the
+   `runTaskPlan` DSL (the same five actions: `gotoForm`, `fillField`,
+   `clickButton`, `readScreen`, `assertText`). The plan is zod-
+   validated *before anything runs* — an invalid plan marks the task
+   `blocked` with a reason.
+2. **Execute.** The runner acquires your UI session and runs the steps
+   sequentially: each step audit-logged (argument keys only), a
+   screenshot captured per step (its `evidenceId` attached to the
+   step), stopping at the first failure → `blocked` with a reason.
+3. **Report.** `resultSummary` and per-step outcomes are written to the
+   task. If the task was created from chat, an assistant message with
+   the summary and evidence references is appended to that
+   conversation. The task record itself is always the durable report —
+   `syteline.task.get` shows every step, its status, and its evidence
+   ids long after the conversation scrolls by.
+
+Claiming is atomic (`assigned` → `in_progress` in one
+`findOneAndUpdate`), so concurrent backends can never double-run a
+task.
+
+### Write approval inside tasks (`autoApproveWrites`)
+
+"Write actions need a confirmation step" still holds — scoped to the
+task. `autoApproveWrites: true` on task creation **is** the human's
+explicit confirmation for that task's writes: recorded on the task,
+bounded to that task's plan, auditable.
+
+- **Default `false`:** the agent runs read-only reconnaissance
+  (`gotoForm` / `readScreen`), then reports a proposed write plan and
+  marks the task `blocked` with
+  `blockedReason: 'awaiting-write-approval'`. To proceed, create a
+  follow-up task with `autoApproveWrites: true`. (A dedicated
+  `syteline.task.approveWrites` tool is the future seam; out of scope
+  for this build.)
+- **`true`:** write steps (`fillField`, `clickButton`, any write in
+  the plan) execute inside this task without further per-step prompts.
+  The approval covers exactly this task's recorded plan — nothing
+  else.
+
+The interactive destructive gate is unchanged: driving the browser by
+hand in chat still requires explicit confirmation per write.
+
+### When tasks don't run
+
+The runner is dark by default. Two gates must both open before any
+autonomous ERP work happens:
+
+1. `SYTELINE_TASK_RUNNER_ENABLED=true` (default `false` — fail
+   closed). When off, tasks stay `assigned` and nothing runs.
+2. The requester holds `syteline:ui` (Admin / AI Admin only), and the
+   task tools are behind the `SYTELINE_UI_ENABLED` kill switch like
+   the rest of the UI family.
+
+### Completion reports and evidence
+
+A finished (or blocked) task carries: `status`, per-step log (`action`,
+detail, `status`, timestamps, `evidenceIds[]`), `resultSummary` or
+`blockedReason`, and — when created from chat — an assistant message
+in the originating conversation. Evidence is screenshots stored
+server-side, tenant-scoped: fetch them by `evidenceId`; the model
+never receives raw pixels. To review a day's work: `syteline.task.list`
+filtered by status — the kanban board's API contract (the board UI
+itself is out of scope; `syteline.task.list` is what it would query).
+
+### Worked example: PO Detail Report Viewer changes
+
+A canonical example of the kind of multi-step SyteLine task agents are
+built to complete (real walkthrough supplied by Jake, 2026-09-30): a
+series of report-designer changes to the Purchase Order Detail Report
+Viewer. The full lifecycle, end to end:
+
+**Intake.** `syteline.task.create { title: "PO detail report viewer
+changes", goal: "Make the PO detail report viewer changes: back it up
+first, re-point the primary collection, regenerate, then add the
+Terms & Conditions footer.", autoApproveWrites: true }` → `assigned`.
+
+**Plan.** The agent's validated plan mirrors the walkthrough's
+structure — and encodes its two standing lessons:
+
+1. **Backup FIRST (standing safety rule).** Open FormSync, default
+   scope, export the Purchase Order Detail Report Viewer to a file
+   before touching anything. No backup, no changes.
+2. **Scope decision.** Work directly in default scope — the detail
+   viewer isn't in use, so changes land safely; changes to the live
+   Purchase Order Report form (which would affect Purchasing
+   immediately) are explicitly deferred to a live meeting, out of
+   this task's scope.
+3. Re-point the primary collection to the customized collection from
+   the simple report (UE_FL-SL purchase order report) and set the
+   matching custom load method.
+4. Save, regenerate the form (close/reopen).
+5. Build the T&Cs group-footer: new group-footer region on the main
+   flex layout (group property PO, page break before, ~92 × 30);
+   nested three-column flex layout (1-3-1 proportions); vertical flex
+   with five statics; T&C captions pasted in, left-justified, "no
+   colon" on each static.
+6. **Truncation gotcha (standing lesson).** Long text pasted into a
+   component *name* throws a string-truncation save error — keep
+   component names short, put long text only in the string
+   value/caption.
+
+**Execute.** The runner acquires the requester's session (their saved
+credentials), runs the steps in order — each step audit-logged (keys
+only) with a screenshot `evidenceId` attached — and stops at the first
+failure with a `blocked` reason naming the failing step.
+
+**Report.** `syteline.task.get` returns `completed` with a
+`resultSummary` ("Backup exported to <path>; primary collection now
+UE_FL-SL purchase order report; custom load method set; form
+regenerated; T&Cs group footer added with 5 statics") plus the
+per-step log and evidence ids. Because the task came from chat, the
+same summary lands as an assistant message in the originating
+conversation.
+
+Two things this example teaches the plan-generation side: the agent
+must know that **backup comes before everything** (FormSync export,
+default scope), and that report-designer text handling has a known
+failure mode — paste long text via a text edit and keep names short,
+or the save blows up on truncation. Both are the kind of operational
+lore that lives in the plan prompt, not in the user's head.
+
 ## Tool reference (summary)
 
 Full contracts in `docs/api.md`. At a glance:
@@ -151,6 +328,21 @@ Full contracts in `docs/api.md`. At a glance:
 | `syteline.ui.saveCredentials` | **yes** | Save/rotate the caller's credentials (`secretParams: ['password']`) — requires explicit confirmation |
 | `syteline.ui.deleteCredentials` | **yes** | Revoke the caller's stored credentials — requires explicit confirmation |
 | `syteline.ui.listCredentials` | no | Username/label/updatedAt only; no secret material |
+
+### Task-agent tools (`syteline.task.*`, ADR-020)
+
+All require `syteline:ui` (Admin / AI Admin only) in addition to
+`tool:use`, ride the `SYTELINE_UI_ENABLED` kill switch, and are never
+offered on cloud turns when customer or finance categories are
+enforced (same `syteline.*` privacy-routing treatment). The runner
+itself additionally requires `SYTELINE_TASK_RUNNER_ENABLED=true`.
+
+| Tool | Destructive | What it does |
+|---|---|---|
+| `syteline.task.create` | no | Create an `assigned` task: `{ title, goal, autoApproveWrites? }` (default `false`); ownership from auth context; `autoApproveWrites: true` is the human's explicit, task-scoped write confirmation |
+| `syteline.task.list` | no | List the requester's (or, for admins, tenant's) tasks; optional `status` filter — the kanban board's API contract |
+| `syteline.task.get` | no | Full task record: status, plan, per-step log with evidence ids, `resultSummary` / `blockedReason` |
+| `syteline.task.cancel` | **yes** | Cancel a task (ends work in flight); requester or admin only — requires explicit confirmation |
 
 Destructive tools are gated by the agentic loop's existing explicit-
 confirmation flow (`destructive:true`) — UI writes get no new bypass.
@@ -174,6 +366,12 @@ usernames only, passwords nowhere.
 | `SYTELINE_UI_SESSION_RELEASED` | Session closed (idle/max/explicit), with reason | `sessionId`, `reason` |
 | `TOOL_EXECUTED` | Any `syteline.ui.*` call (existing tool audit) | sanitized reason; `saveCredentials` params carry `password: "[REDACTED]"` |
 | `AGENTIC_LOOP_STEP` | Each agentic-loop step, including `runTaskPlan` steps | argument **keys** only |
+| `SYTELINE_TASK_CREATED` | Task created via `syteline.task.create` | `taskId`, `title`, `autoApproveWrites` |
+| `SYTELINE_TASK_STARTED` | Runner atomically claims a task (`assigned` → `in_progress`) | `taskId` |
+| `SYTELINE_TASK_STEP` | Each executed plan step | `taskId`, `action`, argument **keys** only |
+| `SYTELINE_TASK_COMPLETED` | Task finished all steps | `taskId` |
+| `SYTELINE_TASK_BLOCKED` | Task stopped (invalid plan, step failure, awaiting write approval) | `taskId`, `blockedReason` |
+| `SYTELINE_TASK_CANCELLED` | Task cancelled by requester or admin | `taskId` |
 
 ## Troubleshooting
 
@@ -187,6 +385,11 @@ usernames only, passwords nowhere.
 | `runTaskPlan` stops mid-plan | First failing step aborts the plan by design | Read the per-step outcomes, fix the failing step's label/text (screens change; ARIA labels are the selector), re-run |
 | Session disappears between turns | Idle TTL or max duration expired | Re-run `startSession`; tune `SYTELINE_UI_SESSION_IDLE_MS` / `SYTELINE_UI_SESSION_MAX_MS` if the workflow legitimately needs longer |
 | `TOOL_FORBIDDEN` on UI tools | Caller lacks `syteline:ui` (User role) | UI driving is Admin/AI-Admin only — grant the role or have an admin run it |
+| Task stuck in `assigned`, never runs | `SYTELINE_TASK_RUNNER_ENABLED` is `false`/unset | Set `SYTELINE_TASK_RUNNER_ENABLED=true` and restart; check `SYTELINE_UI_ENABLED` too |
+| Task went `blocked` with `awaiting-write-approval` | `autoApproveWrites` was `false` and the plan reached write steps | Intended: the agent did read-only recon and proposed a plan. Create a follow-up task with `autoApproveWrites: true` to approve this task's writes |
+| Task went `blocked` on plan validation | Model-generated plan failed zod validation (unknown action, bad shape) | Read `blockedReason`; restate the goal more concretely and create a new task |
+| Task went `blocked` mid-execution | First failing step aborts the plan by design | `syteline.task.get` → per-step outcomes + evidence ids; fix the failing step's label/text (screens change; ARIA labels are the selector) and create a new task |
+| `syteline.task.cancel` returns `TOOL_FORBIDDEN` | Caller is neither the requester nor an admin | Task cancellation is owner-or-admin only |
 | Browser works locally but not as a service | Service account lacks a user profile temp dir, or proxy env vars missing | Run the service under a dedicated account with a writable profile; mirror `HTTP_PROXY`/`HTTPS_PROXY` into the service environment |
 
 When reporting a UI-automation problem, include the `sessionId` and the
