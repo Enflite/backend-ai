@@ -930,6 +930,7 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
           userId: auth.userId,
           roleId: auth.roleId,
           requestId: req.requestId,
+          conversationId: resolvedConversationId,
           classification,
           auth,
           initialModel: { id: servingModelId, name: servingModel.name, contextWindow: servingModel.contextWindow, version: servingModel.version },

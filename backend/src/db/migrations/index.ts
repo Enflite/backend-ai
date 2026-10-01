@@ -37,6 +37,7 @@ import { migration028 } from './028_ollama_primary_seed.js';
 import { migration029 } from './029_model_default_open.js';
 import { migration030 } from './030_syteline_forms_permission.js';
 import { migration031 } from './031_syteline_ui_permission.js';
+import { migration032 } from './032_syteline_tasks.js';
 
 export const migrations: Migration[] = [
   migration001,
@@ -49,4 +50,5 @@ export const migrations: Migration[] = [
   migration029,
   migration030,
   migration031,
+  migration032,
 ];

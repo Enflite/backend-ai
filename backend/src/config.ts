@@ -339,6 +339,23 @@ const envSchema = z.object({
   // automation needs multi-instance evidence.
   SYTELINE_UI_EVIDENCE_DIR: z.string().min(1).default('./ui-evidence'),
   // ---------------------------------------------------------------------------
+  // SyteLine task-agent system (DESIGN.md §11): server-side worker that
+  // claims `assigned` tasks, plans them with the model, and executes them
+  // as the requester through their own UI session. DISABLED BY DEFAULT:
+  // SYTELINE_TASK_RUNNER_ENABLED=false is the fail-closed kill-switch — when
+  // off, tasks wait in `assigned` and the scheduler sweeps are no-ops.
+  // ---------------------------------------------------------------------------
+  SYTELINE_TASK_RUNNER_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(false),
+  // Poll interval for the in-process task-runner scheduler.
+  SYTELINE_TASK_RUNNER_INTERVAL_MS: z.coerce.number().int().min(1000).max(3600000).default(15000),
+  // Absolute deadline for one task's plan+execute run (plan generation,
+  // browser steps, evidence capture).
+  SYTELINE_TASK_RUNNER_TASK_TIMEOUT_MS: z.coerce.number().int().min(60000).max(7200000).default(600000),
+  // Max tasks claimed per scheduler sweep (bounds one tick's work).
+  SYTELINE_TASK_RUNNER_SWEEP_LIMIT: z.coerce.number().int().min(1).max(100).default(10),
+  // ---------------------------------------------------------------------------
   // Enterprise OIDC login (Phase 5b): Authorization Code + PKCE as the
   // primary enterprise login path, alongside password login. When
   // OIDC_ENABLED, the required fields are validated at boot (fail fast);

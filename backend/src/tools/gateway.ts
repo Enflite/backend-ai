@@ -11,6 +11,7 @@ import { getSyteLineAdapter } from './syteline.js';
 import { repoToolDefinitions } from './repos.js';
 import { sytelineFormToolDefinitions } from './sytelineForms.js';
 import { sytelineUiToolDefinitions } from './sytelineUi.js';
+import { sytelineTaskToolDefinitions } from './sytelineTasks.js';
 
 /**
  * Context handed to every tool execution. Carries the caller's auth (tenant,
@@ -24,6 +25,12 @@ export interface ToolExecutionContext {
   classification: Classification;
   /** Correlates the tool's own audit events with the caller's request. */
   requestId?: string;
+  /**
+   * The chat conversation this call runs in, when created from chat.
+   * Tools that create durable work (e.g. syteline.task.create) use it to
+   * link the work back for completion reporting.
+   */
+  conversationId?: string;
 }
 
 /** Document shape for the `tool_executions` collection. `_id` is an app-generated UUID string (ADR-014). */
@@ -218,6 +225,10 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
   // permission gates the whole family (Admin / AI Admin only); write actions
   // are destructive and ride the agentic loop's confirmation gate.
   ...sytelineUiToolDefinitions,
+  // SyteLine task-agent system (kanban API for UI automation tasks). Same
+  // 'syteline:ui' permission; the server-side runner executes tasks as the
+  // requester through their own UI session.
+  ...sytelineTaskToolDefinitions,
 ];
 
 export function getTool(name: string): ToolDefinition<any> {
@@ -361,9 +372,10 @@ export async function runToolCall(options: {
   classification: Classification;
   confirmed?: boolean;
   requestId?: string;
+  conversationId?: string;
   signal: AbortSignal;
 }): Promise<ToolCallResult> {
-  const { auth, name, classification, requestId, signal } = options;
+  const { auth, name, classification, requestId, conversationId, signal } = options;
   const confirmed = options.confirmed ?? false;
 
   let parameters: unknown;
@@ -455,7 +467,7 @@ export async function runToolCall(options: {
   });
   try {
     const output = await Promise.race([
-      prepared.definition.execute(prepared.input, { auth, classification, requestId: requestId ?? 'none' }, toolSignal),
+      prepared.definition.execute(prepared.input, { auth, classification, requestId: requestId ?? 'none', conversationId }, toolSignal),
       deadline,
     ]);
     await db
