@@ -119,6 +119,12 @@ export interface AgenticLoopOptions {
   userId: string;
   roleId: string;
   requestId?: string;
+  /**
+   * The chat conversation this turn runs in. Threaded into tool execution
+   * context so tools that create durable work (syteline.task.create) can
+   * link it back for completion reporting.
+   */
+  conversationId?: string;
   classification: Classification;
   auth: AuthContext;
   /** Model resolved for round 1 (already authorized by the caller). */
@@ -425,6 +431,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
             classification,
             confirmed: approvedCallIds.has(call.id),
             requestId,
+            conversationId: options.conversationId,
             signal,
           });
           return { call, skipped: false as const, outcome };

@@ -28,6 +28,7 @@ import { evalRoutes } from './eval/routes.js';
 import { retentionRoutes } from './retention/routes.js';
 import { learningRoutes } from './learning/routes.js';
 import { startRetentionScheduler, stopRetentionScheduler } from './retention/scheduler.js';
+import { startTaskRunnerScheduler, stopTaskRunnerScheduler } from './syteline/tasks/taskScheduler.js';
 import { recoverIngestionJobs } from './documents/queue.js';
 import { closeDb } from './db/mongo.js';
 
@@ -243,6 +244,13 @@ export async function buildServer(): Promise<FastifyInstance> {
   // never overlap.
   startRetentionScheduler();
 
+  // SyteLine task-agent runner (DESIGN.md §11): in-process poll scheduler
+  // that claims `assigned` tasks and executes them as the requester.
+  // Fail-closed behind SYTELINE_TASK_RUNNER_ENABLED (default false).
+  // Started here so it runs in every serving process; stopped on preClose.
+  // The timer is unref'd and sweeps never overlap.
+  startTaskRunnerScheduler();
+
   // Root health endpoints
   await fastify.register(healthRoutes);
   // Prometheus exposition (gated by METRICS_PUBLIC; see observability/metrics.ts)
@@ -253,6 +261,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   fastify.addHook('preClose', async () => {
     closeActiveSseStreams();
     stopRetentionScheduler();
+    stopTaskRunnerScheduler();
   });
 
   return fastify;

@@ -96,7 +96,12 @@ export function overrideUiDriverFactory(factory: UiDriverFactory | null): void {
   sessionManager = null;
 }
 
-function getSessionManager(): UiSessionManager {
+/**
+ * Server-side accessor for the shared UI session manager (task runner).
+ * Respects the driver factory override, so tests drive the FakeDriver.
+ */
+export function getUiSessionManager(): UiSessionManager {
+
   if (!sessionManager) {
     const factory: UiDriverFactory =
       driverFactoryOverride ?? (async () => PlaywrightDriver.launch());
@@ -158,21 +163,44 @@ async function acquireSession(
   ctx: ToolExecutionContext,
   signal: AbortSignal,
 ): Promise<UiSessionHandle> {
+  return acquireUiSession(ctx.auth, signal, ctx.requestId);
+}
+
+/**
+ * Acquire (or reuse) the requester's logged-in browser session outside the
+ * tool pipeline — used by the SyteLine task runner, which acts as the task's
+ * requester. Same login/credential semantics as the tools; the caller owns
+ * releasing the session when done.
+ */
+export async function acquireUiSession(
+  auth: AuthContext,
+  signal: AbortSignal,
+  requestId?: string,
+): Promise<UiSessionHandle> {
   assertUiEnabled();
   uiBaseUrl();
-  const handle = await getSessionManager().acquire(ctx.auth, {
-    connect: connectWithUserCredentials(ctx.auth, ctx.requestId),
+  const handle = await getUiSessionManager().acquire(auth, {
+    connect: connectWithUserCredentials(auth, requestId),
     signal,
-    requestId: ctx.requestId,
+    requestId,
   });
   handle.touch();
   return handle;
 }
 
+/** Release the requester's browser session (task runner cleanup). */
+export async function releaseUiSession(
+  auth: AuthContext,
+  reason: string,
+  requestId?: string,
+): Promise<boolean> {
+  return getUiSessionManager().release(auth, reason, requestId);
+}
+
 /** The caller's live session; throws NO_UI_SESSION when startSession was never called. */
 function requireSession(ctx: ToolExecutionContext): UiSessionHandle {
   assertUiEnabled();
-  const handle = getSessionManager().peek(ctx.auth);
+  const handle = getUiSessionManager().peek(ctx.auth);
   if (!handle) {
     throw Errors.badRequest(
       'NO_UI_SESSION',
@@ -194,7 +222,11 @@ function evidenceDir(tenantId: string): string {
   return dir;
 }
 
-async function storeScreenshotEvidence(
+/**
+ * Capture evidence helper shared with the task runner: persists a
+ * screenshot server-side (tenant-scoped) and returns the evidence id.
+ */
+export async function storeScreenshotEvidence(
   auth: AuthContext,
   png: Buffer,
   requestId?: string,
@@ -233,11 +265,15 @@ const taskStepSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('assertText'), text: z.string().min(1).max(500) }).strict(),
 ]);
 
-const runTaskPlanInput = z
+/**
+ * The task-plan DSL schema — shared with the task runner, which
+ * zod-validates model-generated plans against it before executing.
+ */
+export const runTaskPlanInput = z
   .object({ steps: z.array(taskStepSchema).min(1).max(MAX_PLAN_STEPS) })
   .strict();
 
-type TaskStep = z.infer<typeof taskStepSchema>;
+export type TaskStep = z.infer<typeof taskStepSchema>;
 
 interface PlanStepOutcome {
   step: number;
@@ -255,7 +291,11 @@ function toolErrorCode(error: unknown): string {
     : 'UI_STEP_FAILED';
 }
 
-async function runPlanStep(
+/**
+ * Execute one validated plan step against a live driver.
+ * Shared with the task runner (per-step screenshot evidence).
+ */
+export async function runPlanStep(
   driver: UiDriver,
   step: TaskStep,
   signal: AbortSignal,
@@ -571,7 +611,7 @@ export const sytelineUiToolDefinitions: readonly ToolDefinition<any>[] = [
     execute: async (_input: unknown, ctx: ToolExecutionContext, signal: AbortSignal) => {
       if (signal.aborted) throw Errors.badRequest('TOOL_ABORTED', 'Tool call aborted');
       assertUiEnabled();
-      const ended = await getSessionManager().release(ctx.auth, 'user_requested', ctx.requestId);
+      const ended = await getUiSessionManager().release(ctx.auth, 'user_requested', ctx.requestId);
       return { ended };
     },
   },

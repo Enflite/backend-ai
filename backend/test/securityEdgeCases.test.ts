@@ -256,9 +256,11 @@ describe('destructive tool confirmation gate', () => {
       .filter((t) => t.destructive)
       .map((t) => t.name)
       .sort();
-    // The only destructive production tools are the SyteLine UI write actions.
-    // Each one requires the syteline:ui permission and explicit confirmation.
+    // The only destructive production tools are the SyteLine UI write actions
+    // and the task cancel action. Each one requires the syteline:ui permission
+    // and explicit confirmation.
     expect(destructive).toEqual([
+      'syteline.task.cancel',
       'syteline.ui.clickButton',
       'syteline.ui.deleteCredentials',
       'syteline.ui.fillField',
