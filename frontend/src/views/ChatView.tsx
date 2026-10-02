@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import Sidebar from '../components/Sidebar';
+import { ConversationSidebarBody, ConversationSidebarCollapsed, ConversationSidebarHeader } from '../components/Sidebar';
+import ContextSidebar from '../shell/ContextSidebar';
 import TopBar from '../shell/TopBar';
 import MessageBubble from '../components/Message';
 import ChatInput from '../components/ChatInput';
@@ -105,6 +106,8 @@ export default function ChatView() {
   const [models, setModels] = useState<Model[]>([]);
   const [selectedModel, setSelectedModel] = useState<Model | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  /** Mobile (≤720px) slide-over state for the conversation panel — closed on select/new. */
+  const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false);
   const [showModelSelector, setShowModelSelector] = useState(false);
   /** One-tap provider switching: Enflite | Claude | OpenAI (ADR-018). */
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -457,9 +460,28 @@ export default function ChatView() {
 
   return (
     <div className="flex flex-1 min-h-0 overflow-hidden" style={{ background: 'var(--background)' }}>
-      <Sidebar conversations={conversations} activeId={activeId} onSelect={selectConversation} onNew={() => void newConversation()}
-        onDelete={(id) => void deleteConversation(id)} onRename={(id, title) => void renameConversation(id, title)}
-        collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((value) => !value)} />
+      <ContextSidebar
+        label="Conversations"
+        collapsed={sidebarCollapsed}
+        mobileOpen={sidebarMobileOpen}
+        onMobileToggle={() => setSidebarMobileOpen((value) => !value)}
+        header={<ConversationSidebarHeader onToggle={() => setSidebarCollapsed((value) => !value)} />}
+        collapsedContent={
+          <ConversationSidebarCollapsed
+            onNew={() => void newConversation()}
+            onToggle={() => setSidebarCollapsed((value) => !value)}
+          />
+        }
+      >
+        <ConversationSidebarBody
+          conversations={conversations}
+          activeId={activeId}
+          onSelect={(id) => { selectConversation(id); setSidebarMobileOpen(false); }}
+          onNew={() => { void newConversation(); setSidebarMobileOpen(false); }}
+          onDelete={(id) => void deleteConversation(id)}
+          onRename={(id, title) => void renameConversation(id, title)}
+        />
+      </ContextSidebar>
       <div className="flex flex-col flex-1 min-w-0">
         <TopBar
           ariaLabel="Conversation controls"
