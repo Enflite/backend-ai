@@ -16,6 +16,7 @@ import AgentWorkspace from './workspace/AgentWorkspace';
 import BoardView from './views/BoardView';
 import FormsView from './views/FormsView';
 import SytelineView from './views/SytelineView';
+import StudioView from './studio/StudioView';
 
 function RootRoutes() {
   const { user, login, authError } = useAuth();
@@ -56,6 +57,7 @@ function RootRoutes() {
           <Route path="board/*" element={<BoardView />} />
           <Route path="forms/*" element={<FormsView />} />
           <Route path="syteline/*" element={<SytelineView />} />
+          <Route path="studio/*" element={<StudioView />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

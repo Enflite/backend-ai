@@ -34,6 +34,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/board', label: 'Board', icon: 'layout', permissions: ['syteline:ui', 'syteline:forms'] },
   { to: '/forms', label: 'Form AI Agent', icon: 'file', permissions: ['syteline:forms'] },
   { to: '/syteline', label: 'SyteLine', icon: 'server', permissions: ['syteline:ui'] },
+  { to: '/studio', label: 'Studio', icon: 'bolt', permissions: ['studio:manage', 'studio:run'] },
   // Agents directory: no rail slot (the palette covers it), but it must stay
   // discoverable — it is the index of every agent surface under /agents/*.
   { to: '/agents', label: 'Agents', icon: 'spark', permissions: ['syteline:ui', 'syteline:forms'], hideFromRail: true },
