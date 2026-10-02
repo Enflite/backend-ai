@@ -194,7 +194,7 @@ must belong to the same tenant. Privacy routing treats the family
 like flows: a schedule firing a `syteline.*` flow is never offered
 on cloud turns when customer or finance categories are enforced
 (see `docs/privacy-routing.md`) — the tool-level checks inherit
-through the gateway. Migration 034 seeds the permissions and the
+through the gateway. Migration 035 seeds the permissions and the
 indexes.
 
 ## Consequences
@@ -277,7 +277,7 @@ schedule and surfaced in fired runs); stats correctness over
 kill switch default-off (`403 FEATURE_DISABLED`, no claims);
 authorization (`FORBIDDEN` without `schedules:manage` /
 `schedules:run`); tenant isolation of schedules and the
-`runAsUserId` same-tenant rule; migration 034 (permissions seeded,
+`runAsUserId` same-tenant rule; migration 035 (permissions seeded,
 indexes present). **REQUIRES REAL CLOCK / REAL TOOL EXECUTION:**
 tick-to-tool latency and fired runs against live tools are
 validated against the same harnesses as the underlying tools —
