@@ -44,7 +44,7 @@ export default function NewTaskView() {
           ...(linkedConversation ? { conversationId: linkedConversation } : {}),
         },
       );
-      navigate(`/agents/tasks/${task._id}`);
+      navigate(`/tasks/${task._id}`);
     } catch (err) {
       setError(
         err instanceof ApiError

@@ -17,7 +17,7 @@ import { Badge, Card, PageHeader } from '../components/ui/primitives';
 import { NotAuthorizedState } from '../components/ui/ErrorState';
 import TasksLanding from '../agents/views/TasksLanding';
 import NewTaskView from '../agents/views/NewTaskView';
-import TaskDetailView from '../agents/views/TaskDetailView';
+import TaskRedirect from '../tasks/TaskRedirect';
 import WorkflowsView from '../agents/views/WorkflowsView';
 
 export interface AgentSurface {
@@ -50,7 +50,7 @@ export const AGENT_SURFACES: AgentSurface[] = [
 ];
 
 /** Task workspaces drive SyteLine as the user — syteline:ui required. */
-function RequireTaskUi({ children }: { children: ReactNode }) {
+export function RequireTaskUi({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   if (!hasAnyPermission(user?.permissions ?? [], ['syteline:ui'])) {
     return (
@@ -143,7 +143,7 @@ export default function AgentsView() {
         path="tasks/:id"
         element={
           <RequireTaskUi>
-            <TaskDetailView />
+            <TaskRedirect />
           </RequireTaskUi>
         }
       />

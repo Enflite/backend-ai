@@ -11,7 +11,8 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, Login, useAuth } from './auth';
 import AppShell from './shell/AppShell';
 import ChatView from './views/ChatView';
-import AgentsView from './views/AgentsView';
+import AgentsView, { RequireTaskUi } from './views/AgentsView';
+import TaskWorkspace from './tasks/TaskWorkspace';
 import BoardView from './views/BoardView';
 import FormsView from './views/FormsView';
 import SytelineView from './views/SytelineView';
@@ -35,6 +36,14 @@ function RootRoutes() {
         <Route element={<AppShell />}>
           <Route index element={<ChatView />} />
           <Route path="agents/*" element={<AgentsView />} />
+          <Route
+            path="tasks/:id"
+            element={
+              <RequireTaskUi>
+                <TaskWorkspace />
+              </RequireTaskUi>
+            }
+          />
           <Route path="board/*" element={<BoardView />} />
           <Route path="forms/*" element={<FormsView />} />
           <Route path="syteline/*" element={<SytelineView />} />

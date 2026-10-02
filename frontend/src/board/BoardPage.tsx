@@ -85,7 +85,7 @@ function useSource<T>(
 }
 
 function cardLink(card: BoardCard): string {
-  return card.kind === 'form' ? `/forms/${encodeURIComponent(card.id)}` : `/board/task/${encodeURIComponent(card.id)}`;
+  return card.kind === 'form' ? `/forms/${encodeURIComponent(card.id)}` : `/tasks/${encodeURIComponent(card.id)}`;
 }
 
 function CardView({ card }: { card: BoardCard }) {
@@ -503,7 +503,7 @@ export default function BoardPage() {
           {showNewTask && (
             <div className="mb-4 flex-shrink-0">
               <NewTaskForm
-                onDone={(taskId) => navigate(`/board/task/${encodeURIComponent(taskId)}`)}
+                onDone={(taskId) => navigate(`/tasks/${encodeURIComponent(taskId)}`)}
                 onCancel={() => setShowNewTask(false)}
               />
             </div>

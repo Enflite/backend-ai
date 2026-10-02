@@ -308,7 +308,7 @@ export default function CommandPalette({
         title: task.title,
         keywords: `${task.title} ${task.status}`,
         subtitle: `Task · ${task.status} · ${timeAgo(task.updatedAt)}`,
-        run: () => navigate(`/agents/tasks/${task.id}`),
+        run: () => navigate(`/tasks/${task.id}`),
       });
     }
     for (const conversation of conversations) {
