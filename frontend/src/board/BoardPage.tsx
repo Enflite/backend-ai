@@ -13,7 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth';
 import { ApiError } from '../api';
-import { createSytelineTask, listSytelineTasks } from '../api/tasks';
+import { createSytelineTask, generateSytelineTasks, generationConfirmation, listSytelineTasks } from '../api/tasks';
 import { defaultToolClassification } from '../api/tools';
 import { listFormCustomizations } from '../api/formAgent';
 import { usePolling } from '../hooks/usePolling';
@@ -222,6 +222,74 @@ function NewTaskForm({ onDone, onCancel }: { onDone: (taskId: string) => void; o
   );
 }
 
+/**
+ * "Tell the AI what to do" — natural-language goal in, board tasks out.
+ * The server breaks the goal into tasks via the model and creates each
+ * through the real task path; the board refreshes to show them. Same
+ * primitives/styling as the rest of the board.
+ */
+function GenerateTasksBox({ onGenerated, disabled }: { onGenerated: () => void; disabled: boolean }) {
+  const [goal, setGoal] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!goal.trim() || busy) return;
+    setBusy(true);
+    setError('');
+    setConfirmation('');
+    try {
+      const { tasks } = await generateSytelineTasks({ goal: goal.trim() });
+      setConfirmation(generationConfirmation(tasks.length));
+      setGoal('');
+      onGenerated();
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : 'Could not generate tasks');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form
+      onSubmit={submit}
+      className="rounded-lg p-4 mb-4 flex-shrink-0"
+      style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
+    >
+      <label className="block text-sm">
+        <span className="font-medium" style={{ color: 'var(--foreground)' }}>Tell the AI what to do</span>
+        <span className="block text-xs mt-0.5 mb-2" style={{ color: 'var(--muted-foreground)' }}>
+          Describe the outcome in plain language — the AI breaks it into board tasks and starts on them.
+        </span>
+        <div className="flex gap-2">
+          <input
+            value={goal}
+            onChange={(event) => setGoal(event.target.value)}
+            disabled={busy || disabled}
+            maxLength={2000}
+            placeholder="e.g. Bring TRN purchase orders up to date and verify the vendor list"
+            aria-label="Describe what you want the AI to do"
+            className="flex-1 rounded-md px-3 py-2 bg-transparent text-sm disabled:opacity-50"
+            style={{ border: '1px solid var(--border)' }}
+          />
+          <button
+            type="submit"
+            disabled={busy || disabled || !goal.trim()}
+            className="text-sm font-medium px-4 py-2 rounded-md disabled:opacity-50 flex-shrink-0"
+            style={{ background: 'var(--accent)', color: 'var(--accent-foreground)' }}
+          >
+            {busy ? 'Breaking this into tasks…' : 'Generate'}
+          </button>
+        </div>
+      </label>
+      {error && <p role="alert" className="text-sm mt-2" style={{ color: '#a50a24' }}>{error}</p>}
+      {confirmation && <p role="status" className="text-sm mt-2" style={{ color: 'var(--muted-foreground)' }}>{confirmation}</p>}
+    </form>
+  );
+}
+
 /** "What did the AI complete today" — flat chronological list per kind. */
 function TodayView({ cards }: { cards: BoardCard[] }) {
   const [day, setDay] = useState(() => localDay(new Date()));
@@ -399,6 +467,10 @@ export default function BoardPage() {
         </div>
       ) : (
         <>
+          <GenerateTasksBox
+            onGenerated={() => tasksSource.reload()}
+            disabled={tasksSource.health === 'disabled' || tasksSource.health === 'forbidden'}
+          />
           <div className="space-y-4 mb-4 flex-shrink-0">
             <SourcePanel
               source="tasks"
