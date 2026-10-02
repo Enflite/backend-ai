@@ -50,16 +50,16 @@ export const STUDIO_RUN_PERMISSIONS = ['studio:run'];
 /* ------------------------------------------------------------------ */
 /* Automations (builder slice)                                         */
 /*                                                                     */
-/* Shapes mirror the builder contract:                                 */
+/* Shapes mirror the backend's public views for /api/v1/studio/*:      */
 /*   GET  /api/v1/studio/automations                                    */
 /*   GET  /api/v1/studio/automations/:id                               */
-/*   PUT  /api/v1/studio/automations/:id      (save draft)              */
+/*   PATCH /api/v1/studio/automations/:id    (save draft)              */
 /*   POST /api/v1/studio/automations/:id/test (dry-run)                */
 /*   POST /api/v1/studio/automations/:id/deploy                        */
 /*   POST /api/v1/studio/automations/:id/undeploy                       */
-/* The backend builder slice is still in flight: every endpoint getter */
-/* validates its envelope and the UI renders an honest "not available" */
-/* state on 404 instead of inventing automations.                      */
+/* Lists arrive as { items: [...] }; single resources arrive as the     */
+/* bare view (no envelope). Every getter validates its envelope and     */
+/* the UI renders an honest error state instead of inventing shapes.   */
 /* ------------------------------------------------------------------ */
 
 export type StudioTriggerKind = 'manual' | 'scheduled' | 'webhook' | 'event';
@@ -72,9 +72,25 @@ export interface StudioTrigger {
   webhookUrl?: string;
   /** Human description of the event this automation listens for. */
   event?: string;
+  /* Structured trigger fields carried through from the backend (scheduled/event).
+   * Preserved so save-back never loses what the canvas can't edit. */
+  timezone?: string;
+  inputs?: Record<string, unknown>;
+  actionId?: string;
+  connectionId?: string;
+  params?: Record<string, unknown>;
+  watchPath?: string;
+  pollCron?: string;
 }
 
 export type StudioStepKind = 'action' | 'condition' | 'verify' | 'log';
+
+/** One field assertion over a verify step's fetched response body. */
+export interface StudioVerifyAssertion {
+  path: string;
+  operator: '==' | '!=';
+  value: string;
+}
 
 export interface StudioStep {
   id: string;
@@ -85,10 +101,18 @@ export interface StudioStep {
   actionId?: string;
   params?: Record<string, unknown>;
   connectionId?: string;
+  retries?: number;
+  continueOnError?: boolean;
   /** Condition steps: expression to evaluate. */
   expression?: string;
+  /** Condition steps (backend shape): the flow `when` grammar + branch targets. */
+  when?: string;
+  then?: string;
+  else?: string;
   /** Verify steps: expected outcome the run checks. */
   expectation?: string;
+  /** Verify steps (backend shape): structured field assertions. */
+  assertions?: StudioVerifyAssertion[];
   /** Log steps: message template. */
   message?: string;
 }
@@ -114,6 +138,49 @@ export interface StudioAutomation extends StudioAutomationSummary {
     deployedAt?: string;
     deployedBy?: string;
   } | null;
+  /** Destructive steps, from the backend view — drives the deploy confirm UI. */
+  destructiveSteps?: { stepId: string; actionId: string; title: string }[];
+}
+
+/* ------------------------------------------------------------------ */
+/* AI generation (Wave 3)                                              */
+/*                                                                     */
+/*   POST /api/v1/studio/automations/generate   NL -> draft automation */
+/*   POST /api/v1/studio/automations/:id/explain  plain-language tour  */
+/*   POST /api/v1/studio/automations/:id/suggest  next-step suggestions */
+/* ------------------------------------------------------------------ */
+
+export interface StudioAiExplainedStep {
+  stepId: string;
+  kind: StudioStepKind;
+  text: string;
+}
+
+export interface StudioAiDestructiveWarning {
+  stepId: string;
+  actionId: string;
+  title: string;
+  warning: string;
+}
+
+/** Deterministic explanation derived from the stored automation definition. */
+export interface StudioAiExplanation {
+  automationId: string;
+  title: string;
+  summary: string;
+  trigger: { kind: StudioTriggerKind; text: string };
+  steps: StudioAiExplainedStep[];
+  destructive: StudioAiDestructiveWarning[];
+}
+
+/** One catalog-grounded next-step suggestion (returned only, never applied). */
+export interface StudioAiSuggestion {
+  id: string;
+  kind: StudioStepKind;
+  title: string;
+  reason: string;
+  /** Concrete step JSON, ready to insert into the draft. */
+  step: StudioStep;
 }
 
 /** Per-step result from POST /:id/test (dry-run). Rendered only from the real API. */

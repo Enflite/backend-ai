@@ -7,21 +7,34 @@
  * honest reason. No invented actions.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Badge } from '../../components/ui/primitives';
-import type { StudioAction, StudioStepKind } from '../types';
+import { Badge, Skeleton } from '../../components/ui/primitives';
+import type { StudioAction, StudioAiSuggestion, StudioStep, StudioStepKind } from '../types';
 import { groupActionsBySubstrate, substrateLabel } from '../catalog';
+import { stepKindLabel } from '../builder';
+
+export interface AiSuggestionState {
+  suggestions: StudioAiSuggestion[] | null;
+  loading: boolean;
+  error: string | null;
+}
 
 export default function AddStepMenu({
   catalog,
   anchor,
   onAdd,
   onClose,
+  ai,
+  onPickSuggestion,
 }: {
   catalog: StudioAction[];
   /** Bounding rect of the "+" button; the menu anchors under it. */
   anchor: DOMRect;
   onAdd: (kind: StudioStepKind, actionId?: string) => void;
   onClose: () => void;
+  /** AI suggestions state; omitted when suggestions aren't available. */
+  ai?: AiSuggestionState;
+  /** Insert a suggested step (the suggestion is returned only — this applies it). */
+  onPickSuggestion?: (step: StudioStep) => void;
 }) {
   const [query, setQuery] = useState('');
   const panelRef = useRef<HTMLDivElement>(null);
@@ -91,6 +104,67 @@ export default function AddStepMenu({
         />
       </div>
       <div className="overflow-y-auto py-1.5">
+        {ai && onPickSuggestion && (
+          <>
+            <p
+              className="px-3 pt-2 pb-1 text-[9px] font-bold uppercase"
+              style={{ color: 'var(--muted-foreground)', letterSpacing: '0.1em' }}
+            >
+              AI suggestions
+            </p>
+            {ai.loading && (
+              <div className="px-3 py-1 space-y-1.5" aria-label="Loading suggestions">
+                <Skeleton height={44} />
+                <Skeleton height={44} />
+              </div>
+            )}
+            {!ai.loading && ai.error && (
+              <p className="px-3 py-2 text-[11px]" style={{ color: 'var(--muted-foreground)' }}>
+                Couldn't load suggestions: {ai.error}
+              </p>
+            )}
+            {!ai.loading && !ai.error && (ai.suggestions ?? []).length === 0 && (
+              <p className="px-3 py-2 text-[11px]" style={{ color: 'var(--muted-foreground)' }}>
+                No suggestions for this draft yet.
+              </p>
+            )}
+            {!ai.loading &&
+              !ai.error &&
+              (ai.suggestions ?? []).map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  role="menuitem"
+                  title={s.reason}
+                  className="w-full text-left px-3 py-2 hover:bg-secondary flex items-start justify-between gap-2"
+                  onClick={() => onPickSuggestion(s.step)}
+                >
+                  <span className="min-w-0">
+                    <span className="block text-xs font-medium" style={{ color: 'var(--foreground)' }}>
+                      {s.title}
+                    </span>
+                    <span
+                      className="block text-[10px]"
+                      style={{
+                        color: 'var(--muted-foreground)',
+                        display: '-webkit-box',
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      {s.reason}
+                    </span>
+                  </span>
+                  <span className="flex-shrink-0 pt-0.5">
+                    <Badge tone="gray">{stepKindLabel(s.kind)}</Badge>
+                  </span>
+                </button>
+              ))}
+            <div className="mx-3 my-1.5" style={{ borderTop: '1px solid var(--border)' }} aria-hidden="true" />
+          </>
+        )}
+
         {quickKinds.map((q) => (
           <button
             key={q.kind}

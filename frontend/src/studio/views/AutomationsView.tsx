@@ -12,10 +12,11 @@ import { useAuth } from '../../auth';
 import { hasAnyPermission } from '../../shell/navRegistry';
 import { Button, Skeleton } from '../../components/ui/primitives';
 import ErrorState from '../../components/ui/ErrorState';
-import { isStudioUnavailable, listStudioAutomations } from '../api';
+import { isStudioUnavailable, listStudioAutomations, listStudioConnections } from '../api';
 import { automationStatusBucket } from '../builder';
-import type { StudioAutomationSummary, StudioTriggerKind } from '../types';
-import { STUDIO_MANAGE_PERMISSIONS } from '../types';
+import type { StudioAutomationSummary, StudioConnection, StudioTriggerKind } from '../types';
+import { STUDIO_MANAGE_PERMISSIONS, STUDIO_RUN_PERMISSIONS } from '../types';
+import GenerateAutomationPanel from '../components/GenerateAutomationPanel';
 import StudioEmpty, { IconBolt, StudioEmptyIcon } from '../components/StudioEmpty';
 
 type Filter = 'all' | 'active' | 'draft' | 'failed' | 'scheduled';
@@ -61,11 +62,14 @@ export default function AutomationsView() {
   const { user } = useAuth();
   const permissions = user?.permissions ?? [];
   const canCreate = hasAnyPermission(permissions, STUDIO_MANAGE_PERMISSIONS);
+  const canGenerate = hasAnyPermission(permissions, STUDIO_RUN_PERMISSIONS);
 
   const [automations, setAutomations] = useState<StudioAutomationSummary[] | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
+  const [generateOpen, setGenerateOpen] = useState(false);
+  const [connections, setConnections] = useState<StudioConnection[]>([]);
 
   const load = useCallback(async () => {
     setError(null);
@@ -85,6 +89,15 @@ export default function AutomationsView() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /** Connections feed the Generate panel's connection picker; degrade to
+   *  the env-backed 'default' when the list can't load. */
+  const openGenerate = useCallback(() => {
+    setGenerateOpen(true);
+    void listStudioConnections()
+      .then(setConnections)
+      .catch(() => setConnections([]));
+  }, []);
 
   const counts = useMemo(() => {
     const c: Record<Filter, number> = { all: 0, active: 0, draft: 0, failed: 0, scheduled: 0 };
@@ -139,9 +152,16 @@ export default function AutomationsView() {
         description="Automations are repeatable workflows you build from the API action catalog — triggered on a schedule, a webhook, or on demand. Create your first one to get started."
         action={
           canCreate ? (
-            <Link to="/studio/automations/new">
-              <Button variant="primary">New Automation</Button>
-            </Link>
+            <div className="flex items-center justify-center gap-2">
+              {canGenerate && (
+                <Button variant="outline" onClick={openGenerate}>
+                  Generate with AI
+                </Button>
+              )}
+              <Link to="/studio/automations/new">
+                <Button variant="primary">New Automation</Button>
+              </Link>
+            </div>
           ) : undefined
         }
       />
@@ -181,11 +201,18 @@ export default function AutomationsView() {
             );
           })}
         </div>
-        {canCreate && (
-          <Link to="/studio/automations/new">
-            <Button variant="primary" size="sm">New Automation</Button>
-          </Link>
-        )}
+        <div className="flex items-center gap-2">
+          {canGenerate && (
+            <Button variant="outline" size="sm" onClick={openGenerate}>
+              Generate with AI
+            </Button>
+          )}
+          {canCreate && (
+            <Link to="/studio/automations/new">
+              <Button variant="primary" size="sm">New Automation</Button>
+            </Link>
+          )}
+        </div>
       </div>
 
       {visible.length === 0 ? (
@@ -232,6 +259,15 @@ export default function AutomationsView() {
             </li>
           ))}
         </ul>
+      )}
+      {generateOpen && (
+        <GenerateAutomationPanel
+          connections={connections}
+          onClose={() => {
+            setGenerateOpen(false);
+            void load();
+          }}
+        />
       )}
     </div>
   );

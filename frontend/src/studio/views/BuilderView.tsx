@@ -4,29 +4,31 @@
  * Vertical step canvas: the trigger card first, then step cards joined by
  * hairline connectors with "+" insert affordances between them. Top bar
  * carries the AUTOMATIONS / <NAME> breadcrumb, editable title, status pill,
- * and Test / Save / Deploy. A side editor panel edits the selected trigger
- * or step; action-step inputs are driven by the catalog entry's real params
- * JSON Schema.
+ * and Explain / Test / Save / Deploy. A side editor panel edits the selected
+ * trigger or step; action-step inputs are driven by the catalog entry's real
+ * params JSON Schema. The Explain panel renders a deterministic,
+ * definition-derived tour of the automation; the add-step menu offers
+ * catalog-grounded AI suggestions.
  *
  * Honesty rules: test results render only from the real API (dry-run or
- * per-step live test); the automations endpoints are still in flight, so
- * until they land the builder shows an honest "not available" state and
- * keeps drafts local instead of faking persistence.
+ * per-step live test); drafts persist through the real automations
+ * endpoints.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../../auth';
 import { hasAnyPermission } from '../../shell/navRegistry';
 import { Badge, Button, Skeleton } from '../../components/ui/primitives';
 import ErrorState from '../../components/ui/ErrorState';
 import {
+  createStudioAutomation,
   deployStudioAutomation,
   getStudioAutomation,
   isStudioUnavailable,
   listStudioActions,
-  listStudioAutomations,
   listStudioConnections,
   saveStudioAutomation,
+  suggestStudioAutomationSteps,
   testStudioAction,
   testStudioAutomation,
   undeployStudioAutomation,
@@ -54,9 +56,10 @@ import {
 } from '../builder';
 import StepCard from '../components/StepCard';
 import TriggerCard from '../components/TriggerCard';
-import AddStepMenu from '../components/AddStepMenu';
+import AddStepMenu, { type AiSuggestionState } from '../components/AddStepMenu';
 import StepEditorPanel, { type EditorSelection } from '../components/StepEditorPanel';
 import DeployConfirmModal from '../components/DeployConfirmModal';
+import ExplainPanel from '../components/ExplainPanel';
 import { IconAlert, IconPlus } from '../components/StudioIcons';
 
 type LoadState = 'loading' | 'ready' | 'unavailable' | 'error' | 'notfound';
@@ -91,6 +94,7 @@ function statusLabel(status: string): string {
 
 export default function BuilderView({ mode }: { mode: 'edit' | 'new' }) {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const permissions = user?.permissions ?? [];
   const canManage = hasAnyPermission(permissions, STUDIO_MANAGE_PERMISSIONS);
@@ -115,8 +119,14 @@ export default function BuilderView({ mode }: { mode: 'edit' | 'new' }) {
   const [saving, setSaving] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [deployConfirmOpen, setDeployConfirmOpen] = useState(false);
+  const [explainOpen, setExplainOpen] = useState(false);
 
   const [addMenu, setAddMenu] = useState<{ index: number; anchor: DOMRect } | null>(null);
+  const [aiSuggestions, setAiSuggestions] = useState<AiSuggestionState>({
+    suggestions: null,
+    loading: false,
+    error: null,
+  });
   const [copiedWebhook, setCopiedWebhook] = useState(false);
   const copyTimer = useRef<number | null>(null);
 
@@ -158,24 +168,15 @@ export default function BuilderView({ mode }: { mode: 'edit' | 'new' }) {
       return;
     }
 
-    // Edit mode: the automation endpoints land with the backend builder slice.
+    // Edit mode: load the automation from the real API.
     try {
       const detail = await getStudioAutomation(id ?? '');
       setAutomation(detail);
       setLoadState('ready');
     } catch (cause) {
       if (isStudioUnavailable(cause)) {
-        // Distinguish "slice not landed" from "automation missing".
-        try {
-          await listStudioAutomations();
-          setLoadState('notfound');
-        } catch (inner) {
-          if (isStudioUnavailable(inner)) setLoadState('unavailable');
-          else {
-            setLoadState('error');
-            setLoadError(inner instanceof Error ? inner.message : 'Could not load the automation.');
-          }
-        }
+        // A 404 here means the automation doesn't exist (the API itself is up).
+        setLoadState('notfound');
       } else {
         setLoadState('error');
         setLoadError(cause instanceof Error ? cause.message : 'Could not load the automation.');
@@ -189,6 +190,36 @@ export default function BuilderView({ mode }: { mode: 'edit' | 'new' }) {
       if (copyTimer.current) window.clearTimeout(copyTimer.current);
     };
   }, [load]);
+
+  /* ---------------- AI suggestions ---------------- */
+
+  // Load catalog-grounded suggestions whenever the add-step menu opens on a
+  // saved draft. Suggestions are returned only — inserting one is explicit.
+  const suggestionAutomationId = mode === 'new' ? 'new' : automation?.id ?? 'new';
+  useEffect(() => {
+    if (!addMenu || suggestionAutomationId === 'new') {
+      setAiSuggestions({ suggestions: null, loading: false, error: null });
+      return;
+    }
+    let cancelled = false;
+    setAiSuggestions({ suggestions: null, loading: true, error: null });
+    void suggestStudioAutomationSteps(suggestionAutomationId)
+      .then((suggestions) => {
+        if (!cancelled) setAiSuggestions({ suggestions, loading: false, error: null });
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setAiSuggestions({
+            suggestions: null,
+            loading: false,
+            error: cause instanceof Error ? cause.message : 'Could not load suggestions.',
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [addMenu, suggestionAutomationId]);
 
   /** Apply a draft edit: marks dirty and clears stale test results. */
   const updateDraft = useCallback((fn: (draft: StudioAutomation) => StudioAutomation) => {
@@ -283,19 +314,67 @@ export default function BuilderView({ mode }: { mode: 'edit' | 'new' }) {
     [updateDraft],
   );
 
+  const insertSuggestedStep = useCallback(
+    (index: number, step: StudioStep) => {
+      if (!automation) return;
+      const ids = new Set(automation.steps.map((s) => s.id));
+      const finalStep: StudioStep = ids.has(step.id) ? { ...step, id: newStepId() } : step;
+      if (!finalStep.connectionId && connections.length > 0) {
+        finalStep.connectionId = connections[0].id;
+      }
+      updateDraft((draft) => {
+        const steps = [...draft.steps];
+        steps.splice(index, 0, finalStep);
+        return { ...draft, steps };
+      });
+      setSelectedId(finalStep.id);
+      setAddMenu(null);
+    },
+    [automation, connections, updateDraft],
+  );
+
   /* ---------------- persistence ---------------- */
+
+  /** Backend-unique name for a fresh draft, derived from the title. */
+  const draftNameFor = useCallback((title: string) => {
+    const slug = title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60);
+    return slug || 'untitled-automation';
+  }, []);
 
   const handleSave = useCallback(async () => {
     if (!automation || !canManage || saving) return;
-    if (mode === 'new' || automation.id === 'new') {
-      setBanner(
-        'The automation API is not available yet — creating automations needs the backend builder slice. Your draft is preserved in this tab.',
-      );
-      return;
-    }
     setSaving(true);
     setBanner(null);
     try {
+      if (mode === 'new' || automation.id === 'new') {
+        // First save creates the automation, then moves to its edit route.
+        let name = draftNameFor(automation.title);
+        let created: StudioAutomation | null = null;
+        for (let attempt = 0; attempt < 3 && !created; attempt++) {
+          try {
+            created = await createStudioAutomation({
+              name,
+              title: automation.title,
+              description: automation.description,
+              trigger: automation.trigger,
+              steps: automation.steps,
+            });
+          } catch (cause) {
+            const code = (cause as { code?: string })?.code;
+            if (code === 'STUDIO_AUTOMATION_NAME_TAKEN' && attempt < 2) {
+              name = `${draftNameFor(automation.title)}-${Math.random().toString(36).slice(2, 6)}`;
+              continue;
+            }
+            throw cause;
+          }
+        }
+        if (created) navigate(`/studio/automations/${created.id}`, { replace: true });
+        return;
+      }
       const saved = await saveStudioAutomation(automation.id, {
         name: automation.name,
         title: automation.title,
@@ -306,26 +385,18 @@ export default function BuilderView({ mode }: { mode: 'edit' | 'new' }) {
       setAutomation(saved);
       setDirty(false);
     } catch (cause) {
-      setBanner(
-        isStudioUnavailable(cause)
-          ? 'The automation API is not available yet (backend builder slice in flight). Your edits are preserved in this tab.'
-          : cause instanceof Error
-            ? `Save failed: ${cause.message}`
-            : 'Save failed.',
-      );
+      setBanner(cause instanceof Error ? `Save failed: ${cause.message}` : 'Save failed.');
     } finally {
       setSaving(false);
     }
-  }, [automation, canManage, mode, saving]);
+  }, [automation, canManage, mode, saving, draftNameFor, navigate]);
 
   /* ---------------- test ---------------- */
 
   const handleTest = useCallback(async () => {
     if (!automation || !canTest || testing) return;
     if (mode === 'new' || automation.id === 'new') {
-      setBanner(
-        'Dry-run needs the backend builder slice — it is not available yet. Per-step tests against the live connection work below.',
-      );
+      setBanner('Save the automation first — dry-run needs a saved draft.');
       return;
     }
     setTesting(true);
@@ -335,13 +406,7 @@ export default function BuilderView({ mode }: { mode: 'edit' | 'new' }) {
       setResults(new Map(list.map((r) => [r.stepId, r])));
       setOpenResults(new Set(list.filter((r) => r.status !== 'ok').map((r) => r.stepId)));
     } catch (cause) {
-      setBanner(
-        isStudioUnavailable(cause)
-          ? 'Dry-run is not available yet (backend builder slice in flight).'
-          : cause instanceof Error
-            ? `Test failed: ${cause.message}`
-            : 'Test failed.',
-      );
+      setBanner(cause instanceof Error ? `Test failed: ${cause.message}` : 'Test failed.');
     } finally {
       setTesting(false);
     }
@@ -381,7 +446,7 @@ export default function BuilderView({ mode }: { mode: 'edit' | 'new' }) {
     async (confirmDestructive: boolean) => {
       if (!automation || !canManage || deploying) return;
       if (mode === 'new' || automation.id === 'new') {
-        setBanner('Deploy needs the backend builder slice — it is not available yet.');
+        setBanner('Save the automation first — deploy needs a saved draft.');
         setDeployConfirmOpen(false);
         return;
       }
@@ -392,13 +457,7 @@ export default function BuilderView({ mode }: { mode: 'edit' | 'new' }) {
         setAutomation(updated);
         setDeployConfirmOpen(false);
       } catch (cause) {
-        setBanner(
-          isStudioUnavailable(cause)
-            ? 'Deploy is not available yet (backend builder slice in flight).'
-            : cause instanceof Error
-              ? `Deploy failed: ${cause.message}`
-              : 'Deploy failed.',
-        );
+        setBanner(cause instanceof Error ? `Deploy failed: ${cause.message}` : 'Deploy failed.');
         setDeployConfirmOpen(false);
       } finally {
         setDeploying(false);
@@ -569,6 +628,11 @@ export default function BuilderView({ mode }: { mode: 'edit' | 'new' }) {
         </div>
 
         <div className="flex items-center gap-2 flex-shrink-0">
+          {canTest && mode === 'edit' && automation.id !== 'new' && (
+            <Button variant="outline" size="sm" onClick={() => setExplainOpen(true)}>
+              Explain
+            </Button>
+          )}
           {canTest && (
             <Button variant="outline" size="sm" onClick={() => void handleTest()} disabled={testing}>
               {testing ? 'Testing…' : 'Test'}
@@ -682,7 +746,13 @@ export default function BuilderView({ mode }: { mode: 'edit' | 'new' }) {
           anchor={addMenu.anchor}
           onClose={() => setAddMenu(null)}
           onAdd={(kind, actionId) => addStep(addMenu.index, kind, actionId)}
+          ai={aiSuggestions}
+          onPickSuggestion={(step) => insertSuggestedStep(addMenu.index, step)}
         />
+      )}
+
+      {explainOpen && automation.id !== 'new' && (
+        <ExplainPanel automationId={automation.id} onClose={() => setExplainOpen(false)} />
       )}
 
       {deployConfirmOpen && (

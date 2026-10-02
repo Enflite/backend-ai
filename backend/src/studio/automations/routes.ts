@@ -33,6 +33,9 @@ import { requirePermission } from '../../authz/middleware.js';
 import { Errors } from '../../errors.js';
 import { recordAudit } from '../../audit/audit.js';
 import { getCatalogAction } from '../catalog/catalog.js';
+import { generateAutomationDraft, generateAutomationInput } from '../ai/generate.js';
+import { explainAutomation } from '../ai/explain.js';
+import { suggestNextSteps } from '../ai/suggest.js';
 import {
   automationIdParam,
   createAutomationInput,
@@ -90,6 +93,36 @@ function assertKnownActions(steps: AutomationStep[]): void {
 }
 
 export async function automationRoutes(fastify: FastifyInstance): Promise<void> {
+  // ------------------------------------------------------------------
+  // AI generation (Wave 3): NL -> draft, explanations, step suggestions.
+  //
+  // POST /studio/automations/generate creates a NEW automation as `draft`
+  // (never deployed, no trigger wired). The destructive-confirm gate on
+  // POST /:id/deploy is the only path to a live automation.
+  // ------------------------------------------------------------------
+
+  fastify.post(
+    '/studio/automations/generate',
+    {
+      preHandler: runPre,
+      config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
+    },
+    async (req, reply) => {
+      automationRoutesEnabled();
+      const auth = req.auth!;
+      const parsed = generateAutomationInput.safeParse(req.body);
+      if (!parsed.success) {
+        throw Errors.badRequest('VALIDATION_ERROR', 'Invalid generate request', parsed.error.flatten());
+      }
+      // Abort model generation if the client disconnects.
+      const controller = new AbortController();
+      (req.raw as unknown as NodeJS.EventEmitter).on('close', () => controller.abort());
+      // Fail-closed: schema/model failures throw 502 before any draft exists.
+      const view = await generateAutomationDraft(auth, parsed.data, controller.signal, req.requestId);
+      return reply.status(201).send(view);
+    }
+  );
+
   // ------------------------------------------------------------------
   // Automations CRUD
   // ------------------------------------------------------------------
@@ -192,6 +225,46 @@ export async function automationRoutes(fastify: FastifyInstance): Promise<void> 
     });
     return reply.status(204).send();
   });
+
+  // ------------------------------------------------------------------
+  // Explain & suggest (Wave 3): deterministic, derived from the stored
+  // definition and the real catalog. Never invents steps; suggestions are
+  // returned only, never applied automatically.
+  // ------------------------------------------------------------------
+
+  fastify.post(
+    '/studio/automations/:id/explain',
+    {
+      preHandler: runPre,
+      config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    },
+    async (req, reply) => {
+      automationRoutesEnabled();
+      const auth = req.auth!;
+      const params = automationIdParam.safeParse(req.params);
+      if (!params.success) throw Errors.badRequest('VALIDATION_ERROR', 'Invalid automation id');
+      const doc = await getAutomation(auth.tenantId, params.data.id);
+      if (!doc) throw Errors.notFound('STUDIO_AUTOMATION_NOT_FOUND', 'Automation not found');
+      return reply.send(explainAutomation(doc));
+    }
+  );
+
+  fastify.post(
+    '/studio/automations/:id/suggest',
+    {
+      preHandler: runPre,
+      config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+    },
+    async (req, reply) => {
+      automationRoutesEnabled();
+      const auth = req.auth!;
+      const params = automationIdParam.safeParse(req.params);
+      if (!params.success) throw Errors.badRequest('VALIDATION_ERROR', 'Invalid automation id');
+      const doc = await getAutomation(auth.tenantId, params.data.id);
+      if (!doc) throw Errors.notFound('STUDIO_AUTOMATION_NOT_FOUND', 'Automation not found');
+      return reply.send({ automationId: doc._id, suggestions: suggestNextSteps(doc) });
+    }
+  );
 
   // ------------------------------------------------------------------
   // Test (dry run), manual run, deploy, undeploy
