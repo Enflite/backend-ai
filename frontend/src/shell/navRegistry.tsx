@@ -28,6 +28,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/board', label: 'Board', permissions: ['syteline:ui', 'syteline:forms'], icon: (a) => <IconBoard active={a} /> },
   { to: '/forms', label: 'Form AI Agent', permissions: ['syteline:forms'], icon: (a) => <IconForm active={a} /> },
   { to: '/syteline', label: 'SyteLine', permissions: ['syteline:ui'], icon: (a) => <IconSyteLine active={a} /> },
+  { to: '/studio', label: 'Studio', permissions: ['studio:manage', 'studio:run'], icon: (a) => <IconStudio active={a} /> },
   // 'Agents' section: specialized AI agents register here (see AppShell header comment).
 ];
 
@@ -53,6 +54,9 @@ function IconForm({ active }: { active: boolean }) {
 }
 function IconSyteLine({ active }: { active: boolean }) {
   return <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={active ? 1.8 : 1.5} strokeLinecap="round"><rect x="2" y="2" width="12" height="12" rx="2" /><path d="M2 6h12M6 6v8" /></svg>;
+}
+function IconStudio({ active }: { active: boolean }) {
+  return <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={active ? 1.8 : 1.5} strokeLinecap="round" strokeLinejoin="round"><path d="M9 1.5L3.5 9H7l-1 5.5L11.5 7H8l1-5.5z" /></svg>;
 }
 
 export function IconLock() {
