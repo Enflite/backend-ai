@@ -1,0 +1,131 @@
+/**
+ * store.ts — Mongo persistence for the `aps_analyses` collection (one
+ * document per APS Planning Agent analysis intake). Tenant-scoped
+ * everywhere: every filter carries { tenantId } (no RLS in MongoDB,
+ * ADR-014).
+ *
+ * Deliberately narrow: the sibling owns the `aps_issues` store
+ * (snapshots, issue lifecycle) — this module stores only what the
+ * sibling lacks: analysis intake records (upload → flow-run linkage →
+ * column-map confirmation). See docs/aps-planning-agent/contracts.md.
+ */
+
+import { randomUUID } from 'node:crypto';
+import { getDb } from '../db/mongo.js';
+import type { AuthContext } from '../authz/permissions.js';
+import type { AnalysisStatus, ApsAnalysisDoc } from './types.js';
+
+export interface CreateAnalysisRecord {
+  exportType: 'EXCEPTION_REPORT';
+  sourceDocumentIds: string[];
+  site?: string;
+}
+
+export async function createAnalysis(
+  auth: AuthContext,
+  record: CreateAnalysisRecord,
+): Promise<ApsAnalysisDoc> {
+  const now = new Date();
+  const doc: ApsAnalysisDoc = {
+    _id: randomUUID(),
+    tenantId: auth.tenantId,
+    requesterUserId: auth.userId,
+    exportType: record.exportType,
+    sourceDocumentIds: record.sourceDocumentIds,
+    ...(record.site ? { site: record.site } : {}),
+    status: 'intake',
+    createdAt: now,
+    updatedAt: now,
+  };
+  const db = await getDb();
+  await db.collection<ApsAnalysisDoc>('aps_analyses').insertOne(doc);
+  return doc;
+}
+
+export async function getAnalysis(tenantId: string, id: string): Promise<ApsAnalysisDoc | null> {
+  const db = await getDb();
+  return db.collection<ApsAnalysisDoc>('aps_analyses').findOne({ _id: id, tenantId });
+}
+
+/**
+ * Listing: requesters see their own analyses; callers with
+ * `tenant:manage` see the tenant's. Status filter and limit optional.
+ */
+export async function listAnalyses(
+  tenantId: string,
+  requesterUserId: string,
+  isAdmin: boolean,
+  options: { status?: AnalysisStatus; limit?: number } = {},
+): Promise<ApsAnalysisDoc[]> {
+  const db = await getDb();
+  const filter: Record<string, unknown> = { tenantId };
+  if (!isAdmin) filter.requesterUserId = requesterUserId;
+  if (options.status) filter.status = options.status;
+  return db
+    .collection<ApsAnalysisDoc>('aps_analyses')
+    .find(filter)
+    .sort({ createdAt: -1 })
+    .limit(options.limit ?? 20)
+    .toArray();
+}
+
+export async function setAnalysisFlowRun(
+  tenantId: string,
+  id: string,
+  update: {
+    status: AnalysisStatus;
+    statusNote?: string;
+    flowName?: string;
+    flowRunId?: string;
+    issueId?: string;
+    baselineSnapshotId?: string;
+  },
+): Promise<ApsAnalysisDoc | null> {
+  const db = await getDb();
+  const $set: Record<string, unknown> = { status: update.status, updatedAt: new Date() };
+  if (update.statusNote !== undefined) $set.statusNote = update.statusNote;
+  if (update.flowName !== undefined) $set.flowName = update.flowName;
+  if (update.flowRunId !== undefined) $set.flowRunId = update.flowRunId;
+  if (update.issueId !== undefined) $set.issueId = update.issueId;
+  if (update.baselineSnapshotId !== undefined) $set.baselineSnapshotId = update.baselineSnapshotId;
+  return db
+    .collection<ApsAnalysisDoc>('aps_analyses')
+    .findOneAndUpdate({ _id: id, tenantId }, { $set }, { returnDocument: 'after' });
+}
+
+export async function setAnalysisColumnMap(
+  tenantId: string,
+  id: string,
+  columns: Record<string, string>,
+  confirmed: boolean,
+): Promise<ApsAnalysisDoc | null> {
+  const db = await getDb();
+  return db.collection<ApsAnalysisDoc>('aps_analyses').findOneAndUpdate(
+    { _id: id, tenantId },
+    {
+      $set: {
+        columnMap: { columns, confirmed, confirmedAt: new Date() },
+        updatedAt: new Date(),
+      },
+    },
+    { returnDocument: 'after' },
+  );
+}
+
+/**
+ * Cancel an analysis: only from a non-terminal status. A cancelled
+ * analysis never drives a flow run — callers check the status before
+ * invoking the substrate.
+ */
+export async function cancelAnalysis(tenantId: string, id: string): Promise<ApsAnalysisDoc | null> {
+  const db = await getDb();
+  return db.collection<ApsAnalysisDoc>('aps_analyses').findOneAndUpdate(
+    {
+      _id: id,
+      tenantId,
+      status: { $nin: ['resolved', 'still-open', 'blocked', 'cancelled'] },
+    },
+    { $set: { status: 'cancelled', updatedAt: new Date() } },
+    { returnDocument: 'after' },
+  );
+}

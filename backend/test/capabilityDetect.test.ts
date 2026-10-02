@@ -23,6 +23,27 @@ describe('detectCapability', () => {
     });
   });
 
+  describe('aps planning', () => {
+    it('routes exception-report language to the syteline slot', () => {
+      expect(detectCapability('Analyze today\'s APS exception report', { sytelineToolsOffered: true })).toBe('syteline');
+      expect(detectCapability('Why is this job late?', { sytelineToolsOffered: true })).toBe('syteline');
+    });
+    it('routes the five V1 exception types', () => {
+      expect(detectCapability('What does Move In Rcpt mean for PO-77821?', { sytelineToolsOffered: true })).toBe('syteline');
+      expect(detectCapability('Move out rcpt on item WIDGET-1', { sytelineToolsOffered: true })).toBe('syteline');
+      expect(detectCapability('Rcpt not needed — can I cancel it?', { sytelineToolsOffered: true })).toBe('syteline');
+      expect(detectCapability('rcpt projected late against SO-99012', { sytelineToolsOffered: true })).toBe('syteline');
+      expect(detectCapability('Expedited 5 days — is the demand covered?', { sytelineToolsOffered: true })).toBe('syteline');
+    });
+    it('stays on chat when APS tools are NOT offered', () => {
+      expect(detectCapability('Analyze today\'s APS exception report', { sytelineToolsOffered: false })).toBe('chat');
+    });
+    it('does not route casual "move in" chatter to syteline', () => {
+      expect(detectCapability('We move in next week', { sytelineToolsOffered: true })).toBe('chat');
+      expect(detectCapability('Move the meeting in an hour', { sytelineToolsOffered: true })).toBe('chat');
+    });
+  });
+
   describe('coding', () => {
     it('routes code fences', () => {
       expect(detectCapability('What does this do?\n```python\nprint(1)\n```', { sytelineToolsOffered: true })).toBe('coding');

@@ -6,6 +6,9 @@
  * - get: cross-user reads are TASK_NOT_FOUND (no existence leak); admin can read
  * - cancel: requester or admin; destructive (CONFIRMATION_REQUIRED); terminal
  *   tasks are not re-cancelled; audit SYTELINE_TASK_CANCELLED
+ * - requeue: blocked -> assigned (clears blocked reason); approveWrites=true
+ *   sets the task-bounded write approval; non-blocked refused; requester
+ *   or admin; audit SYTELINE_TASK_REQUEUED
  * - store: atomic claim (no double-claim), tenant scoping
  * - every tool fails fast while SYTELINE_UI_ENABLED=false
  * - tool callers without `syteline:ui` get TOOL_FORBIDDEN
@@ -116,6 +119,7 @@ function memoryDb() {
             for (const doc of tasks.values()) {
               if (matches(doc, filter)) {
                 Object.assign(doc, update.$set);
+                for (const key of Object.keys(update.$unset ?? {})) delete doc[key];
                 return opts?.returnDocument === 'after' ? { ...doc } : null;
               }
             }
@@ -362,5 +366,107 @@ describe('task store claim', () => {
     expect(snap.userId).toBe('user-admin');
     expect(snap.tenantId).toBe('tenant-a');
     expect(JSON.stringify(snap)).not.toMatch(/password|secret|token/i);
+  });
+});
+
+describe('syteline.task.requeue', () => {
+  async function requeueViaTool(
+    auth: AuthContext,
+    taskId: string,
+    approveWrites?: boolean,
+  ) {
+    return runToolCall({
+      auth,
+      name: 'syteline.task.requeue',
+      rawArguments: JSON.stringify(
+        approveWrites === undefined ? { taskId } : { taskId, approveWrites },
+      ),
+      classification: 'INTERNAL',
+      confirmed: false,
+      signal: new AbortController().signal,
+    });
+  }
+
+  /** Park a task as blocked, like the runner does. */
+  async function makeBlocked(auth: AuthContext, blockedReason: string) {
+    const t = await createTask(auth, { title: 'B', goal: 'g' }, 'INTERNAL');
+    const row = db.tasks.get(t._id)!;
+    row.status = 'blocked';
+    row.blockedReason = blockedReason;
+    return t;
+  }
+
+  it('re-queues a blocked task to assigned and clears the blocked reason', async () => {
+    const a = AI_ADMIN_AUTH();
+    const t = await makeBlocked(a, 'awaiting-write-approval');
+    const result = (await requeueViaTool(a, t._id)) as {
+      data: { task: Record<string, unknown> };
+    };
+    expect(result.data.task.status).toBe('assigned');
+    expect(result.data.task.blockedReason).toBeUndefined();
+    const row = db.tasks.get(t._id)!;
+    expect(row.status).toBe('assigned');
+    expect(row.blockedReason).toBeUndefined();
+    expect(recordAuditMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'SYTELINE_TASK_REQUEUED', success: true }),
+    );
+  });
+
+  it('approveWrites=true sets the task-bounded write approval', async () => {
+    const a = AI_ADMIN_AUTH();
+    const t = await makeBlocked(a, 'awaiting-write-approval');
+    const result = (await requeueViaTool(a, t._id, true)) as {
+      data: { task: Record<string, unknown> };
+    };
+    expect(result.data.task.status).toBe('assigned');
+    expect(result.data.task.autoApproveWrites).toBe(true);
+    expect(recordAuditMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'SYTELINE_TASK_REQUEUED',
+        success: true,
+      }),
+    );
+    const auditCall = recordAuditMock.mock.calls.find(
+      (c: unknown[]) =>
+        (c[0] as Record<string, unknown>).action === 'SYTELINE_TASK_REQUEUED',
+    );
+    expect(
+      ((auditCall![0] as Record<string, unknown>).metadata as Record<string, unknown>)
+        .autoApproveWrites,
+    ).toBe(true);
+  });
+
+  it('without approveWrites the existing flag is preserved', async () => {
+    const a = AI_ADMIN_AUTH();
+    const t = await makeBlocked(a, 'waiting-on-open-item-10');
+    await requeueViaTool(a, t._id);
+    expect(db.tasks.get(t._id)?.autoApproveWrites).toBe(false);
+    expect(db.tasks.get(t._id)?.status).toBe('assigned');
+  });
+
+  it('refuses tasks that are not blocked', async () => {
+    const a = AI_ADMIN_AUTH();
+    const t = await createTask(a, { title: 'A', goal: 'g' }, 'INTERNAL');
+    const result = await requeueViaTool(a, t._id, true);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('TASK_NOT_BLOCKED');
+    expect(db.tasks.get(t._id)?.status).toBe('assigned');
+    expect(db.tasks.get(t._id)?.autoApproveWrites).toBe(false);
+  });
+
+  it('refuses another user task without admin (no existence leak)', async () => {
+    const t = await makeBlocked(ADMIN_AUTH(), 'awaiting-write-approval');
+    const result = await requeueViaTool(OTHER_ADMIN_AUTH(), t._id, true);
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('TASK_NOT_FOUND');
+  });
+
+  it('an admin can re-queue another user task', async () => {
+    const t = await makeBlocked(AI_ADMIN_AUTH(), 'awaiting-write-approval');
+    const result = (await requeueViaTool(ADMIN_AUTH(), t._id, true)) as {
+      data: { task: Record<string, unknown> };
+    };
+    expect(result.data.task.status).toBe('assigned');
+    expect(result.data.task.autoApproveWrites).toBe(true);
   });
 });

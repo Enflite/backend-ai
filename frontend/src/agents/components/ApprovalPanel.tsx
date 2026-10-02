@@ -3,15 +3,13 @@
  *
  * Shown when a task parks as blocked/awaiting-write-approval: the agent ran
  * its read-only checks and proposed a write plan. The human reviews what was
- * verified and what is proposed, then approves (resumes the run) or rejects
+ * verified and what is proposed, then approves (re-queues the task with
+ * task-bounded write approval via `syteline.task.requeue`) or rejects
  * (cancels the task).
- *
- * When the backend does not provide `syteline.task.approve` yet, the panel
- * says so honestly instead of faking an approval.
  */
 import { useState } from 'react';
 import type { SytelineTaskDetail } from '../api';
-import { approveSytelineTask, cancelSytelineTask, isNotWiredError, toolClassificationFor } from '../api';
+import { approveSytelineTask, cancelSytelineTask, toolClassificationFor } from '../api';
 import { parseProposedPlan, splitReconVsProposed } from '../types';
 import { ApiError } from '../../api';
 import type { DataClassification } from '../../types';
@@ -28,7 +26,6 @@ export default function ApprovalPanel({
   const [confirming, setConfirming] = useState<'approve' | 'reject' | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notWired, setNotWired] = useState(false);
 
   const { completed, proposed } = splitReconVsProposed(task);
   const proposedLines = parseProposedPlan(task.resultSummary);
@@ -38,19 +35,13 @@ export default function ApprovalPanel({
     setBusy(true);
     setError(null);
     try {
-      const result = await approveSytelineTask(classification, task._id, true);
-      if (!result.approved) {
-        setError(
-          result.reason === 'not-awaiting-approval'
-            ? 'This task is no longer waiting for approval — its state changed.'
-            : 'Approval did not go through. The task state may have changed.',
-        );
-      } else {
-        onChanged();
-      }
+      // Approval = re-queue with task-bounded write approval. The runner
+      // picks the task back up and carries out the approved changes.
+      await approveSytelineTask(classification, task._id);
+      onChanged();
     } catch (err) {
-      if (isNotWiredError(err)) {
-        setNotWired(true);
+      if (err instanceof ApiError && err.code === 'TASK_NOT_BLOCKED') {
+        setError('This task is no longer waiting for approval — its state changed.');
       } else {
         setError(err instanceof ApiError ? err.message : 'Approval failed. Try again.');
       }
@@ -129,62 +120,55 @@ export default function ApprovalPanel({
         )}
       </div>
 
-      {notWired ? (
-        <p className="text-sm mt-3 rounded p-2" style={{ background: 'var(--secondary)', color: 'var(--muted-foreground)' }} role="status">
-          Awaiting tool integration — this backend doesn't provide task approval yet
-          (<span className="font-mono">syteline.task.approve</span>), so the proposed changes
-          can't be approved from here. The proposal above is exactly what the agent recorded.
-        </p>
-      ) : (
-        <div className="mt-4 flex flex-wrap gap-2">
-          {confirming === null && (
-            <>
-              <button
-                type="button"
-                onClick={() => setConfirming('approve')}
-                disabled={busy}
-                className="text-sm font-medium px-4 py-2 rounded-md"
-                style={{ background: 'var(--accent)', color: '#fff' }}
-              >
-                Approve &amp; continue
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirming('reject')}
-                disabled={busy}
-                className="text-sm px-4 py-2 rounded-md"
-                style={{ border: '1px solid var(--border)', color: 'var(--foreground)' }}
-              >
-                Reject
-              </button>
-            </>
-          )}
-          {confirming === 'approve' && (
-            <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Confirm approval">
-              <span className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>
-                Approve these {proposed.length} change{proposed.length === 1 ? '' : 's'}? The agent will
-                run them as you in SyteLine.
-              </span>
-              <button
-                type="button"
-                onClick={() => void doApprove()}
-                disabled={busy}
-                className="text-sm font-medium px-4 py-2 rounded-md"
-                style={{ background: 'var(--accent)', color: '#fff' }}
-              >
-                {busy ? 'Approving…' : 'Yes, approve'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirming(null)}
-                disabled={busy}
-                className="text-sm px-3 py-2 rounded-md"
-                style={{ border: '1px solid var(--border)' }}
-              >
-                Back
-              </button>
-            </div>
-          )}
+      <div className="mt-4 flex flex-wrap gap-2">
+        {confirming === null && (
+          <>
+            <button
+              type="button"
+              onClick={() => setConfirming('approve')}
+              disabled={busy}
+              className="text-sm font-medium px-4 py-2 rounded-md"
+              style={{ background: 'var(--accent)', color: '#fff' }}
+            >
+              Approve &amp; continue
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming('reject')}
+              disabled={busy}
+              className="text-sm px-4 py-2 rounded-md"
+              style={{ border: '1px solid var(--border)', color: 'var(--foreground)' }}
+            >
+              Reject
+            </button>
+          </>
+        )}
+        {confirming === 'approve' && (
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Confirm approval">
+            <span className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>
+              Approve these {proposed.length} change{proposed.length === 1 ? '' : 's'}? The agent will
+              pick the task back up and carry them out as you in SyteLine.
+            </span>
+            <button
+              type="button"
+              onClick={() => void doApprove()}
+              disabled={busy}
+              className="text-sm font-medium px-4 py-2 rounded-md"
+              style={{ background: 'var(--accent)', color: '#fff' }}
+            >
+              {busy ? 'Approving…' : 'Yes, approve'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(null)}
+              disabled={busy}
+              className="text-sm px-3 py-2 rounded-md"
+              style={{ border: '1px solid var(--border)' }}
+            >
+              Back
+            </button>
+          </div>
+        )}
           {confirming === 'reject' && (
             <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Confirm rejection">
               <span className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>
@@ -211,7 +195,6 @@ export default function ApprovalPanel({
             </div>
           )}
         </div>
-      )}
       {error && (
         <p className="text-sm mt-2" style={{ color: '#a50a24' }} role="alert">
           {error}

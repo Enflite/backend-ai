@@ -1,22 +1,25 @@
 /**
  * agents/api.ts — workspace data access for SyteLine agent tasks.
  *
- * Reuses the task tool endpoints (`frontend/src/api/tasks.ts`). The approve
- * call targets the `syteline.task.approve` contract (requester-only approval
- * of a task parked as blocked/awaiting-write-approval); when the backend
- * does not provide it yet the gateway answers TOOL_NOT_FOUND and callers
- * render an honest "awaiting backend support" state — never fake approval.
+ * Reuses the task tool endpoints (`frontend/src/api/tasks.ts`). Approval is
+ * implemented on top of the real `syteline.task.requeue` tool with
+ * `approveWrites: true` (task-bounded write approval for a task parked as
+ * blocked/awaiting-write-approval).
  */
-import { api, ApiError } from '../api';
-import { executeTool, defaultToolClassification } from '../api/tools';
+import { api } from '../api';
+import { defaultToolClassification } from '../api/tools';
 import type { DataClassification } from '../types';
-import type { SytelineTaskStatus } from '../api/tasks';
+import {
+  requeueSytelineTask,
+  type SytelineTaskDetail,
+} from '../api/tasks';
 
 export {
   listSytelineTasks,
   getSytelineTask,
   createSytelineTask,
   cancelSytelineTask,
+  requeueSytelineTask,
 } from '../api/tasks';
 export type {
   SytelineTaskDetail,
@@ -30,39 +33,18 @@ export function toolClassificationFor(clearance: DataClassification): DataClassi
   return defaultToolClassification(clearance);
 }
 
-export interface ApproveTaskResult {
-  approved: boolean;
-  status: SytelineTaskStatus;
-  blockedReason?: string | null;
-  reason?: string;
-  taskId?: string;
-}
-
 /**
- * Approve a task parked awaiting write approval. The tool is destructive
- * (gateway confirmation-gated), so the UI confirms first and passes
- * confirmed=true — mirroring the cancel flow.
- *
- * Throws ApiError with code TOOL_NOT_FOUND when the backend does not
- * provide `syteline.task.approve` yet.
+ * Approve a task parked awaiting write approval: re-queues it with
+ * task-bounded write approval (`syteline.task.requeue` with
+ * `approveWrites: true`). The runner picks the task back up and runs the
+ * approved changes as the requester. Throws when the task is no longer
+ * blocked (ApiError code TASK_NOT_BLOCKED).
  */
 export async function approveSytelineTask(
   classification: DataClassification,
   taskId: string,
-  confirmed: boolean,
-): Promise<ApproveTaskResult> {
-  const { result } = await executeTool<ApproveTaskResult>(
-    'syteline.task.approve',
-    { taskId },
-    classification,
-    confirmed,
-  );
-  return result;
-}
-
-/** True when an error means "the backend doesn't offer this capability yet". */
-export function isNotWiredError(error: unknown): boolean {
-  return error instanceof ApiError && error.code === 'TOOL_NOT_FOUND';
+): Promise<SytelineTaskDetail> {
+  return requeueSytelineTask(classification, taskId, true);
 }
 
 /**

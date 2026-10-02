@@ -40,6 +40,7 @@ export const PERMISSIONS = [
   'syteline:read',
   'syteline:forms',
   'syteline:ui',
+  'aps:plan',
   'flows:manage',
   'flows:run',
   'schedules:manage',
@@ -72,6 +73,9 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     // Default-open: every user can drive the SyteLine form-project tools.
     // Form-project PRs still require human review (never auto-merged).
     'syteline:forms',
+    // APS Planning Agent (read-only vs SyteLine in V1): every user can run
+    // exception-report analyses under the all-permissions posture.
+    'aps:plan',
     'repo:read',
     'memory:read',
     'memory:write',
@@ -89,6 +93,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'document:read',
     'document:classify',
     'retention:manage',
+    'aps:plan',
     // All-grant posture (Jake, 2026-10-02).
     'schedules:manage',
     'schedules:run',
@@ -102,6 +107,9 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     // UI automation drives SyteLine as the user: privileged, granted here
     // (and seeded by migration 031) but never to User or Developer roles.
     'syteline:ui',
+    // APS Planning Agent: read-only vs SyteLine in V1 (no SyteLine writes),
+    // so it rides the all-permissions posture like syteline:forms.
+    'aps:plan',
     // Flows: deterministic versioned pipelines (ADR-022). Authoring flows
     // (flows:manage) and running them (flows:run) are privileged: a flow
     // executes tools as its requester, so both stay Admin / AI Admin only
@@ -133,6 +141,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'tool:use',
     'syteline:read',
     'syteline:forms',
+    'aps:plan',
     'repo:read',
     'memory:read',
     'memory:write',
@@ -145,6 +154,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'conversation:read',
     'document:read',
     'memory:read',
+    'aps:plan',
     // All-grant posture (Jake, 2026-10-02).
     'schedules:manage',
     'schedules:run',

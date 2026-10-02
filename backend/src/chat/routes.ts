@@ -359,7 +359,13 @@ export async function chatRoutes(fastify: FastifyInstance): Promise<void> {
     // before model resolution so capability detection knows whether the
     // SyteLine family is actually available to this caller.
     const providerTools = buildProviderTools(auth, classification);
-    const sytelineToolsOffered = providerTools.some((tool) => tool.function.name.startsWith('syteline.'));
+    // The syteline capability slot also serves the APS Planning Agent: its
+    // aps.* tools (sibling-owned, backend/src/aps/) ride this slot. No
+    // aps.* tools are registered on main yet, so the second clause is a
+    // no-op until the sibling lands — existing behavior is unchanged.
+    const sytelineToolsOffered = providerTools.some((tool) =>
+      tool.function.name.startsWith('syteline.') || tool.function.name.startsWith('aps.'),
+    );
     // Vision inputs: split the turn's selected document IDs into authorized
     // image attachments (bytes loaded, size-bounded) and text document IDs
     // for the RAG path. Images never enter RAG — they have no text chunks by

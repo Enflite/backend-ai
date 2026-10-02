@@ -44,6 +44,20 @@ const CODE_INTENT_PATTERN =
   /\b(write|fix|debug|refactor|explain|review|optimize|implement|generate)\b.{0,80}?\b(code|function|method|class|bug|script|regex|query|sql|test|diff|patch|api|endpoint|component|module|snippet|stack ?trace|traceback)\b/i;
 const DIFF_PATTERN = /\b(unified diff|pull request|merge conflict)\b/i;
 
+// APS Planning Agent intent: exception-report language and the five V1
+// exception types (Move In/Out Rcpt, Rcpt Not Needed, Rcpt Projected
+// Late, Expedited N Days). Each pattern is anchored to APS vocabulary so
+// general chat ("move in next week") does not route to the syteline
+// model. PO-##### style numbers are already covered by SYTELINE_PATTERNS.
+const APS_PATTERNS: RegExp[] = [
+  /\bexception report\b/i,
+  /\bwhy is this job late\b/i,
+  /\bmove[- ]?in rcpt\b/i,
+  /\bmove[- ]?out rcpt\b/i,
+  /\brcpt (not needed|projected late)\b/i,
+  /\bexpedited \d+ days?\b/i,
+];
+
 /**
  * Detect the capability for a chat turn. Pure and deterministic — safe to
  * unit test exhaustively.
@@ -58,7 +72,7 @@ export function detectCapability(content: string, options: CapabilityDetectOptio
   if (CODE_FENCE_PATTERN.test(text) || REPO_PATH_PATTERN.test(text) || CODE_INTENT_PATTERN.test(text) || DIFF_PATTERN.test(text)) {
     return 'coding';
   }
-  if (options.sytelineToolsOffered && SYTELINE_PATTERNS.some((pattern) => pattern.test(text))) {
+  if (options.sytelineToolsOffered && (SYTELINE_PATTERNS.some((pattern) => pattern.test(text)) || APS_PATTERNS.some((pattern) => pattern.test(text)))) {
     return 'syteline';
   }
   return 'chat';
