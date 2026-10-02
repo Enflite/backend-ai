@@ -146,28 +146,79 @@ views. Existing avatar/activity animations are unchanged.
 `prefers-reduced-motion: reduce` kills all of the above (animation: none),
 alongside the existing avatar/activity/panel/message animations.
 
-## Navigation model (`frontend/src/shell/AppShell.tsx`)
+## Navigation model (`frontend/src/shell/`)
 
-One global nav rail: Chat, **Agents**, Board, Form AI Agent, SyteLine.
-`NAV_ITEMS` supports an optional `section`; sections render only when they
-contain items.
+### Shell anatomy: rail → contextual sidebar → main
 
-- The top-level **Agents** entry (`/agents/*`, `views/AgentsView.tsx`) is the
-  agents product area — its index is a directory of the agent surfaces
-  registered in `AGENT_SURFACES` (each a live destination with honest
-  permission-gated status). Agent teams own their views and sub-routes
-  under `/agents/*` (task-agent landing, task detail, approvals, …).
-- **Agent extension slot:** specialized AI agents register as
-  `{ to, label, section: 'Agents', permissions, icon }`. Example:
+The app shell is three columns, mirroring the Relay reference layout:
+
+1. **Icon rail** (`shell/IconRail.tsx`) — the single global nav. 68px
+   wide: the Enflite mark (32px `/enflite-logo.png`, links home) on top,
+   one 38px icon button per destination, and theme toggle + identity
+   avatar + sign out at the bottom. The search trigger (⌘K) lives here too.
+2. **Contextual sidebar** (`shell/ContextSidebar.tsx`) — a 272px
+   secondary panel rendered *inside the view that owns it* (Chat renders
+   its conversation list there; R3/R5 add task/form/SyteLine panels).
+   Slotted header + scrollable content + slotted footer, subtle
+   `--secondary` background, `SectionLabel` header, no brand mark — so
+   the app reads as one product instead of competing sidebars. Views
+   without sidebars (`/agents/*`, `/board`, `/forms/*`, `/syteline/*`)
+   simply don't render one.
+3. **Main** — the routed view outlet (`<Outlet />`).
+
+The nav registry (`shell/navRegistry.tsx`) is the single source of truth:
+`NAV_ITEMS` with `{ to, label, icon, permissions?, section?, hideFromRail? }`.
+The rail renders `railNavItems()` (everything not `hideFromRail`); the
+palette renders all of `NAV_ITEMS`. Current rail order: **Home** `/`,
+**Chat** `/chat`, **Tasks** `/agents/tasks`, **Board** `/board`,
+**Form AI Agent** `/forms`, **SyteLine** `/syteline`.
+
+- The **Agents** entry (`/agents`, `views/AgentsView.tsx`) takes no rail
+  slot (`hideFromRail`) — the palette covers it — but stays discoverable
+  as the index of the agent surfaces registered in `AGENT_SURFACES` (each
+  a live destination with honest permission-gated status). Agent teams own
+  their views and sub-routes under `/agents/*` (task-agent landing, task
+  detail, approvals, …).
+- **Agent extension slot:** specialized AI agents register as NavItems
+  with `section: 'Agents'`. The section renders only when it has items, so
+  no dead UI ships before an agent lands. Example:
 
 ```tsx
 { to: '/aps', label: 'APS Planning Agent', section: 'Agents',
-  permissions: ['aps:plan'], icon: (a) => <IconAps active={a} /> },
+  permissions: ['aps:plan'], icon: 'spark' },
 ```
 
-Views needing contextual navigation (Chat's conversation list) render it as
-a **secondary panel inside the view**: subtle `--secondary` background,
-`SectionLabel` header, no brand mark. Never a second white nav rail.
+**Permission-aware, never hidden dead-ends:** every destination always
+renders so users can discover what exists. Items the signed-in user can't
+reach render locked — dimmed, with a lock affordance and a tooltip naming
+the missing permission (`Requires syteline:forms permission`). On the
+rail that's `aria-disabled` + tooltip and no navigation; in the palette
+locked destinations are omitted, never shown as available. The nav is a
+convenience, not a security boundary — views still enforce access.
+
+### Icon usage (`frontend/src/components/icons.tsx`)
+
+One shared `Icon({ name, size })` component: 24×24 stroke icons in the
+Relay stroke grammar (1.7px, round caps/joins), rewritten in our 24-grid.
+Rail buttons, contextual sidebars, and palette "Go to" rows all render
+through it — never hand-rolled SVGs per surface (the old `navRegistry`
+inline icons were deleted in the shell v2 slice). Only add icons that are
+actually used somewhere; `shell/shell.test.ts` pins that every registry
+icon name exists in the set and that rail icons are distinct.
+
+### Responsive rules (shell CSS lives in `index.css`)
+
+| Breakpoint | Rail | Contextual sidebar |
+|---|---|---|
+| > 1050px | 68px | 272px |
+| ≤ 1050px | 60px | 238px (the active rail edge recenters: `left: -11px`) |
+| ≤ 720px | 68px (stays) | leaves the flow → **slide-over**: fixed, `min(300px, 84vw)`, off-canvas until opened; its own floating menu button (in normal flow, so it never overlaps view chrome) toggles it, a backdrop click closes it |
+
+The slide-over's open state is owned by the view (Chat closes it on
+select/new). `prefers-reduced-motion` disables the slide-over transition
+alongside the rail hovers; keyboard focus stays visible throughout
+(`:focus-visible` ring on rail buttons, rows, and the new-chat button).
+Never shrink fixed layouts — sidebars become drawers, exactly as above.
 
 ## Command palette (`frontend/src/components/CommandPalette.tsx`)
 

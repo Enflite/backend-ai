@@ -17,7 +17,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth';
 import { api } from '../api';
-import { hasAnyPermission, IconSearch, NAV_ITEMS } from '../shell/navRegistry';
+import { hasAnyPermission, NAV_ITEMS } from '../shell/navRegistry';
+import { Icon, type IconName } from './icons';
 import { listFormCustomizations } from '../api/formAgent';
 import { listSytelineTasks, toolClassificationFor } from '../agents/api';
 import { useTheme } from '../hooks/useTheme';
@@ -40,6 +41,8 @@ interface PaletteItem {
   title: string;
   keywords: string;
   subtitle?: string;
+  /** Nav-destination icon; falls back to the group glyph. */
+  icon?: IconName;
   run: () => void;
 }
 
@@ -47,16 +50,16 @@ interface SubDestination {
   to: string;
   label: string;
   keywords: string;
+  icon: IconName;
   permissions?: string[];
 }
 
 /** Palette-only deep destinations (real routes, permission-gated). */
 const SUB_DESTINATIONS: SubDestination[] = [
-  { to: '/agents/tasks', label: 'Task agents', keywords: 'syteline task agents list', permissions: ['syteline:ui'] },
-  { to: '/agents/tasks/new', label: 'New task', keywords: 'new task agent create syteline', permissions: ['syteline:ui'] },
-  { to: '/agents/workflows', label: 'Workflows', keywords: 'workflows flows automation runs', permissions: ['syteline:ui'] },
-  { to: '/board?today=1', label: 'Today board', keywords: 'today what did the ai complete completed', permissions: ['syteline:ui', 'syteline:forms'] },
-  { to: '/forms/new', label: 'New form customization', keywords: 'new form customization create', permissions: ['syteline:forms'] },
+  { to: '/agents/tasks/new', label: 'New task', keywords: 'new task agent create syteline', icon: 'plus', permissions: ['syteline:ui'] },
+  { to: '/agents/workflows', label: 'Workflows', keywords: 'workflows flows automation runs', icon: 'activity', permissions: ['syteline:ui'] },
+  { to: '/board?today=1', label: 'Today board', keywords: 'today what did the ai complete completed', icon: 'layout', permissions: ['syteline:ui', 'syteline:forms'] },
+  { to: '/forms/new', label: 'New form customization', keywords: 'new form customization create', icon: 'file', permissions: ['syteline:forms'] },
 ];
 
 interface TaskLite {
@@ -250,6 +253,7 @@ export default function CommandPalette({
         title: nav.label,
         keywords: `go to ${nav.label} ${nav.section ?? ''}`,
         subtitle: nav.section ? `Section · ${nav.section}` : 'Main navigation',
+        icon: nav.icon,
         run: () => navigate(nav.to),
       });
     }
@@ -261,6 +265,7 @@ export default function CommandPalette({
         title: sub.label,
         keywords: sub.keywords,
         subtitle: 'Deep link',
+        icon: sub.icon,
         run: () => navigate(sub.to),
       });
     }
@@ -405,7 +410,7 @@ export default function CommandPalette({
         >
           <div className="flex items-center gap-3 px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
             <span aria-hidden="true" style={{ color: 'var(--muted-foreground)' }} className="inline-flex flex-shrink-0">
-              <IconSearch />
+              <Icon name="search" size={16} />
             </span>
             <input
               ref={inputRef}
@@ -452,7 +457,7 @@ export default function CommandPalette({
                       style={{ background: isActive ? 'var(--secondary)' : 'transparent' }}
                     >
                       <span aria-hidden="true" className="flex-shrink-0 inline-flex" style={{ color: 'var(--muted-foreground)' }}>
-                        <GroupIcon group={item.group} />
+                        {item.icon ? <Icon name={item.icon} size={14} /> : <GroupIcon group={item.group} />}
                       </span>
                       <span className="flex-1 min-w-0">
                         <span className="block text-sm truncate" style={{ color: 'var(--foreground)' }}>
