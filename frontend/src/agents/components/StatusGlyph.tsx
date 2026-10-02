@@ -37,18 +37,18 @@ const CLOCK = 'M8 4v4l3 2';
 
 const TASK_TONE: Record<TaskDisplayStatus, { color: string; bg: string; glyph: ReactNode }> = {
   queued: {
-    color: '#52525b',
-    bg: '#f4f4f5',
+    color: '#6b7280',
+    bg: '#6b728014',
     glyph: <Icon d={CLOCK} label="Queued" />,
   },
   running: {
     color: '#1d4ed8',
-    bg: '#dbeafe',
+    bg: '#2563eb14',
     glyph: <Spinner size={13} />,
   },
   waiting_approval: {
-    color: '#92400e',
-    bg: '#fef3c7',
+    color: '#b45309',
+    bg: '#b4530914',
     glyph: <Icon d={ALERT} label="Waiting for approval" />,
   },
   blocked: {
@@ -63,18 +63,18 @@ const TASK_TONE: Record<TaskDisplayStatus, { color: string; bg: string; glyph: R
   },
   completed: {
     color: '#15803d',
-    bg: '#dcfce7',
+    bg: '#15803d14',
     glyph: <Icon d={CHECK} label="Completed" />,
   },
   cancelled: {
     color: '#6b7280',
-    bg: '#f3f4f6',
+    bg: '#6b728014',
     glyph: <Icon d={SKIP} label="Cancelled" />,
   },
 };
 
 const STEP_TONE: Record<StepDisplayStatus, { color: string; glyph: ReactNode }> = {
-  pending: { color: '#71717a', glyph: <Icon d={DOT_CIRCLE} label="Pending" /> },
+  pending: { color: 'var(--muted-foreground)', glyph: <Icon d={DOT_CIRCLE} label="Pending" /> },
   running: { color: '#1d4ed8', glyph: <Spinner size={13} /> },
   done: { color: '#15803d', glyph: <Icon d={CHECK} label="Done" /> },
   verified: { color: '#15803d', glyph: <Icon d={CHECK} label="Verified" /> },

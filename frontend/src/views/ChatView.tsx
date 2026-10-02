@@ -26,6 +26,7 @@ import { useAuth } from '../auth';
 import { resolveEffectiveProviderGroup } from '../providerGroups';
 import type { AuthUser, Conversation, DataClassification, DocumentRecord, Message, Model, ProviderGroup, ProviderInfo, UploadedFile } from '../types';
 
+import { ClassificationBadge } from '../components/ui/primitives';
 /** localStorage key for the last-used provider group. */
 const PROVIDER_STORAGE_KEY = 'enflite-provider';
 
@@ -34,10 +35,6 @@ function initialProvider(): ProviderGroup {
   return stored === 'claude' || stored === 'openai' ? stored : 'enflite';
 }
 
-const CLASSIFICATION_COLOR: Record<string, string> = {
-  PUBLIC: '#15803d', INTERNAL: '#2563eb', CONFIDENTIAL: '#b45309',
-  PROPRIETARY: '#cf0c2c', CUI: '#7e22ce', UNKNOWN: '#6b7280',
-};
 const CLASSIFICATION_ORDER: DataClassification[] = ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'PROPRIETARY', 'CUI', 'UNKNOWN'];
 const randomId = () => crypto.randomUUID();
 
@@ -578,9 +575,4 @@ export default function ChatView() {
       {copied && <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-lg text-xs z-50" style={{ background: 'var(--secondary)' }}>Copied to clipboard</div>}
     </div>
   );
-}
-
-function ClassificationBadge({ level }: { level: string }) {
-  const color = CLASSIFICATION_COLOR[level] ?? '#6b7280';
-  return <span className="px-2 py-0.5 rounded text-xs font-medium" style={{ background: color + '18', color, border: `1px solid ${color}40` }}>{level}</span>;
 }

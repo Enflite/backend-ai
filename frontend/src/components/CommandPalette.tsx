@@ -403,7 +403,7 @@ export default function CommandPalette({
         aria-modal="true"
         aria-label="Command palette"
         className="absolute left-1/2 -translate-x-1/2 w-full animate-scale-in"
-        style={{ top: '12vh', maxWidth: '36rem' }}
+        style={{ top: '12vh', maxWidth: 'min(36rem, calc(100vw - 2rem))' }}
         onClick={(event) => event.stopPropagation()}
       >
         <div

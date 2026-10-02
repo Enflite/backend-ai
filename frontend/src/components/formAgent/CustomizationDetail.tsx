@@ -766,7 +766,7 @@ export default function CustomizationDetail() {
         {detail.status === "blocked" && (
           <section
             className="mt-6 rounded-lg p-5"
-            style={{ background: "#fef2f2", border: "1px solid #fecaca" }}
+            style={{ background: "var(--danger-bg)", border: "1px solid #cf0c2c40" }}
           >
             <h2 className="text-sm font-semibold" style={{ color: "var(--danger)" }}>
               {blockedTitle(detail.blockedReason)}
@@ -774,7 +774,7 @@ export default function CustomizationDetail() {
             {detail.blockedDetail && (
               <p
                 className="text-sm mt-1 break-words"
-                style={{ color: "#7f1d1d" }}
+                style={{ color: "var(--danger)" }}
               >
                 {detail.blockedDetail}
               </p>

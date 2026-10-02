@@ -68,7 +68,7 @@ export default function ApprovalPanel({
   return (
     <section
       className="rounded-lg p-4"
-      style={{ background: '#fffbeb', border: '1px solid #fcd34d' }}
+      style={{ background: '#b4530914', border: '1px solid #b4530940' }}
       aria-label="Approval required"
     >
       <h2 className="text-sm font-semibold" style={{ color: 'var(--foreground)' }}>
