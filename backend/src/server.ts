@@ -184,9 +184,12 @@ export async function buildServer(): Promise<FastifyInstance> {
   await fastify.register(cookie);
 
   // CORS is explicit; credentials are never accepted from arbitrary origins.
+  // methods must be explicit: the @fastify/cors default (GET,HEAD,POST)
+  // omits DELETE/PATCH, which the browser's preflight then blocks.
   await fastify.register(cors, {
     origin: config.CORS_ORIGIN.split(',').map((origin) => origin.trim()),
     credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
     exposedHeaders: ['x-request-id', 'x-trace-id'],
   });
 
