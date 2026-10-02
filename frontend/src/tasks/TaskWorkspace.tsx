@@ -422,7 +422,7 @@ export default function TaskWorkspace() {
           <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
             {task.conversationId && (
               <Link
-                to={`/?conversation=${encodeURIComponent(task.conversationId)}`}
+                to={`/chat?conversation=${encodeURIComponent(task.conversationId)}`}
                 className="inline-flex items-center justify-center gap-1.5 font-medium rounded-md whitespace-nowrap text-xs px-2.5 py-1.5"
                 style={{ border: '1px solid var(--border)', color: 'var(--foreground)' }}
               >

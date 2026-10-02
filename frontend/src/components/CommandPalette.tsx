@@ -275,7 +275,7 @@ export default function CommandPalette({
       {
         label: 'New chat',
         keywords: 'new chat conversation start',
-        run: () => navigate('/'),
+        run: () => navigate('/chat'),
       },
       {
         label: 'Toggle theme',
@@ -318,7 +318,7 @@ export default function CommandPalette({
         title: conversation.title,
         keywords: conversation.title,
         subtitle: timeAgo(conversation.updatedAt),
-        run: () => navigate(`/?conversation=${encodeURIComponent(conversation.id)}`),
+        run: () => navigate(`/chat?conversation=${encodeURIComponent(conversation.id)}`),
       });
     }
     for (const form of forms) {
