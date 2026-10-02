@@ -589,7 +589,61 @@ flowchart TB
     FSTEP --> FAG
     FSTEP -->|"tool kind"| TGW
     FSTEP -->|"subflow kind (version | live)"| FREG
-    FRUN --> FAUD
-    FAPI --> FAUD
-    FPR -.->|"tool-offering gate"| FAPI
-    FHOOK -.->|"future consumers<br/>of registry + runner"| FREG
+%% ---------------------------------------------------------------------
+%% (m) SCHEDULES — backend/src/schedules/ + /api/v1/schedules
+%% Cron-triggered flow runs (big-four #2): the daily-SOP engine.
+%% Schedules create flow runs (diagram l); stats derive from flow_runs
+%% via scheduleRef — no separate run ledger. See ADR-023 and
+%% docs/schedules.md. Cron semantics, atomic claim, lifecycle, and
+%% gating are VALIDATED IN CI; tick-to-tool execution is validated
+%% against the same harnesses as the underlying tools.
+%% ---------------------------------------------------------------------
+flowchart TB
+    ADM["[FUTURE] Tenant admin<br/>(browser)"]
+
+    subgraph SAPI["[FUTURE] Schedules REST API<br/>backend/src/schedules/routes.ts<br/>SCHEDULES_ENABLED kill switch (default false)<br/>manage: schedules:manage · run: schedules:run"]
+        direction TB
+        SCRUD["POST/GET/PUT/DELETE /schedules[/:name]<br/>CRUD (zod-validated)<br/>name ^[a-z0-9-]+$"]
+        SPR["POST /schedules/:name/pause<br/>POST /schedules/:name/resume<br/>no catch-up: resume advances<br/>nextRunAt past now"]
+        SRN["POST /schedules/:name/run-now<br/>fire now outside the timetable<br/>does NOT move nextRunAt"]
+        SVIEW["GET /schedules/:name/runs<br/>GET /schedules/:name/stats<br/>runs + stats derived<br/>from flow_runs"]
+    end
+
+    subgraph SCRON["[FUTURE] Cron engine<br/>backend/src/schedules/cron.ts<br/>dependency-free 5-field cron<br/>Vixie semantics · IANA timezones via Intl<br/>DST gap skipped · fold fires once per tick"]
+    end
+
+    subgraph SSTORE[(" [FUTURE] schedules (Mongo, tenant-scoped)<br/>name · title · target { flow, version|alias }<br/>trigger { cron, timezone } · inputs<br/>confirmWrites · enabled · runAsUserId<br/>nextRunAt")]
+    end
+
+    subgraph SSWP["[FUTURE] Schedule sweeper<br/>backend/src/schedules/scheduleSweeper.ts<br/>SCHEDULE_SWEEP_INTERVAL_MS (default 30000)<br/>SCHEDULE_SWEEP_LIMIT (default 20)<br/>fail closed: no claims while<br/>SCHEDULES_ENABLED is off"]
+        direction TB
+        SCLM["atomic due-claim<br/>compare-and-swap on nextRunAt<br/>one claimer wins<br/>(multi-instance safe)"]
+        SFIRE["fire each claimed tick:<br/>resolve runAs live auth → resolve flow<br/>live-alias / pinned version → createRun<br/>idempotency key sched:&lt;id&gt;:&lt;tickISO&gt;<br/>→ kick flow runner<br/>demoted owner / no live version →<br/>tick skipped + audited"]
+    end
+
+    KBN["[FUTURE] Kanban board<br/>scheduleRef { scheduleName, tickISO }<br/>on every fired run<br/>'what did the AI do today' view"]
+
+    FRUN2["[FUTURE] Flow runner<br/>backend/src/flows/runner.ts<br/>(diagram l)"]
+    FREG2[(" [FUTURE] flows (Mongo registry)<br/>live alias → version → hash<br/>(diagram l)")]
+    FRUNS3[(" [FUTURE] flow_runs (Mongo)<br/>scheduled runs by scheduleRef<br/>stats derived — no separate ledger")]
+    TGW2["[CURRENT] Tool gateway<br/>backend/src/tools/gateway.ts<br/>fired runs execute with the runAs<br/>owner's live auth; each tool's own<br/>permission check applies"]
+    SAUD["[CURRENT] Audit<br/>backend/src/audit/audit.ts"]
+    SPR2["[CURRENT] Privacy routing<br/>syteline.* flows never offered on cloud turns<br/>docs/privacy-routing.md"]
+
+    SHOOK["[FUTURE] Design hooks (NOT built now)<br/>event triggers (e.g. on PO created)<br/>scheduled batch · client-token-scoped<br/>schedule invocation · notifications<br/>on blocked scheduled runs"]
+
+    ADM -->|"manage / run"| SAPI
+    SAPI --> SSTORE
+    SCRON -->|"nextRunAt computation"| SSTORE
+    SSWP -->|"due ticks"| SCLM
+    SCLM -->|"claim"| SSTORE
+    SFIRE -->|"resolve target"| FREG2
+    SFIRE -->|"createRun with scheduleRef"| FRUN2
+    FRUN2 -->|"runs execute as the runAs owner"| TGW2
+    FRUN2 -->|"run records"| FRUNS3
+    SVIEW -->|"stats over"| FRUNS3
+    FRUNS3 -->|"scheduleRef"| KBN
+    SAPI --> SAUD
+    SSWP --> SAUD
+    SPR2 -.->|"tool-offering gate"| SAPI
+    SHOOK -.->|"future trigger kinds<br/>on the schedules surface"| SAPI

@@ -294,6 +294,8 @@ export interface CreateRunOptions {
    * the generic sweep could claim it.
    */
   claimBy?: string;
+  /** Schedule that fired this run (set by the schedules platform). */
+  scheduleRef?: { scheduleId: string; scheduleName: string };
 }
 
 /**
@@ -372,6 +374,7 @@ export async function createRun(
     })),
     idempotencyKey: options.idempotencyKey,
     confirmWrites: options.confirmWrites ?? false,
+    scheduleRef: options.scheduleRef,
     requestedBy: snapshotRequesterAuth(auth, classification),
     createdAt: now,
     updatedAt: now,

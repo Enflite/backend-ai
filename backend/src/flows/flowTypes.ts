@@ -314,6 +314,12 @@ export interface FlowRunDoc {
    */
   confirmWrites: boolean;
   requestedBy: FlowAuthSnapshot;
+  /**
+   * When the run was created by a schedule tick (or a manual run-now of a
+   * schedule), the schedule it fired from. Lets the kanban "what did the AI
+   * do today" view cover scheduled runs via flow_runs.
+   */
+  scheduleRef?: { scheduleId: string; scheduleName: string };
   runnerId?: string;
   createdAt: Date;
   updatedAt: Date;

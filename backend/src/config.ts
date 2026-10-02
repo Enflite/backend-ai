@@ -378,6 +378,20 @@ const envSchema = z.object({
   FLOW_SYNC_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(60000),
   // Max runs claimed per scheduler sweep (bounds one tick's work).
   FLOW_RUNNER_SWEEP_LIMIT: z.coerce.number().int().min(1).max(100).default(10),
+  // ---------------------------------------------------------------------------
+  // Schedules platform (ADR-023): run flows on a timetable. DISABLED BY
+  // DEFAULT: SCHEDULES_ENABLED=false is the fail-closed kill-switch — when
+  // off, every /schedules route returns 403 FEATURE_DISABLED and the
+  // schedule sweeper's ticks are no-ops (no flow runs are created).
+  // ---------------------------------------------------------------------------
+  SCHEDULES_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(false),
+  // Poll interval for the in-process schedule sweeper (claim due schedules
+  // → create flow runs).
+  SCHEDULE_SWEEP_INTERVAL_MS: z.coerce.number().int().min(5000).max(3600000).default(30000),
+  // Max schedules claimed per sweeper tick (bounds one tick's work).
+  SCHEDULE_SWEEP_LIMIT: z.coerce.number().int().min(1).max(100).default(20),
   // SyteLine Form AI Agent product surface (/api/v1/form-customizations):
   // versioned REST API where a person or system submits the five
   // customization inputs (form XML, IDO properties CSV, SQL columns CSV,

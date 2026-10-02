@@ -32,6 +32,8 @@ import { startTaskRunnerScheduler, stopTaskRunnerScheduler } from './syteline/ta
 import { sytelineTaskRoutes } from './syteline/tasks/routes.js';
 import { flowRoutes, closeFlowSseStreams } from './flows/routes.js';
 import { startFlowRunnerScheduler, stopFlowRunnerScheduler } from './flows/flowScheduler.js';
+import { scheduleRoutes } from './schedules/routes.js';
+import { startScheduleSweeper, stopScheduleSweeper } from './schedules/scheduleSweeper.js';
 import {
   formAgentRoutes,
   startFormAgentScheduler,
@@ -243,6 +245,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(retentionRoutes);
       await api.register(learningRoutes);
       await api.register(flowRoutes);
+      await api.register(scheduleRoutes);
       await api.register(formAgentRoutes);
       await api.register(sytelineTaskRoutes);
     },
@@ -268,6 +271,13 @@ export async function buildServer(): Promise<FastifyInstance> {
   // Started here so it runs in every serving process; stopped on preClose.
   // The timer is unref'd and sweeps never overlap.
   startFlowRunnerScheduler();
+
+  // Schedules platform sweeper (ADR-023): in-process poll scheduler that
+  // claims due schedules and creates flow runs for them.
+  // Fail-closed behind SCHEDULES_ENABLED (default false).
+  // Started here so it runs in every serving process; stopped on preClose.
+  // The timer is unref'd and sweeps never overlap.
+  startScheduleSweeper();
   // SyteLine Form AI Agent runner: in-process poll scheduler that claims
   // `requested` flow runs and executes the Form-Project-Templates flow
   // for each. Fail-closed behind FORM_CUSTOMIZATION_RUNNER_ENABLED
@@ -288,6 +298,7 @@ export async function buildServer(): Promise<FastifyInstance> {
     stopRetentionScheduler();
     stopTaskRunnerScheduler();
     stopFlowRunnerScheduler();
+    stopScheduleSweeper();
     stopFormAgentScheduler();
   });
 
