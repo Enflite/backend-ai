@@ -10,7 +10,6 @@ interface SidebarProps {
   onRename: (id: string, title: string) => void;
   collapsed: boolean;
   onToggle: () => void;
-  identity: { name: string; role: string };
 }
 
 function timeAgo(date: Date): string {
@@ -34,7 +33,7 @@ function groupConversations(convs: Conversation[]) {
   return groups;
 }
 
-export default function Sidebar({ conversations, activeId, onSelect, onNew, onDelete, onRename, collapsed, onToggle, identity }: SidebarProps) {
+export default function Sidebar({ conversations, activeId, onSelect, onNew, onDelete, onRename, collapsed, onToggle }: SidebarProps) {
   const [search, setSearch] = useState('');
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -172,20 +171,6 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
             <p className="text-xs text-center py-6" style={{ color: 'var(--muted-foreground)' }}>No conversations found</p>
           )}
         </div>
-
-        {/* Footer */}
-        <div style={{ borderTop: '1px solid var(--border)' }} className="p-3">
-          <div className="flex items-center gap-2.5 px-2 py-1.5 rounded-md hover:bg-secondary cursor-pointer" style={{ color: 'var(--secondary-foreground)' }}>
-            <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold flex-shrink-0" style={{ background: 'var(--accent)', color: 'var(--accent-foreground)' }}>
-              {identity.name.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase()}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate" style={{ color: 'var(--foreground)' }}>{identity.name}</p>
-              <p className="text-xs truncate" style={{ color: 'var(--muted-foreground)' }}>{identity.role}</p>
-            </div>
-            <IconChevronUp />
-          </div>
-        </div>
       </aside>
 
       {/* Context menu */}
@@ -262,9 +247,6 @@ function IconPanelLeft() {
 }
 function IconPanelRight() {
   return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><rect x="2" y="2" width="12" height="12" rx="2" /><path d="M10 2v12" /></svg>;
-}
-function IconChevronUp() {
-  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M4 10l4-4 4 4" /></svg>;
 }
 function IconEdit({ size = 16 }: { size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M11 2l3 3-9 9H2v-3L11 2z" /></svg>;
