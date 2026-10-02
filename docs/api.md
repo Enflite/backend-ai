@@ -416,7 +416,8 @@ missed tick is skipped, `nextRunAt` always advances past now.
 
 Management requires `schedules:manage` (create/update/delete/pause/
 resume); list/view/`run-now`/runs/stats require `schedules:run`.
-Both permissions are Admin / AI Admin only. The whole family is behind
+(Current posture, Jake 2026-10-02: every role holds every permission;
+checks stay enforced.) The whole family is behind
 the `SCHEDULES_ENABLED` kill switch (default `false` — `403
 FEATURE_DISABLED` when off, and the sweeper claims no ticks). Stats
 are derived from `flow_runs` (no separate ledger), so they always

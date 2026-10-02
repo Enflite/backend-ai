@@ -123,8 +123,8 @@ flow, and re-affirmed on every schedule update (an update that
 leaves it `false` leaves the runs read-only).
 
 *Rationale:* the approval has to live somewhere a human touches
-deliberately. The schedule is that place — it is created by an
-admin, under admin-only permissions, with an audit event naming the
+deliberately. The schedule is that place — it is created by a
+human, under permission checks, with an audit event naming the
 actor. Putting the approval on the flow would silently upgrade
 every schedule targeting it; putting it on each tick is impossible
 because no human is present.
@@ -183,9 +183,11 @@ One master kill switch, default `false` (fail closed):
 Permissions:
 
 - `schedules:manage` — create / update / delete schedules, pause,
-  resume (Admin / AI Admin only).
-- `schedules:run` — list / view / `run-now` / runs / stats (Admin /
-  AI Admin only).
+  resume.
+- `schedules:run` — list / view / `run-now` / runs / stats.
+
+Access posture (Jake, 2026-10-02): every role holds every permission
+for now; the checks stay enforced. Granularity may return later.
 
 Tenant isolation: schedules are tenant-scoped; the `runAsUserId`
 must belong to the same tenant. Privacy routing treats the family
@@ -199,8 +201,9 @@ indexes.
 
 - Schedules make **unattended writes possible** — that is the point
   of the daily-SOP engine — and every gate around them is an
-  admin-only, audited, fail-closed one: `SCHEDULES_ENABLED`
-  default-off, admin-only permissions, explicit `confirmWrites`,
+  audited, fail-closed one: `SCHEDULES_ENABLED`
+  default-off, permission checks (currently every role holds every
+  permission per Jake 2026-10-02), explicit `confirmWrites`,
   live `runAs` re-resolution, and per-tool permission checks via
   the gateway inherited from flows.
 - A paused schedule never fires; `resume` recomputes `nextRunAt`

@@ -61,10 +61,12 @@ fired it.
 
 ## Who can use schedules
 
-- `schedules:manage` — create, update, delete, pause, resume
-  (Admin / AI Admin only).
-- `schedules:run` — list, view, `run-now`, runs, stats (Admin /
-  AI Admin only).
+- `schedules:manage` — create, update, delete, pause, resume.
+- `schedules:run` — list, view, `run-now`, runs, stats.
+
+Access posture (Jake, 2026-10-02): every role currently holds every
+permission — the checks stay enforced, but no role is excluded.
+Granularity may return later.
 
 One master kill switch, default `false` (fail closed): with
 `SCHEDULES_ENABLED` off, every `/schedules` endpoint fails fast
@@ -153,13 +155,12 @@ Notes on the examples:
 
 ## Timezones and DST
 
-The trigger's `timezone` is an IANA name (`America/Chicago`,
-`America/New_York`, `UTC`, …). The cron expression is evaluated in
-that timezone, so `0 7 * * 1-5` with `America/Chicago` means 7:00
-Central — following daylight-saving shifts, not drifting against
-them. Always set the timezone explicitly rather than relying on a
-server default: a schedule that means "7am for the planners in
-Texas" should say `America/Chicago` so a server move or a daylight
+The trigger's `timezone` is required and is an IANA name
+(`America/Chicago`, `America/New_York`, `UTC`, …). The cron
+expression is evaluated in that timezone, so `0 7 * * 1-5` with
+`America/Chicago` means 7:00 Central — following daylight-saving
+shifts, not drifting against them. There is no server default:
+always set the timezone explicitly, so a server move or a daylight
 transition never silently changes what "7am" means.
 
 **DST behavior** (the design policy; the code PR validates it):
@@ -301,7 +302,8 @@ list above.
 
 **`403 FORBIDDEN`.** The caller lacks `schedules:manage` (for
 CRUD/pause/resume) or `schedules:run` (for list/view/run-now).
-Both permissions are Admin / AI Admin only.
+(Current posture: every role holds every permission; the checks
+remain enforced.)
 
 **Double-fires.** Each tick carries the idempotency key
 `sched:<id>:<tickISO>` into run creation: a tick fires at most
