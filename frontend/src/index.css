@@ -46,6 +46,8 @@
   --accent-foreground: #ffffff;
   --border: #e7e7e7;
   --ring: #cf0c2c;
+  --danger: #a50a24;
+  --danger-bg: #fee2e2;
   --radius: 6px;
   --radius-lg: 10px;
   --radius-xl: 14px;
@@ -71,6 +73,70 @@
   --class-proprietary: #cf0c2c;
   --class-cui: #7e22ce;
   --class-unknown: #6b7280;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dark-first theme (docs/frontend-design-system.md)                   */
+/*                                                                     */
+/* Dark is the default theme. The inline script in index.html applies  */
+/* the stored theme (or dark) via documentElement.dataset.theme before */
+/* first paint. Explicit user choice only — no prefers-color-scheme    */
+/* auto-switching.                                                     */
+/* ------------------------------------------------------------------ */
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --background: #0b0b0d;
+  --foreground: #f4f4f5;
+  --card: #141417;
+  --card-foreground: #f4f4f5;
+  --primary: #e11d48;
+  --primary-foreground: #ffffff;
+  --secondary: #1c1c21;
+  --secondary-foreground: #f4f4f5;
+  --muted: #1c1c21;
+  --muted-foreground: #a1a1aa;
+  --accent: #e11d48;
+  --accent-foreground: #ffffff;
+  --border: #26262c;
+  --ring: #e11d48;
+  --danger: #f87171;
+  --danger-bg: #f8717126;
+
+  /* Radius unchanged between themes */
+  --radius: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+
+  /* Type scale unchanged between themes */
+  --text-page-title: 1.25rem;
+  --text-section-title: 0.9375rem;
+  --text-body: 0.875rem;
+  --text-secondary: 0.8125rem;
+  --text-meta: 0.75rem;
+  --leading-relaxed: 1.65;
+
+  /* Elevation — subtle dark variants */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+
+  /* Classification colors — slightly brightened for dark surfaces */
+  --class-public: #22c55e;
+  --class-internal: #60a5fa;
+  --class-confidential: #f59e0b;
+  --class-proprietary: #e11d48;
+  --class-cui: #a855f7;
+  --class-unknown: #9ca3af;
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+}
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
 }
 
 * {
@@ -231,13 +297,91 @@ textarea:focus-visible,
   100% { background: transparent; }
 }
 
+/* ------------------------------------------------------------------ */
+/* Motion system (docs/frontend-design-system.md)                      */
+/*                                                                     */
+/* Small, fast, ease-out entrance and state animations. Durations live */
+/* in the 160–240ms band so motion reads as responsive, never laggy.   */
+/* Do not invent one-off keyframes in views — compose these utilities. */
+/* ------------------------------------------------------------------ */
+
+/* Cards, list rows, toasts entering the viewport */
+.animate-fade-up {
+  animation: ui-fade-up 200ms ease-out;
+}
+@keyframes ui-fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Subtle content swaps and inline reveals */
+.animate-fade-in {
+  animation: ui-fade-in 180ms ease-out;
+}
+@keyframes ui-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Slide-over panels and drawers entering from the edge */
+.animate-slide-in-right {
+  animation: ui-slide-in-right 220ms ease-out;
+}
+@keyframes ui-slide-in-right {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Dialogs and popovers — small scale from center */
+.animate-scale-in {
+  animation: ui-scale-in 160ms ease-out;
+}
+@keyframes ui-scale-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* Live indicators (used by the LiveDot primitive) */
+.animate-pulse-dot {
+  animation: ui-pulse-dot 1.6s ease-in-out infinite;
+}
+@keyframes ui-pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.8); }
+}
+
+/* Loading placeholders (used by the Skeleton primitive). The highlight is
+   a neutral mid-gray wash so it reads on both themes. */
+.skeleton-shimmer {
+  position: relative;
+  overflow: hidden;
+  background: var(--secondary);
+}
+.skeleton-shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(127, 127, 127, 0.28), transparent);
+  animation: ui-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes ui-shimmer {
+  100% { transform: translateX(100%); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .enflite-avatar--idle,
   .enflite-avatar--thinking .enflite-avatar__ring,
   .enflite-avatar--streaming .enflite-avatar__img,
   .enflite-avatar--tools .enflite-avatar__ring,
   .activity-panel-enter,
-  .message-flash {
+  .message-flash,
+  .animate-fade-up,
+  .animate-fade-in,
+  .animate-slide-in-right,
+  .animate-scale-in,
+  .animate-pulse-dot,
+  .skeleton-shimmer::after {
     animation: none;
   }
 }
