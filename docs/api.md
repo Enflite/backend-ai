@@ -336,6 +336,59 @@ only) / `FORM_CUSTOMIZATION_BLOCKED` (reason) /
 `FORM_CUSTOMIZATION_MERGED` (human actor) /
 `FORM_CUSTOMIZATION_CANCELLED`.
 
+## Flows
+
+Deterministic, versioned pipelines — versioned runbooks as
+config-as-code (see ADR-022 and `docs/flows.md`). A flow is a named
+step graph stored as `flows/<name>.flow.json` in the repo
+(PR-reviewed), published as an immutable version, and executed by a
+server-side runner. Step kinds: `tool` (registered platform tool via
+the tool gateway, with the run requester's auth — each tool's own
+permission check applies; destructive tools need `confirmWrites:
+true` on the run request), `subflow` (another flow, by `version` or
+`alias`), `agent` (bounded LLM escalation; output must validate
+against `outputSchema`), `condition` (deterministic branch, no LLM).
+Templates (`{{inputs.x}}`, `{{steps.<id>.output.<path>}}`) resolve
+strictly — an unknown path fails the step with
+`TEMPLATE_RESOLUTION_ERROR`; no arbitrary code in templates.
+
+Definition management requires `flows:manage` (Admin / AI Admin
+only); runs require `flows:run` (run, poll, stream, cancel). The whole
+family is behind the `FLOWS_ENABLED` kill switch (default `false` —
+`403 FEATURE_DISABLED` when off), and the runner additionally requires
+`FLOW_RUNNER_ENABLED=true` (default `false` — runs stay `queued` and
+nothing executes when off).
+
+Run lifecycle (the kanban data model for flows):
+`queued → running → completed | blocked | cancelled`.
+Stop-on-first-failure (`onError: "stop"`, the default) marks the run
+`blocked` with a reason, unless the failed step set
+`continueOnError: true`.
+
+| Method | Path | Auth / Permission | Purpose |
+|---|---|---|---|
+| POST | `/flows` | auth + `flows:manage` | Create or update a flow definition (`name` must match `^[a-z0-9-]+$`); the definition is validated against the flow schema |
+| GET | `/flows` | auth + `flows:manage` | List flow definitions with their versions and alias pointers |
+| GET | `/flows/:name` | auth + `flows:manage` | One definition: current draft, published versions, and the alias → version → hash chain |
+| DELETE | `/flows/:name` | auth + `flows:manage` | Delete a definition (only when no alias points at any of its versions) |
+| POST | `/flows/:name/versions` | auth + `flows:manage` | Publish the current definition as an immutable version: `{ number, definitionHash, publishedBy, publishedAt }` |
+| GET | `/flows/:name/versions` | auth + `flows:manage` | List published versions (newest first) |
+| POST | `/flows/:name/alias` | auth + `flows:manage` | Move an alias (default `live`) to a version: `{ alias?, version }`; requires `If-Match: <revision>` (compare-and-swap) — stale revision returns `412` |
+| POST | `/flows/ensure` | auth + `flows:manage` | Converge `flows/*.flow.json` from the repo into the tenant's `flows` registry (the config-as-code deploy path) |
+| GET | `/flows/:name/pull` | auth + `flows:manage` | Export a definition out of the registry (diff registry state against the repo) |
+| POST | `/flows/:name/runs` | auth + `flows:run` | Start a run: `{ inputs, version? \| alias? ("live" default), confirmWrites? (default false), sync? (default false) }`; async `202 { runId }` by default — `sync: true` waits up to a server-side cap, then falls back to `202`. `Idempotency-Key` header: a repeated request returns the existing run; same key with a different body returns `409` |
+| GET | `/flows/runs` | auth + `flows:run` | List runs; optional `status` filter (`queued` / `running` / `completed` / `blocked` / `cancelled`) — the kanban-board query for flows |
+| GET | `/flows/runs/:runId` | auth + `flows:run` | Run detail: status, version + definition hash, step log with per-step status/timestamps/evidence, `outputs` or `blockedReason` |
+| GET | `/flows/runs/:runId/events` | auth + `flows:run` | SSE stream of run events (`text/event-stream`; not `EventSource`) |
+| POST | `/flows/runs/:runId/cancel` | auth + `flows:run` | Cancel a run (ends work in flight); terminal states return `409 RUN_ALREADY_TERMINAL` |
+
+Every step is audit-logged with evidence (same discipline as the
+ADR-020 task runner). Privacy routing treats flows like the other
+SyteLine-adjacent surfaces: a flow driving `syteline.*` tools is never
+offered on cloud turns when customer or finance categories are
+enforced (see `docs/privacy-routing.md`) — the tool-level checks
+inherit automatically through the gateway.
+
 ## Repositories & code search
 
 Multi-repo code indexing for coding turns (see `docs/repo-indexing.md`).

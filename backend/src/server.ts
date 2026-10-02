@@ -31,6 +31,11 @@ import { startRetentionScheduler, stopRetentionScheduler } from './retention/sch
 import { startTaskRunnerScheduler, stopTaskRunnerScheduler } from './syteline/tasks/taskScheduler.js';
 import { flowRoutes, closeFlowSseStreams } from './flows/routes.js';
 import { startFlowRunnerScheduler, stopFlowRunnerScheduler } from './flows/flowScheduler.js';
+import {
+  formAgentRoutes,
+  startFormAgentScheduler,
+  stopFormAgentScheduler,
+} from './formAgent/index.js';
 import { recoverIngestionJobs } from './documents/queue.js';
 import { closeDb } from './db/mongo.js';
 
@@ -237,6 +242,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(retentionRoutes);
       await api.register(learningRoutes);
       await api.register(flowRoutes);
+      await api.register(formAgentRoutes);
     },
     { prefix: '/api/v1' }
   );
@@ -260,6 +266,12 @@ export async function buildServer(): Promise<FastifyInstance> {
   // Started here so it runs in every serving process; stopped on preClose.
   // The timer is unref'd and sweeps never overlap.
   startFlowRunnerScheduler();
+  // SyteLine Form AI Agent runner: in-process poll scheduler that claims
+  // `requested` flow runs and executes the Form-Project-Templates flow
+  // for each. Fail-closed behind FORM_CUSTOMIZATION_RUNNER_ENABLED
+  // (default false). Started here so it runs in every serving process;
+  // stopped on preClose. The timer is unref'd and sweeps never overlap.
+  startFormAgentScheduler();
 
   // Root health endpoints
   await fastify.register(healthRoutes);
@@ -274,6 +286,7 @@ export async function buildServer(): Promise<FastifyInstance> {
     stopRetentionScheduler();
     stopTaskRunnerScheduler();
     stopFlowRunnerScheduler();
+    stopFormAgentScheduler();
   });
 
   return fastify;

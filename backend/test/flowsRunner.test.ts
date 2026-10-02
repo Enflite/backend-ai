@@ -34,7 +34,7 @@ vi.mock('../src/audit/audit.js', () => ({
   recordAudit: recordAuditMock,
   sanitizeReason: (reason?: string | null) => reason ?? null,
 }));
-vi.mock('../src/syteline/tasks/taskRunner.js', () => ({
+vi.mock('../src/syteline/requesterAuth.js', () => ({
   liveRequesterAuth: liveRequesterAuthMock,
 }));
 vi.mock('../src/ai/gateway/gateway.js', () => ({ gatewayStream: gatewayStreamMock }));

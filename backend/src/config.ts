@@ -378,6 +378,31 @@ const envSchema = z.object({
   FLOW_SYNC_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(60000),
   // Max runs claimed per scheduler sweep (bounds one tick's work).
   FLOW_RUNNER_SWEEP_LIMIT: z.coerce.number().int().min(1).max(100).default(10),
+  // SyteLine Form AI Agent product surface (/api/v1/form-customizations):
+  // versioned REST API where a person or system submits the five
+  // customization inputs (form XML, IDO properties CSV, SQL columns CSV,
+  // instructions, attachments) and the backend runs the
+  // Form-Project-Templates flow end to end, then reports back with the
+  // review PR link. TWO INDEPENDENT KILL SWITCHES, both default-off
+  // (ADR-021 §5): FORM_CUSTOMIZATION_API_ENABLED gates the endpoints;
+  // FORM_CUSTOMIZATION_RUNNER_ENABLED gates the server-side runner.
+  // Form-project PRs are opened for human review and NEVER merged by
+  // automation.
+  // ---------------------------------------------------------------------------
+  FORM_CUSTOMIZATION_API_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(false),
+  FORM_CUSTOMIZATION_RUNNER_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(false),
+  // GitHub org for new form-project repos and review PRs.
+  FORM_CUSTOMIZATION_GITHUB_ORG: z.string().min(1).max(100).default('Enflite'),
+  // Poll interval for the in-process flow-runner scheduler.
+  FORM_CUSTOMIZATION_RUNNER_INTERVAL_MS: z.coerce.number().int().min(1000).max(3600000).default(15000),
+  // Absolute deadline for one flow run (validate → backup → plan → build → verify → PR).
+  FORM_CUSTOMIZATION_RUNNER_TASK_TIMEOUT_MS: z.coerce.number().int().min(60000).max(7200000).default(600000),
+  // Max runs claimed per scheduler sweep (bounds one tick's work).
+  FORM_CUSTOMIZATION_RUNNER_SWEEP_LIMIT: z.coerce.number().int().min(1).max(100).default(5),
   // ---------------------------------------------------------------------------
   // Enterprise OIDC login (Phase 5b): Authorization Code + PKCE as the
   // primary enterprise login path, alongside password login. When

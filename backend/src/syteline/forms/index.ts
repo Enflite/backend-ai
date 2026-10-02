@@ -21,3 +21,5 @@ export * from './projectDocs.js';
 export * from './deck.js';
 export * from './deckBuildScript.js';
 export * from './github.js';
+export * from './projectPaths.js';
+export * from './fieldSpec.js';

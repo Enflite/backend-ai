@@ -45,6 +45,15 @@ function ghAvailable(): boolean {
   }
 }
 
+/**
+ * True when the review PR can be opened (gh CLI or GITHUB_TOKEN).
+ * Exported for the SyteLine Form AI Agent's precondition check — the
+ * flow blocks with `missing-github-token` instead of half-running.
+ */
+export function githubPrAvailable(): boolean {
+  return ghAvailable() || !!process.env.GITHUB_TOKEN;
+}
+
 function runGh(args: string[], cwd: string, env: NodeJS.ProcessEnv = {}): string {
   return execFileSync('gh', args, {
     cwd,

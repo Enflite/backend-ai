@@ -26,7 +26,7 @@ import { getDb, tenantOp } from '../../db/mongo.js';
 import { recordAudit, sanitizeReason } from '../../audit/audit.js';
 import { Errors } from '../../errors.js';
 import type { AuthContext, Classification } from '../../authz/permissions.js';
-import { buildAuth, type MembershipRow } from '../../auth/routes.js';
+import { liveRequesterAuth } from '../requesterAuth.js';
 import { gatewayStream } from '../../ai/gateway/gateway.js';
 import { resolveChatDefault } from '../../ai/gateway/capabilityRouter.js';
 import {
@@ -176,59 +176,6 @@ export function authFromSnapshot(task: SytelineTaskDoc): AuthContext {
   };
 }
 
-/**
- * Minimal requester reference for live auth resolution (the runner only
- * needs identity + tenant; both SyteLine tasks and flow runs satisfy it).
- */
-export interface RunnerRequesterRef {
-  requesterUserId: string;
-  tenantId: string;
-  /**
-   * Optional id of the work being run (task id / run id): keeps the
-   * synthetic runner sessionId scoped to the work, as before.
-   */
-  workId?: string;
-}
-
-/**
- * Resolve the requester's LIVE auth context at run time, through the same
- * permission resolution as login (buildAuth). Returns null when the user
- * is gone, deactivated, no longer a member of the task's tenant, or their
- * tenant/role records are missing. A task created before a demotion must
- * not keep driving the user's SyteLine session after revocation — the
- * runner fails closed on anything but a live `syteline:ui` grant.
- */
-export async function liveRequesterAuth(ref: RunnerRequesterRef): Promise<AuthContext | null> {
-  const db = await getDb();
-  const user = await db.collection<{
-    _id: string; email: string; passwordHash: string; displayName: string;
-    isActive: boolean; clearance: Classification;
-  }>('users').findOne({ _id: ref.requesterUserId });
-  if (!user || user.isActive === false) return null;
-  const membership = await db.collection<{ _id: string; userId: string; tenantId: string; roleId: string }>(
-    'memberships',
-  ).findOne({ userId: ref.requesterUserId, tenantId: ref.tenantId });
-  if (!membership) return null;
-  const [tenant, role] = await Promise.all([
-    db.collection<{ _id: string; name: string }>('tenants').findOne({ _id: membership.tenantId }),
-    db.collection<{ _id: string; name: string }>('roles').findOne({ _id: membership.roleId }),
-  ]);
-  if (!tenant || !role) return null;
-  const row: MembershipRow = {
-    tenantId: membership.tenantId,
-    tenantName: tenant.name,
-    roleId: membership.roleId,
-    roleName: role.name,
-  };
-  const base = await buildAuth(
-    {
-      id: user._id, email: user.email, passwordHash: user.passwordHash,
-      displayName: user.displayName, isActive: user.isActive, clearance: user.clearance,
-    },
-    row,
-  );
-  return { ...base, sessionId: `task-runner:${ref.workId ?? ref.requesterUserId}` };
-}
 
 // ---------------------------------------------------------------------------
 // Step classification
@@ -379,11 +326,7 @@ export async function runTask(
     // Fail closed on LIVE permissions: the requester must still hold
     // syteline:ui at run time (demotion/deactivation after task creation
     // must not keep driving their SyteLine session).
-    const auth = await liveRequesterAuth({
-      requesterUserId: task.requesterUserId,
-      tenantId: task.tenantId,
-      workId: task._id,
-    });
+    const auth = await liveRequesterAuth(task);
     if (!auth || !auth.permissions.includes('syteline:ui')) {
       await blockTask(tenantId, taskId, 'requester-lost-permission');
       await auditTask(task, 'SYTELINE_TASK_BLOCKED', false, {

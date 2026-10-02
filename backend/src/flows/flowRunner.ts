@@ -32,7 +32,7 @@ import { config } from '../config.js';
 import { recordAudit, sanitizeReason } from '../audit/audit.js';
 import { Errors } from '../errors.js';
 import type { AuthContext, Classification } from '../authz/permissions.js';
-import { liveRequesterAuth } from '../syteline/tasks/taskRunner.js';
+import { liveRequesterAuth } from '../syteline/requesterAuth.js';
 import { gatewayStream } from '../ai/gateway/gateway.js';
 import { resolveChatDefault } from '../ai/gateway/capabilityRouter.js';
 import { runToolCall } from '../tools/gateway.js';
@@ -724,9 +724,9 @@ export async function runFlow(
     // flows:run at run time (a demotion after run creation must not keep
     // driving the run).
     const auth = await liveRequesterAuth({
+      _id: run._id,
       requesterUserId: run.requestedBy.userId,
       tenantId: run.tenantId,
-      workId: run._id,
     });
     if (!auth || !auth.permissions.includes('flows:run')) {
       await blockRun(tenantId, runId, 'requester-lost-permission');

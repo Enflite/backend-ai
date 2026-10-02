@@ -51,7 +51,7 @@ vi.mock('../src/auth/middleware.js', () => ({
     done();
   },
 }));
-vi.mock('../src/syteline/tasks/taskRunner.js', () => ({
+vi.mock('../src/syteline/requesterAuth.js', () => ({
   liveRequesterAuth: liveRequesterAuthMock,
 }));
 vi.mock('../src/tools/gateway.js', () => ({ runToolCall: runToolCallMock }));
