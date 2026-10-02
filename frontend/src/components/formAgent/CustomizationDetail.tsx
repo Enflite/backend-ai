@@ -2,14 +2,16 @@
  * formAgent/CustomizationDetail.tsx — the detail view for one SyteLine Form
  * AI Agent customization request.
  *
- * Header (title, form name, status, timestamps), the eight pipeline steps
- * rendered via mergeSteps(liveSteps) with per-step status icons, detail
- * text, and timestamps, a result section (summary, review-PR link, repo
- * link, open items, assumptions), a blocked section, and actions:
- *   - Cancel: non-terminal states only, explicit confirm.
- *   - Mark merged: awaiting_review only, explicit confirm — the human
- *     merges the review PR on GitHub first, then records it here. This is
- *     the agent's terminal state; the human's mark is what completes it.
+ * Header (title, form name, status, timestamps), then for the result states
+ * (awaiting_review / completed) a review hero: the result summary, the
+ * approve-to-PR actions (Open review PR, View full diff on GitHub, Mark as
+ * merged — the human merges the review PR on GitHub first; the agent never
+ * merges), and commit metadata. A Changes section renders the file-by-file
+ * change list from the validated plan (`plan`) — never fabricated — and a
+ * Validation section tells the "what was checked" story from the verify
+ * step, result summary, open items, and assumptions. The eight pipeline
+ * steps render via mergeSteps(liveSteps), then the blocked section and the
+ * actions (Cancel, Mark as merged).
  *
  * Polls the detail endpoint while the status is non-terminal. The API
  * behind FORM_CUSTOMIZATION_API_ENABLED=false (default off) maps to
@@ -26,12 +28,14 @@ import { DisabledState, NotAuthorizedState } from "../ui/ErrorState"
 import ErrorState from "../ui/ErrorState"
 import Spinner from "../ui/Spinner"
 import StatusBadge from "../ui/StatusBadge"
+import { Badge, Button, Card, SectionLabel } from "../ui/primitives"
 import { usePolling } from "../../hooks/usePolling"
 import {
   blockedTitle,
   isTerminalStatus,
   mergeSteps,
   statusMeta,
+  type CustomizationPlan,
   type FormCustomizationDetail,
   type FlowStepStatus,
 } from "../../formAgent/types"
@@ -95,6 +99,376 @@ function StepIcon({ status }: { status: FlowStepStatus | undefined }) {
     />
   )
 }
+
+/** External-link styled like a button (primitives' Button renders <button> only). */
+function ExternalAction({
+  href,
+  variant,
+  children,
+}: {
+  href: string
+  variant: "primary" | "outline"
+  children: React.ReactNode
+}) {
+  const primary = variant === "primary"
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex items-center justify-center gap-1.5 font-medium rounded-md whitespace-nowrap text-sm px-3.5 py-2"
+      style={
+        primary
+          ? { background: "var(--accent)", color: "var(--accent-foreground)" }
+          : { background: "transparent", color: "var(--foreground)", border: "1px solid var(--border)" }
+      }
+    >
+      {children}
+    </a>
+  )
+}
+
+function MetadataItem({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <dt className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+        {label}
+      </dt>
+      <dd className="text-sm mt-0.5 break-words" style={{ color: "var(--foreground)" }}>
+        {children}
+      </dd>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Review hero — the approve-to-PR surface for the result states       */
+/* ------------------------------------------------------------------ */
+
+function ReviewHero({
+  detail,
+  onMarkMerged,
+  acting,
+}: {
+  detail: FormCustomizationDetail
+  onMarkMerged: () => void
+  acting: boolean
+}) {
+  const diffUrl = detail.prUrl ? `${detail.prUrl}/files` : null
+  return (
+    <Card className="mt-6 p-5 animate-fade-up">
+      <section aria-labelledby="review-heading">
+        <SectionLabel>Review</SectionLabel>
+        <h2
+          id="review-heading"
+          className="text-base font-semibold mt-1"
+          style={{ color: "var(--foreground)" }}
+        >
+          {detail.status === "completed" ? "Merged and completed" : "Ready for review"}
+        </h2>
+        {detail.resultSummary && (
+          <p className="text-sm mt-2 break-words" style={{ color: "var(--foreground)" }}>
+            {detail.resultSummary}
+          </p>
+        )}
+        <div className="flex flex-wrap gap-2 mt-4">
+          {detail.prUrl ? (
+            <ExternalAction href={detail.prUrl} variant="primary">
+              Open review PR
+            </ExternalAction>
+          ) : (
+            // Honest pending state: the pipeline has not opened the PR yet.
+            <Button
+              variant="outline"
+              disabled
+              title="The pipeline is still running — the review PR will appear here."
+            >
+              Review PR pending
+            </Button>
+          )}
+          {diffUrl ? (
+            <ExternalAction href={diffUrl} variant="outline">
+              View full diff on GitHub
+            </ExternalAction>
+          ) : (
+            <Button
+              variant="outline"
+              disabled
+              title="The pipeline is still running — the full diff will appear once the review PR is open."
+            >
+              Full diff not ready yet
+            </Button>
+          )}
+          {detail.status === "awaiting_review" && (
+            <Button variant="primary" onClick={onMarkMerged} disabled={acting}>
+              {acting && <Spinner size={14} />}
+              Mark as merged
+            </Button>
+          )}
+        </div>
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-2 mt-4">
+          <MetadataItem label="Repository">
+            {detail.repoUrl ? (
+              <a
+                href={detail.repoUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="break-all"
+                style={{ color: "var(--accent)" }}
+              >
+                {detail.repoUrl.replace(/^https:\/\/github\.com\//, "")}
+              </a>
+            ) : (
+              "—"
+            )}
+          </MetadataItem>
+          <MetadataItem label="Pull request">
+            {detail.prUrl ? (
+              <a
+                href={detail.prUrl}
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: "var(--accent)" }}
+              >
+                Open on GitHub
+              </a>
+            ) : (
+              "Pipeline still running"
+            )}
+          </MetadataItem>
+          <MetadataItem label="Flow">
+            {detail.flow.name} v{detail.flow.version}
+          </MetadataItem>
+          <MetadataItem label="Requested by">{detail.requestedBy ?? "—"}</MetadataItem>
+        </dl>
+      </section>
+    </Card>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Changes — file-by-file, rendered only from the validated plan       */
+/* ------------------------------------------------------------------ */
+
+function ChangeCategory({
+  title,
+  count,
+  children,
+}: {
+  title: string
+  count: number
+  children: React.ReactNode
+}) {
+  return (
+    <div className="mt-4">
+      <div className="flex items-center gap-2 mb-1">
+        <h4 className="text-xs font-semibold" style={{ color: "var(--foreground)" }}>
+          {title}
+        </h4>
+        <Badge tone="blue">{count}</Badge>
+      </div>
+      {children}
+    </div>
+  )
+}
+
+function ChangesSection({ detail }: { detail: FormCustomizationDetail }) {
+  const plan: CustomizationPlan | undefined = detail.plan
+  return (
+    <div className="mt-6">
+      <SectionLabel>Changes</SectionLabel>
+      {!plan ? (
+        <Card className="mt-2 p-5">
+          <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
+            The change list appears once the agent&apos;s plan step has completed.
+          </p>
+        </Card>
+      ) : (
+        <div className="mt-2 space-y-4">
+          {/* The rebuilt form XML — the artifact every plan produces. */}
+          <Card className="p-5 animate-fade-up">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3
+                className="text-sm font-semibold font-mono break-all"
+                style={{ color: "var(--foreground)" }}
+              >
+                {detail.evidence?.formXml ?? `${detail.formName}.xml`}
+              </h3>
+              <Badge tone="neutral">form XML</Badge>
+            </div>
+            {plan.fields.length > 0 && (
+              <ChangeCategory title="Fields added" count={plan.fields.length}>
+                <ul className="space-y-1.5">
+                  {plan.fields.map((f) => (
+                    <li
+                      key={f.field}
+                      className="flex items-center gap-2 flex-wrap text-sm"
+                      style={{ color: "var(--foreground)" }}
+                    >
+                      <code className="font-mono text-xs" style={{ color: "var(--accent)" }}>
+                        {f.field}
+                      </code>
+                      <span>{f.caption}</span>
+                      <Badge tone="gray">{f.kind}</Badge>
+                      {f.userDefinedType && (
+                        <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+                          {f.userDefinedType}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </ChangeCategory>
+            )}
+            {plan.relabels.length > 0 && (
+              <ChangeCategory title="Relabels" count={plan.relabels.length}>
+                <ul className="space-y-1.5">
+                  {plan.relabels.map((r) => (
+                    <li
+                      key={r.component}
+                      className="flex items-center gap-2 flex-wrap text-sm"
+                      style={{ color: "var(--foreground)" }}
+                    >
+                      <code className="font-mono text-xs" style={{ color: "var(--muted-foreground)" }}>
+                        {r.component}
+                      </code>
+                      <span aria-hidden="true" style={{ color: "var(--muted-foreground)" }}>
+                        →
+                      </span>
+                      <span className="font-medium">“{r.newCaption}”</span>
+                    </li>
+                  ))}
+                </ul>
+              </ChangeCategory>
+            )}
+            {plan.resizes.length > 0 && (
+              <ChangeCategory title="Resizes" count={plan.resizes.length}>
+                <ul className="space-y-1.5">
+                  {plan.resizes.map((r) => (
+                    <li
+                      key={r.component}
+                      className="flex items-center gap-2 flex-wrap text-sm"
+                      style={{ color: "var(--foreground)" }}
+                    >
+                      <code className="font-mono text-xs" style={{ color: "var(--muted-foreground)" }}>
+                        {r.component}
+                      </code>
+                      <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+                        {Object.entries(r.changes)
+                          .map(([k, v]) => `${k}: ${v}`)
+                          .join(", ")}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </ChangeCategory>
+            )}
+            {plan.designNotes && (
+              <p
+                className="text-xs mt-4 break-words"
+                style={{ color: "var(--muted-foreground)" }}
+              >
+                {plan.designNotes}
+              </p>
+            )}
+          </Card>
+
+          {/* The implementation-plan deck artifact, when the verify step built it. */}
+          {detail.evidence?.deck && (
+            <Card className="p-5 animate-fade-up">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3
+                  className="text-sm font-semibold font-mono break-all"
+                  style={{ color: "var(--foreground)" }}
+                >
+                  {detail.evidence.deck}
+                </h3>
+                <Badge tone="neutral">deck</Badge>
+              </div>
+              <p className="text-xs mt-2" style={{ color: "var(--muted-foreground)" }}>
+                Implementation-plan deck — included as an artifact in the review PR.
+              </p>
+            </Card>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Validation — the "what was checked" story                           */
+/* ------------------------------------------------------------------ */
+
+function ValidationSection({ detail }: { detail: FormCustomizationDetail }) {
+  const verify = mergeSteps(detail.steps).find((s) => s.name === "verify")
+  return (
+    <div className="mt-6">
+      <SectionLabel>Validation</SectionLabel>
+      <Card className="mt-2 p-5">
+        <section aria-labelledby="validation-heading">
+          <h3
+            id="validation-heading"
+            className="text-sm font-semibold"
+            style={{ color: "var(--foreground)" }}
+          >
+            Verify step
+          </h3>
+          <div className="flex items-center gap-2 mt-2">
+            <StepIcon status={verify?.live?.status} />
+            <p className="text-sm" style={{ color: "var(--foreground)" }}>
+              {verify?.live?.status === "done"
+                ? "Passed — deterministic rebuild check, project docs, and deck."
+                : verify?.live?.status === "failed"
+                  ? "Failed — see the blocked reason above."
+                  : "Not finished yet."}
+            </p>
+          </div>
+          {verify?.live?.detail && (
+            <p className="text-xs mt-1 font-mono" style={{ color: "var(--muted-foreground)" }}>
+              {verify.live.detail}
+            </p>
+          )}
+          {(verify?.live?.startedAt || verify?.live?.completedAt) && (
+            <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
+              {verify.live.startedAt && `Started ${formatTimestamp(verify.live.startedAt)}`}
+              {verify.live.startedAt && verify.live.completedAt && " · "}
+              {verify.live.completedAt && `Finished ${formatTimestamp(verify.live.completedAt)}`}
+            </p>
+          )}
+          {detail.evidence?.openItems && detail.evidence.openItems.length > 0 && (
+            <div className="mt-4">
+              <h4 className="text-xs font-semibold mb-1" style={{ color: "var(--muted-foreground)" }}>
+                OPEN ITEMS
+              </h4>
+              <ul className="text-sm space-y-1 list-disc pl-5" style={{ color: "var(--foreground)" }}>
+                {detail.evidence.openItems.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {detail.evidence?.assumptions && detail.evidence.assumptions.length > 0 && (
+            <div className="mt-4">
+              <h4 className="text-xs font-semibold mb-1" style={{ color: "var(--muted-foreground)" }}>
+                ASSUMPTIONS
+              </h4>
+              <ul className="text-sm space-y-1 list-disc pl-5" style={{ color: "var(--foreground)" }}>
+                {detail.evidence.assumptions.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </section>
+      </Card>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* The view                                                            */
+/* ------------------------------------------------------------------ */
 
 export default function CustomizationDetail() {
   const { id } = useParams<{ id: string }>()
@@ -312,9 +686,25 @@ export default function CustomizationDetail() {
           </p>
         </div>
 
+        {/* Approve-to-PR hero */}
+        {showResult && (
+          <ReviewHero
+            detail={detail}
+            onMarkMerged={() => void handleMarkMerged()}
+            acting={acting === "merge"}
+          />
+        )}
+
+        {/* File-by-file changes from the validated plan — whenever one exists. */}
+        {(showResult || detail.plan) && <ChangesSection detail={detail} />}
+
+        {/* What was checked */}
+        {showResult && <ValidationSection detail={detail} />}
+
         {/* Pipeline steps */}
-        <section className="mt-6">
+        <section className="mt-6" aria-labelledby="pipeline-heading">
           <h2
+            id="pipeline-heading"
             className="text-sm font-semibold mb-2"
             style={{ color: "var(--foreground)" }}
           >
@@ -396,100 +786,6 @@ export default function CustomizationDetail() {
           </section>
         )}
 
-        {/* Result */}
-        {showResult && (
-          <section
-            className="mt-6 rounded-lg p-5"
-            style={{
-              background: "var(--card)",
-              border: "1px solid var(--border)",
-            }}
-          >
-            <h2
-              className="text-sm font-semibold mb-2"
-              style={{ color: "var(--foreground)" }}
-            >
-              Result
-            </h2>
-            {detail.resultSummary && (
-              <p
-                className="text-sm break-words"
-                style={{ color: "var(--foreground)" }}
-              >
-                {detail.resultSummary}
-              </p>
-            )}
-            <div className="flex flex-wrap gap-2 mt-3">
-              {detail.prUrl && (
-                <a
-                  href={detail.prUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-sm font-medium px-4 py-2 rounded-md"
-                  style={{
-                    background: "var(--accent)",
-                    color: "var(--accent-foreground)",
-                  }}
-                >
-                  Open review PR
-                </a>
-              )}
-              {detail.repoUrl && (
-                <a
-                  href={detail.repoUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-sm px-4 py-2 rounded-md"
-                  style={{
-                    border: "1px solid var(--border)",
-                    color: "var(--foreground)",
-                  }}
-                >
-                  Open repository
-                </a>
-              )}
-            </div>
-            {detail.evidence?.openItems &&
-              detail.evidence.openItems.length > 0 && (
-                <div className="mt-4">
-                  <h3
-                    className="text-xs font-semibold mb-1"
-                    style={{ color: "var(--muted-foreground)" }}
-                  >
-                    OPEN ITEMS
-                  </h3>
-                  <ul
-                    className="text-sm space-y-1 list-disc pl-5"
-                    style={{ color: "var(--foreground)" }}
-                  >
-                    {detail.evidence.openItems.map((item, i) => (
-                      <li key={i}>{item}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            {detail.evidence?.assumptions &&
-              detail.evidence.assumptions.length > 0 && (
-                <div className="mt-4">
-                  <h3
-                    className="text-xs font-semibold mb-1"
-                    style={{ color: "var(--muted-foreground)" }}
-                  >
-                    ASSUMPTIONS
-                  </h3>
-                  <ul
-                    className="text-sm space-y-1 list-disc pl-5"
-                    style={{ color: "var(--foreground)" }}
-                  >
-                    {detail.evidence.assumptions.map((item, i) => (
-                      <li key={i}>{item}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-          </section>
-        )}
-
         {/* Actions */}
         {(canCancel || canMarkMerged) && (
           <section
@@ -515,30 +811,26 @@ export default function CustomizationDetail() {
                   Merge the PR on GitHub yourself, then record it here to mark
                   this customization completed.
                 </p>
-                <button
+                <Button
+                  variant="primary"
                   onClick={() => void handleMarkMerged()}
                   disabled={acting !== null}
-                  className="text-sm font-medium px-4 py-2 rounded-md disabled:opacity-60 inline-flex items-center gap-2"
-                  style={{
-                    background: "var(--accent)",
-                    color: "var(--accent-foreground)",
-                  }}
                 >
                   {acting === "merge" && <Spinner size={14} />}
                   Mark as merged
-                </button>
+                </Button>
               </div>
             )}
             {canCancel && (
-              <button
+              <Button
+                variant="outline"
                 onClick={() => void handleCancel()}
                 disabled={acting !== null}
-                className="text-sm px-4 py-2 rounded-md disabled:opacity-60 inline-flex items-center gap-2"
-                style={{ border: "1px solid var(--border)", color: "var(--danger)" }}
+                style={{ color: "var(--danger)" }}
               >
                 {acting === "cancel" && <Spinner size={14} />}
                 Cancel customization
-              </button>
+              </Button>
             )}
             {actionError && (
               <p className="text-sm mt-2" style={{ color: "var(--danger)" }}>

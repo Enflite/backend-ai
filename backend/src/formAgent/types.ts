@@ -566,6 +566,12 @@ export function publicListItem(doc: FormCustomizationDoc): Record<string, unknow
 /**
  * Public detail view: the full request record minus the internal auth
  * snapshot (runner plumbing). Dates are ISO strings.
+ *
+ * `plan` is the requester's own validated customization plan
+ * (zod-checked by the plan-changes step before execution; `CustomizationPlan`
+ * in steps.ts) — exposed so the UI can render the file-by-file change
+ * list from real data instead of re-deriving it. It is absent (not null)
+ * until the plan-changes step has stored one.
  */
 export function publicDetailView(doc: FormCustomizationDoc): Record<string, unknown> {
   return {
@@ -583,6 +589,7 @@ export function publicDetailView(doc: FormCustomizationDoc): Record<string, unkn
       startedAt: iso(s.startedAt),
       completedAt: iso(s.completedAt),
     })),
+    ...(doc.plan ? { plan: doc.plan } : {}),
     ...(doc.result
       ? {
           resultSummary: doc.result.resultSummary,
