@@ -97,3 +97,21 @@ export async function cancelSytelineTask(
   );
   return result;
 }
+
+/**
+ * Re-queue a blocked task so the runner picks it up again. Pass
+ * approveWrites=true to approve the task's proposed write plan
+ * (task-bounded write approval); omit to keep the current setting
+ * (e.g. re-queueing after an external dependency clears).
+ */
+export async function requeueSytelineTask(
+  classification: DataClassification,
+  taskId: string,
+  approveWrites?: boolean,
+): Promise<SytelineTaskDetail> {
+  return call<SytelineTaskDetail>(
+    'syteline.task.requeue',
+    approveWrites === undefined ? { taskId } : { taskId, approveWrites },
+    classification,
+  );
+}

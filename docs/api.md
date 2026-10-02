@@ -273,6 +273,7 @@ task lifecycle, atomic claim, planning, and the approval gate are
 | `syteline.task.list` | no | List the requester's tasks (or, for admins, the tenant's); optional `status` filter |
 | `syteline.task.get` | no | Full task record: status, zod-validated plan, per-step log with `{ action, status, evidenceIds[] }`, `resultSummary` / `blockedReason` |
 | `syteline.task.cancel` | **yes** | Cancel a task (ends work in flight); requester or admin only |
+| `syteline.task.requeue` | no | Re-queue a `blocked` task to `assigned` (clears `blockedReason`); `{ taskId, approveWrites? }` — `approveWrites: true` is the task-bounded write approval for a parked write plan; requester or admin only |
 
 Per-step screenshot evidence is captured server-side (tenant-scoped) and
 referenced by id in the step log — the model only ever sees ids. The

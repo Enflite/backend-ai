@@ -211,6 +211,41 @@ export async function cancelTask(
   );
 }
 
+/**
+ * Re-queue a `blocked` task back to `assigned` so the runner picks it up
+ * on the next sweep. Only `blocked` tasks may be re-queued — terminal
+ * states (`completed`, `cancelled`) and live states (`assigned`,
+ * `in_progress`) are never resurrected or duplicated by this path.
+ *
+ * `approveWrites: true` sets the task-bounded write approval (§11.4):
+ * the requester's explicit confirmation for THIS task's write steps.
+ * When omitted, the existing `autoApproveWrites` value is preserved.
+ * The blocked reason is cleared; a fresh run re-plans from the goal.
+ */
+export async function requeueTask(
+  tenantId: string,
+  taskId: string,
+  approveWrites?: boolean,
+): Promise<SytelineTaskDoc | null> {
+  const db = await getDb();
+  const now = new Date();
+  const set: Record<string, unknown> = {
+    status: 'assigned',
+    updatedAt: now,
+  };
+  if (approveWrites !== undefined) {
+    set.autoApproveWrites = approveWrites;
+  }
+  return db.collection<SytelineTaskDoc>('syteline_tasks').findOneAndUpdate(
+    { _id: taskId, tenantId, status: 'blocked' },
+    {
+      $set: set,
+      $unset: { blockedReason: '', completedAt: '', startedAt: '', runnerId: '' },
+    },
+    { returnDocument: 'after' },
+  );
+}
+
 export async function setResultSummary(
   tenantId: string,
   taskId: string,
