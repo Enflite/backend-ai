@@ -339,3 +339,59 @@ describe('session inventory', () => {
     await fastify.close();
   });
 });
+
+describe('logout empty-body tolerance', () => {
+  it('POST /auth/logout succeeds with content-type application/json and an empty body', async () => {
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST',
+      url: '/auth/logout',
+      headers: { 'content-type': 'application/json' },
+      // no payload: reproduces FST_ERR_CTP_EMPTY_JSON_BODY from the live log
+    });
+    expect(res.statusCode).toBe(204);
+    // The session was actually revoked, not just 2xx'd.
+    const sessionsColl = getMockCollection('sessions');
+    expect(sessionsColl.updateOne).toHaveBeenCalledWith(
+      { _id: '33333333-3333-4333-8333-333333333333', tenantId: TENANT },
+      expect.objectContaining({ $set: expect.objectContaining({ revokedAt: expect.any(Date) }) })
+    );
+    expect(recordAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'LOGOUT', userId: USER, tenantId: TENANT })
+    );
+    await fastify.close();
+  });
+
+  it('POST /auth/logout still rejects a malformed JSON body with 400', async () => {
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST',
+      url: '/auth/logout',
+      headers: { 'content-type': 'application/json' },
+      payload: '{not json',
+    });
+    expect(res.statusCode).toBe(400);
+    // The session must NOT have been revoked on a parse failure.
+    const sessionsColl = getMockCollection('sessions');
+    expect(sessionsColl.updateOne).not.toHaveBeenCalled();
+    await fastify.close();
+  });
+
+  it('POST /auth/logout/all tolerates an empty JSON body too', async () => {
+    const sessionsColl = getMockCollection('sessions');
+    sessionsColl.updateMany.mockResolvedValue({ acknowledged: true, modifiedCount: 3 });
+    const fastify = await app();
+    const res = await fastify.inject({
+      method: 'POST',
+      url: '/auth/logout/all',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ revokedSessions: 3 });
+    expect(sessionsColl.updateMany).toHaveBeenCalledWith(
+      { tenantId: TENANT, userId: USER, revokedAt: null },
+      expect.objectContaining({ $set: expect.objectContaining({ revokedAt: expect.any(Date) }) })
+    );
+    await fastify.close();
+  });
+});

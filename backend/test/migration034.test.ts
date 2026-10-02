@@ -35,7 +35,7 @@ function fakeDb(roleNames: string[], permNames: string[], pregrants: Array<[stri
     if (name === 'role_permissions') {
       return {
         find: vi.fn((_f: unknown, _o: unknown) => findCursor(rolePermissions)),
-        insertMany: vi.fn(async (docs: Array<Record<string, any>>) => {
+        insertMany: vi.fn(async (docs: Array<{ _id: string; roleId: string; permissionId: string }>) => {
           for (const doc of docs) {
             if (rolePermissions.some((g) => g.roleId === doc.roleId && g.permissionId === doc.permissionId)) {
               const err = new Error('duplicate key') as Error & { code: number };
