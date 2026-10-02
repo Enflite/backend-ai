@@ -1,9 +1,11 @@
 /**
  * tasks/TaskWorkspace.tsx — the canonical task workspace (`/tasks/:id`).
  *
- * One screen for a SyteLine agent task:
- *   Watch     — live plan + step activity while the run is going
- *   Review    — final report, full step log, evidence gallery
+ * One screen for a SyteLine agent task, embedded in the AgentWorkspace
+ * (`workspace/AgentWorkspace.tsx`) next to the live task list:
+ *   Activity  — run header with the live status line, request card, and the
+ *               step-activity timeline (Relay execution shape)
+ *   Evidence  — final report, full step log, screenshot evidence gallery
  *   Approvals — write-approval gate, requeue/resume, cancel
  *
  * Replaces the two superseded detail screens (`/agents/tasks/:id` and
@@ -52,6 +54,7 @@ import {
   parseTaskTab,
   type TaskTab,
 } from './tab';
+import { runSummary } from '../workspace/statusCopy';
 
 const TERMINAL = new Set(['completed', 'blocked', 'cancelled']);
 
@@ -254,8 +257,14 @@ function EvidenceGallery({ task }: { task: SytelineTaskDetail }) {
 /* Workspace                                                           */
 /* ------------------------------------------------------------------ */
 
-export default function TaskWorkspace() {
-  const { id } = useParams<{ id: string }>();
+/**
+ * Rendered inside `workspace/AgentWorkspace.tsx`, which owns the task list.
+ * Accepts an explicit taskId; falls back to the `:id` route param so the
+ * component also works as a standalone route.
+ */
+export default function TaskWorkspace({ taskId }: { taskId?: string } = {}) {
+  const { id: routeId } = useParams<{ id: string }>();
+  const id = taskId ?? routeId;
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = parseTaskTab(searchParams.get('tab'));
@@ -320,6 +329,10 @@ export default function TaskWorkspace() {
   const live = task !== null && !TERMINAL.has(task.status);
   usePolling(refresh, { intervalMs: 3000, active: live && refreshError === null });
 
+  // The parent workspace renders its own "select a task" state — this guard
+  // only fires if the component is mounted without a task id at all.
+  if (!id) return null;
+
   async function doRequeue(): Promise<void> {
     if (!id) return;
     setResuming(true);
@@ -356,7 +369,7 @@ export default function TaskWorkspace() {
             product="SyteLine task automation"
             hint="Task detail needs the SyteLine UI automation enabled server-side (SYTELINE_UI_ENABLED)."
           />
-          <Link to="/agents/tasks" className="text-sm underline mt-4 inline-block" style={{ color: 'var(--accent)' }}>
+          <Link to="/tasks" className="text-sm underline mt-4 inline-block" style={{ color: 'var(--accent)' }}>
             ← Back to tasks
           </Link>
         </div>
@@ -377,7 +390,7 @@ export default function TaskWorkspace() {
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-6 py-8">
           <ErrorState message={message || 'Could not load the task.'} onRetry={retry} />
-          <Link to="/agents/tasks" className="text-sm underline mt-4 inline-block" style={{ color: 'var(--accent)' }}>
+          <Link to="/tasks" className="text-sm underline mt-4 inline-block" style={{ color: 'var(--accent)' }}>
             ← Back to tasks
           </Link>
         </div>
@@ -389,6 +402,7 @@ export default function TaskWorkspace() {
 
   const display = taskDisplayStatus(task);
   const progress = taskProgress(task);
+  const summary = runSummary(task);
   const nonTerminal = !TERMINAL.has(task.status);
   const terminal = !nonTerminal;
   const waitingApproval = display.status === 'waiting_approval';
@@ -399,9 +413,13 @@ export default function TaskWorkspace() {
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="max-w-3xl mx-auto px-6 py-8">
-        <Link to="/agents/tasks" className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
-          ← Agent tasks
-        </Link>
+        <nav aria-label="Breadcrumb" className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
+          <Link to="/tasks" className="hover:underline">
+            Tasks
+          </Link>
+          <span aria-hidden="true"> / </span>
+          <span aria-current="page">SyteLine task</span>
+        </nav>
 
         <div className="mt-2 flex items-start justify-between gap-4 flex-wrap">
           <div className="min-w-0">
@@ -439,6 +457,23 @@ export default function TaskWorkspace() {
             )}
           </div>
         </div>
+
+        <Card className="mt-4 p-4 animate-fade-up" key={summary.statusText}>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold" style={{ color: 'var(--accent)' }}>
+              {summary.statusText}
+            </span>
+            <span className="text-xs" style={{ color: 'var(--muted-foreground)' }}>
+              {summary.elapsed}
+            </span>
+          </div>
+          <p className="text-sm font-medium mt-1.5" style={{ color: 'var(--foreground)' }}>
+            {summary.title}
+          </p>
+          <p className="text-sm mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
+            {summary.detail}
+          </p>
+        </Card>
 
         {progress.total > 0 && (
           <div
@@ -479,8 +514,8 @@ export default function TaskWorkspace() {
         </div>
 
         <div key={tab} className="animate-fade-up">
-          {tab === 'watch' && (
-            <section role="tabpanel" id="task-tabpanel-watch" aria-labelledby="task-tab-watch" className="pt-6 space-y-8">
+          {tab === 'activity' && (
+            <section role="tabpanel" id="task-tabpanel-activity" aria-labelledby="task-tab-activity" className="pt-6 space-y-8">
               <div>
                 <SectionLabel>Request</SectionLabel>
                 <Card className="mt-2 p-4">
@@ -537,8 +572,8 @@ export default function TaskWorkspace() {
             </section>
           )}
 
-          {tab === 'review' && (
-            <section role="tabpanel" id="task-tabpanel-review" aria-labelledby="task-tab-review" className="pt-6 space-y-8">
+          {tab === 'evidence' && (
+            <section role="tabpanel" id="task-tabpanel-evidence" aria-labelledby="task-tab-evidence" className="pt-6 space-y-8">
               <div>
                 <SectionLabel>Report</SectionLabel>
                 <div className="mt-2">

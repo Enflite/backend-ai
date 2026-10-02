@@ -29,7 +29,9 @@ export type IconName =
   | 'trash'
   | 'panel-left'
   | 'panel-right'
-  | 'spark';
+  | 'spark'
+  | 'terminal'
+  | 'check';
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
   home: (
@@ -112,6 +114,8 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
   spark: (
     <path d="m12 3 1.25 4.1a5.2 5.2 0 0 0 3.55 3.55L21 12l-4.2 1.35a5.2 5.2 0 0 0-3.55 3.55L12 21l-1.25-4.1a5.2 5.2 0 0 0-3.55-3.55L3 12l4.2-1.35a5.2 5.2 0 0 0 3.55-3.55Z" />
   ),
+  terminal: <path d="m5 7 4 5-4 5M12 17h7" />,
+  check: <path d="m5 12 4 4L19 6" />,
 };
 
 /** Every name this set can render — navRegistry tests assert its icons are all covered. */

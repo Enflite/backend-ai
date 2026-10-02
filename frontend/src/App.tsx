@@ -12,7 +12,7 @@ import AppShell from './shell/AppShell';
 import HomeView from './views/HomeView';
 import ChatView from './views/ChatView';
 import AgentsView, { RequireTaskUi } from './views/AgentsView';
-import TaskWorkspace from './tasks/TaskWorkspace';
+import AgentWorkspace from './workspace/AgentWorkspace';
 import BoardView from './views/BoardView';
 import FormsView from './views/FormsView';
 import SytelineView from './views/SytelineView';
@@ -38,10 +38,18 @@ function RootRoutes() {
           <Route path="chat" element={<ChatView />} />
           <Route path="agents/*" element={<AgentsView />} />
           <Route
+            path="tasks"
+            element={
+              <RequireTaskUi>
+                <AgentWorkspace />
+              </RequireTaskUi>
+            }
+          />
+          <Route
             path="tasks/:id"
             element={
               <RequireTaskUi>
-                <TaskWorkspace />
+                <AgentWorkspace />
               </RequireTaskUi>
             }
           />

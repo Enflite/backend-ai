@@ -37,7 +37,7 @@ describe('railNavItems', () => {
     expect(railNavItems().map((item) => item.to)).toEqual([
       '/',
       '/chat',
-      '/agents/tasks',
+      '/tasks',
       '/board',
       '/forms',
       '/syteline',
@@ -63,12 +63,12 @@ describe('railNavItems', () => {
     // Everyone sees Home + Chat. hasAnyPermission is any-of, so Board
     // (['syteline:ui', 'syteline:forms']) unlocks with either permission.
     expect(visible([]).map((item) => item.to)).toEqual(['/', '/chat']);
-    expect(visible(['syteline:ui']).map((item) => item.to)).toEqual(['/', '/chat', '/agents/tasks', '/board', '/syteline']);
+    expect(visible(['syteline:ui']).map((item) => item.to)).toEqual(['/', '/chat', '/tasks', '/board', '/syteline']);
     expect(visible(['syteline:forms']).map((item) => item.to)).toEqual(['/', '/chat', '/board', '/forms']);
     expect(visible(['syteline:ui', 'syteline:forms']).map((item) => item.to)).toEqual([
       '/',
       '/chat',
-      '/agents/tasks',
+      '/tasks',
       '/board',
       '/forms',
       '/syteline',

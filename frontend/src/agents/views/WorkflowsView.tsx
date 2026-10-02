@@ -31,7 +31,7 @@ export default function WorkflowsView() {
             like “TRN catch-up” or “help publication” will become one-click workflows here.
           </p>
           <Link
-            to="/agents/tasks"
+            to="/tasks"
             className="inline-block mt-4 text-sm font-medium px-4 py-2 rounded-md"
             style={{ background: 'var(--accent)', color: '#fff' }}
           >
