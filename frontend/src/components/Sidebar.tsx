@@ -1,5 +1,14 @@
+/**
+ * components/Sidebar.tsx — the Chat view's contextual conversation panel.
+ *
+ * This is deliberately NOT a second global nav: it sits inside the Chat
+ * view, carries no brand mark (branding lives in the AppShell rail), uses
+ * the subtle surface background, and is labeled "Conversations" so the
+ * hierarchy reads as one product: global nav → Chat → conversations.
+ */
 import { useState } from 'react';
 import type { Conversation } from '../types';
+import { IconButton, SectionLabel } from './ui/primitives';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -69,13 +78,13 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
 
   if (collapsed) {
     return (
-      <aside className="flex flex-col items-center py-4 gap-3" style={{ width: 52, background: 'var(--card)', borderRight: '1px solid var(--border)' }}>
-        <button onClick={onToggle} className="p-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground" title="Expand sidebar">
+      <aside aria-label="Conversations" className="flex flex-col items-center py-4 gap-2" style={{ width: 52, background: 'var(--secondary)', borderRight: '1px solid var(--border)' }}>
+        <IconButton label="Expand conversation panel" onClick={onToggle}>
           <IconPanelRight />
-        </button>
-        <button onClick={onNew} className="p-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground" title="New conversation">
+        </IconButton>
+        <IconButton label="New conversation" onClick={onNew}>
           <IconPlus />
-        </button>
+        </IconButton>
       </aside>
     );
   }
@@ -83,38 +92,38 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
   return (
     <>
       <aside
+        aria-label="Conversations"
         className="flex flex-col h-full"
-        style={{ width: 260, background: 'var(--card)', borderRight: '1px solid var(--border)', flexShrink: 0 }}
+        style={{ width: 264, background: 'var(--secondary)', borderRight: '1px solid var(--border)', flexShrink: 0 }}
         onClick={() => contextMenu && closeContextMenu()}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between px-3 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
-          <div className="flex items-center gap-2">
-            <img src="/enflite-logo.png" alt="Enflite" className="h-6 w-auto" />
-          </div>
-          <div className="flex items-center gap-1">
-            <button onClick={onNew} className="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground" title="New conversation">
+        {/* Panel header — a section label, not a brand mark */}
+        <div className="flex items-center justify-between pl-4 pr-2 py-3 flex-shrink-0">
+          <SectionLabel>Conversations</SectionLabel>
+          <div className="flex items-center gap-0.5">
+            <IconButton label="New conversation" onClick={onNew}>
               <IconPlus />
-            </button>
-            <button onClick={onToggle} className="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground" title="Collapse sidebar">
+            </IconButton>
+            <IconButton label="Collapse conversation panel" onClick={onToggle}>
               <IconPanelLeft />
-            </button>
+            </IconButton>
           </div>
         </div>
 
         {/* Search */}
-        <div className="px-3 py-2">
-          <div className="flex items-center gap-2 px-2 py-1.5 rounded-md" style={{ background: 'var(--secondary)', border: '1px solid var(--border)' }}>
-            <IconSearch />
+        <div className="px-3 pb-2 flex-shrink-0">
+          <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-md" style={{ background: 'var(--card)', border: '1px solid var(--border)' }}>
+            <span style={{ color: 'var(--muted-foreground)' }} aria-hidden="true"><IconSearch /></span>
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search conversations..."
+              placeholder="Search conversations"
+              aria-label="Search conversations"
               className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
               style={{ color: 'var(--foreground)' }}
             />
             {search && (
-              <button onClick={() => setSearch('')} className="text-muted-foreground hover:text-foreground">
+              <button onClick={() => setSearch('')} className="text-muted-foreground hover:text-foreground" aria-label="Clear search">
                 <IconX size={12} />
               </button>
             )}
@@ -127,7 +136,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
             if (convs.length === 0) return null;
             return (
               <div key={group}>
-                <p className="px-2 py-1.5 text-xs font-bold uppercase tracking-widest" style={{ color: 'var(--accent)' }}>
+                <p className="px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-widest" style={{ color: 'var(--muted-foreground)' }}>
                   {group}
                 </p>
                 {convs.map((conv) => (
@@ -143,15 +152,16 @@ export default function Sidebar({ conversations, activeId, onSelect, onNew, onDe
                           if (e.key === 'Escape') setRenamingId(null);
                         }}
                         className="w-full px-2 py-1.5 text-sm rounded-md outline-none"
-                        style={{ background: 'var(--secondary)', color: 'var(--foreground)', border: '1px solid var(--accent)' }}
+                        style={{ background: 'var(--card)', color: 'var(--foreground)', border: '1px solid var(--accent)' }}
                       />
                     ) : (
                       <button
                         onClick={() => onSelect(conv.id)}
                         onContextMenu={(e) => handleContextMenu(e, conv.id)}
-                        className="w-full text-left px-2 py-2 rounded-md text-sm flex flex-col gap-0.5 group"
+                        className="w-full text-left px-2.5 py-2 rounded-md text-sm flex flex-col gap-0.5 group"
                         style={{
-                          background: activeId === conv.id ? 'var(--secondary)' : 'transparent',
+                          background: activeId === conv.id ? 'var(--card)' : 'transparent',
+                          border: activeId === conv.id ? '1px solid var(--border)' : '1px solid transparent',
                           color: activeId === conv.id ? 'var(--foreground)' : 'var(--secondary-foreground)',
                         }}
                       >

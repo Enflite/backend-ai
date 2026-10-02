@@ -1,5 +1,14 @@
 @import 'tailwindcss';
 
+/* ------------------------------------------------------------------ */
+/* Enflite design tokens (docs/frontend-design-system.md)              */
+/*                                                                     */
+/* Calm enterprise palette: near-white background, white surfaces,    */
+/* subtle gray fills, hairline borders, Ink text, Body Gray secondary  */
+/* text. Enflite Red #CF0C2C is the single accent — used sparingly for  */
+/* active states, primary actions, AI activity, and security cues.     */
+/* ------------------------------------------------------------------ */
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -17,30 +26,51 @@
   --color-ring: var(--ring);
   --radius-sm: calc(var(--radius) - 2px);
   --radius-md: var(--radius);
-  --radius-lg: calc(var(--radius) + 2px);
+  --radius-lg: var(--radius-lg);
   --font-sans: 'Inter', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
 }
 
 :root {
-  /* Enflite brand palette (branding/enflite-style-guide.md): light sections —
-     White / Light Gray surfaces, Ink text, Body Gray secondary text,
-     Divider Gray borders, Enflite Red #CF0C2C as the single accent. */
-  --background: #ffffff;
-  --foreground: #1a1a1a;
+  --background: #fafafa;
+  --foreground: #18181b;
   --card: #ffffff;
-  --card-foreground: #1a1a1a;
+  --card-foreground: #18181b;
   --primary: #cf0c2c;
   --primary-foreground: #ffffff;
-  --secondary: #f7f7f7;
-  --secondary-foreground: #1a1a1a;
-  --muted: #f7f7f7;
-  --muted-foreground: #4a4a4a;
+  --secondary: #f5f5f5;
+  --secondary-foreground: #18181b;
+  --muted: #f5f5f5;
+  --muted-foreground: #71717a;
   --accent: #cf0c2c;
   --accent-foreground: #ffffff;
-  --border: #e5e5e5;
+  --border: #e7e7e7;
   --ring: #cf0c2c;
   --radius: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+
+  /* Type scale — page title 20/600, section 15/600, body 14, secondary 13, meta 12 */
+  --text-page-title: 1.25rem;
+  --text-section-title: 0.9375rem;
+  --text-body: 0.875rem;
+  --text-secondary: 0.8125rem;
+  --text-meta: 0.75rem;
+  --leading-relaxed: 1.65;
+
+  /* Elevation — restrained; most surfaces sit flat on hairline borders */
+  --shadow-xs: 0 1px 2px rgba(24, 24, 27, 0.04);
+  --shadow-sm: 0 1px 3px rgba(24, 24, 27, 0.06), 0 1px 2px rgba(24, 24, 27, 0.04);
+  --shadow-md: 0 4px 16px rgba(24, 24, 27, 0.08);
+  --shadow-lg: 0 12px 32px rgba(24, 24, 27, 0.12);
+
+  /* Classification colors — the app's real levels; shared by every surface */
+  --class-public: #15803d;
+  --class-internal: #2563eb;
+  --class-confidential: #b45309;
+  --class-proprietary: #cf0c2c;
+  --class-cui: #7e22ce;
+  --class-unknown: #6b7280;
 }
 
 * {
@@ -51,19 +81,28 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: 'Inter', system-ui, sans-serif;
+  font-size: var(--text-body);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* AI long-form content: comfortable measure + generous line height */
+.prose-measure {
+  max-width: 46rem;
+  line-height: var(--leading-relaxed);
 }
 
 /* Scrollbar styling */
 ::-webkit-scrollbar {
-  width: 4px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: #d4d4d4;
-  border-radius: 2px;
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: #a3a3a3;
@@ -71,12 +110,12 @@ body {
 
 /* Code block scrollbar */
 pre::-webkit-scrollbar {
-  height: 4px;
+  height: 8px;
 }
 
 /* Smooth transitions */
 * {
-  transition-property: background-color, border-color, color, opacity;
+  transition-property: background-color, border-color, color, opacity, box-shadow, transform;
   transition-duration: 120ms;
   transition-timing-function: ease;
 }
@@ -84,6 +123,18 @@ pre::-webkit-scrollbar {
 /* Disable transitions on SVG */
 svg * {
   transition: none;
+}
+
+/* Visible keyboard focus for interactive elements that don't define their own */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 /* ------------------------------------------------------------------ */
