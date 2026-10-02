@@ -271,9 +271,17 @@ export default function ChatView() {
   async function deleteConversation(id: string) {
     try {
       await api.request(`/conversations/${id}`, { method: 'DELETE' });
-      setConversations((current) => current.filter((item) => item.id !== id));
-      if (activeId === id) setActiveId(conversations.find((item) => item.id !== id)?.id ?? null);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Unable to delete conversation'); }
+    } catch (cause) {
+      // A 404 means the chat is already gone on the server — e.g. a retry
+      // after a network failure that actually reached the backend. Drop it
+      // locally anyway instead of showing a spurious error.
+      if (!(cause instanceof ApiError && cause.status === 404)) {
+        setError(cause instanceof Error ? cause.message : 'Unable to delete conversation');
+        return;
+      }
+    }
+    setConversations((current) => current.filter((item) => item.id !== id));
+    if (activeId === id) setActiveId(conversations.find((item) => item.id !== id)?.id ?? null);
   }
 
   async function renameConversation(id: string, title: string) {
