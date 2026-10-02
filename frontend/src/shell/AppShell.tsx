@@ -110,7 +110,7 @@ export default function AppShell() {
   const sections = [...new Set(NAV_ITEMS.map((item) => item.section).filter(Boolean))] as string[];
 
   return (
-    <div className="flex h-screen overflow-hidden" style={{ background: 'var(--background)' }}>
+    <div className="app-shell-root flex h-screen overflow-hidden">
       <nav
         aria-label="Primary"
         className="flex flex-col flex-shrink-0 py-4"

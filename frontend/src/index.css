@@ -1,12 +1,15 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap");
 @import 'tailwindcss';
 
 /* ------------------------------------------------------------------ */
 /* Enflite design tokens (docs/frontend-design-system.md)              */
 /*                                                                     */
-/* Calm enterprise palette: near-white background, white surfaces,    */
-/* subtle gray fills, hairline borders, Ink text, Body Gray secondary  */
-/* text. Enflite Red #CF0C2C is the single accent — used sparingly for  */
-/* active states, primary actions, AI activity, and security cues.     */
+/* Light: calm enterprise palette — near-white background, white       */
+/* surfaces, hairline borders, Ink text.                               */
+/* Dark (default): Relay-adopted — near-black green-tinted neutrals,   */
+/* Manrope/DM Mono type, subtle red top glow. Enflite Red #CF0C2C is    */
+/* the single accent — used sparingly for active states, primary        */
+/* actions, AI activity, and security cues.                            */
 /* ------------------------------------------------------------------ */
 
 @theme inline {
@@ -27,8 +30,8 @@
   --radius-sm: calc(var(--radius) - 2px);
   --radius-md: var(--radius);
   --radius-lg: var(--radius-lg);
-  --font-sans: 'Inter', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  --font-sans: 'Manrope', 'Inter', system-ui, sans-serif;
+  --font-mono: 'DM Mono', 'JetBrains Mono', monospace;
 }
 
 :root {
@@ -82,25 +85,35 @@
 /* the stored theme (or dark) via documentElement.dataset.theme before */
 /* first paint. Explicit user choice only — no prefers-color-scheme    */
 /* auto-switching.                                                     */
+/*                                                                     */
+/* Neutrals lean on the Relay reference: near-black green-tinted       */
+/* surfaces, translucent green-white hairlines, Manrope/DM Mono type.  */
+/* The accent is Enflite Red #cf0c2c (not Relay's lime) — the brand     */
+/* accent, used sparingly. --primary keeps a brighter red for button   */
+/* contrast; classification colors keep their brightened dark hues.    */
 /* ------------------------------------------------------------------ */
 
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --background: #0b0b0d;
-  --foreground: #f4f4f5;
-  --card: #141417;
-  --card-foreground: #f4f4f5;
+  --background: #0d0f0e;
+  --foreground: #e8e9e3;
+  --card: #111412;
+  --card-foreground: #e8e9e3;
+  --panel-raised: #161a17;
   --primary: #e11d48;
   --primary-foreground: #ffffff;
-  --secondary: #1c1c21;
-  --secondary-foreground: #f4f4f5;
-  --muted: #1c1c21;
-  --muted-foreground: #a1a1aa;
-  --accent: #e11d48;
+  --secondary: #161a17;
+  --secondary-foreground: #e8e9e3;
+  --muted: #161a17;
+  --muted-foreground: #7d857f;
+  --muted-bright: #aab1ac;
+  --accent: #cf0c2c;
   --accent-foreground: #ffffff;
-  --border: #26262c;
-  --ring: #e11d48;
+  --accent-soft: rgba(207, 12, 44, 0.10);
+  --border: rgba(224, 236, 222, 0.09);
+  --border-strong: rgba(224, 236, 222, 0.14);
+  --ring: #cf0c2c;
   --danger: #f87171;
   --danger-bg: #f8717126;
 
@@ -146,10 +159,22 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: 'Manrope', 'Inter', system-ui, sans-serif;
   font-size: var(--text-body);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+/* App shell root: flat theme background, with the dark signature glow.
+   Mirrors the Relay reference's app-shell top glow (red, not lime). */
+.app-shell-root {
+  background: var(--background);
+}
+[data-theme="dark"] body,
+[data-theme="dark"] .app-shell-root {
+  background:
+    radial-gradient(circle at 58% -20%, rgba(207, 12, 44, 0.05), transparent 31%),
+    var(--background);
 }
 
 /* AI long-form content: comfortable measure + generous line height */
@@ -179,10 +204,12 @@ pre::-webkit-scrollbar {
   height: 8px;
 }
 
-/* Smooth transitions */
+/* Smooth transitions — 160ms ease, matching the Relay reference's hover
+   rhythm. Interactive hovers pair this with a slight translateY(-1px)
+   lift (see .hover-lift) for the signature feel. */
 * {
   transition-property: background-color, border-color, color, opacity, box-shadow, transform;
-  transition-duration: 120ms;
+  transition-duration: 160ms;
   transition-timing-function: ease;
 }
 
@@ -312,6 +339,13 @@ textarea:focus-visible,
 @keyframes ui-fade-up {
   from { opacity: 0; transform: translateY(12px); }
   to { opacity: 1; transform: none; }
+}
+
+/* Interactive hover lift — the Relay signature: 1px rise on hover,
+   eased by the global 160ms transition. Apply to clickable cards and
+   rows; never to things that already move on hover. */
+.hover-lift:hover {
+  transform: translateY(-1px);
 }
 
 /* Subtle content swaps and inline reveals */
