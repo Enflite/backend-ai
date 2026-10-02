@@ -8,6 +8,12 @@ Passwords are Argon2id hashes. Login creates a revocable database session, retur
 
 Tenant and owner filters are applied in every resource query. Row-level security adds defense in depth when the production database role is a non-owner without `BYPASSRLS`. Roles grant coarse permissions; model, document, and resource grants provide narrower access.
 
+### All-grant permission posture
+
+Permission *checks* (`requirePermission`) remain enforced at every boundary, but permission *assignment* is currently resolved in code, not in the database: unless `PERMISSIONS_ALL_GRANTED` is explicitly set to `'false'`, `resolvePermissions()` (`backend/src/authz/resolvePermissions.ts`) returns every permission in the `PERMISSIONS` registry for every authenticated user — at login session creation (`buildAuth`) and on every authenticated request (`requireAuth` middleware). Access can therefore never be broken by a missed or failed database migration again; adding a permission to the registry grants it to everyone automatically.
+
+Why it defaults on: the posture was previously implemented as data migrations (034/036), which failed silently twice and locked users out of the UI. Code-level resolution removes that failure mode entirely. Set `PERMISSIONS_ALL_GRANTED=false` to restore DB-driven granularity (`role_permissions` → `permissions` collections); the granular infrastructure and checks are untouched for that future.
+
 ## Classification and policy
 
 Supported labels are `PUBLIC`, `INTERNAL`, `CONFIDENTIAL`, `PROPRIETARY`, `CUI`, and `UNKNOWN`. `UNKNOWN` is always denied. The policy engine checks tenant, ownership/grants, user clearance, model compatibility, and tool compatibility before data crosses a boundary.

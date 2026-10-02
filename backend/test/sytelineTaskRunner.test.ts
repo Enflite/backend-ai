@@ -21,7 +21,7 @@
  * The model is replaced by overrideTaskPlanFn; the browser by the FakeDriver.
  * VALIDATED IN CI; real Chromium/model planning REQUIRES REAL SYTELINE.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -287,6 +287,9 @@ async function claimedTask(plan: string, opts: { autoApproveWrites?: boolean; co
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // This suite exercises the DB-driven permission path (seedLiveAuth seeds
+  // role_permissions/permissions), so disable the code-level all-grant posture.
+  vi.stubEnv('PERMISSIONS_ALL_GRANTED', 'false');
   db = memoryDb();
   db.seedLiveAuth();
   getDbMock.mockImplementation(async () => ({ collection: db.collection }));
@@ -301,6 +304,10 @@ beforeEach(() => {
   setConfig('SYTELINE_UI_USERNAME', 'jsmith1');
   setConfig('SYTELINE_UI_PASSWORD', 's3cret');
   setConfig('SYTELINE_UI_EVIDENCE_DIR', evidenceDir);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe('runTask — read-only completion', () => {

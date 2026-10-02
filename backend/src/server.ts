@@ -369,6 +369,19 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename
           'local Enflite chat, embeddings, and vision models are unavailable.'
       );
     }
+    // Startup diagnostic: provider wiring as booleans only — never the key
+    // or its length. Distinguishes "backend started before the key was
+    // added to .env" (key present: false) from deeper failures.
+    const claudeKeyPresent = config.ANTHROPIC_API_KEY.trim().length > 0;
+    const openaiKeyPresent = config.OPENAI_API_KEY.trim().length > 0;
+    console.log(
+      `Claude provider: configured=${config.CLAUDE_ENABLED && claudeKeyPresent} ` +
+        `(key present: ${claudeKeyPresent}, enabled: ${config.CLAUDE_ENABLED})`
+    );
+    console.log(
+      `OpenAI provider: configured=${config.OPENAI_ENABLED && openaiKeyPresent} ` +
+        `(key present: ${openaiKeyPresent}, enabled: ${config.OPENAI_ENABLED})`
+    );
   } catch (err) {
     server.log.error(err);
     process.exit(1);

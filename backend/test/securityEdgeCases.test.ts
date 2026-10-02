@@ -488,6 +488,10 @@ describe('session expiry and invalid tokens (real requireAuth)', () => {
 
   beforeEach(async () => {
     vi.resetModules();
+    // This suite exercises the DB-driven permission path: the mocks above
+    // seed role_permissions/permissions, so disable the code-level all-grant
+    // posture for these tests.
+    vi.stubEnv('PERMISSIONS_ALL_GRANTED', 'false');
     vi.doUnmock('../src/auth/middleware.js');
     // Re-apply the mongo mock after resetModules
     vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock, tenantOp: tenantOpMock }));
@@ -555,6 +559,10 @@ describe('session expiry and invalid tokens (real requireAuth)', () => {
     expect(req.auth.userId).toBe(auth.userId);
     expect(req.auth.tenantId).toBe(auth.tenantId);
     expect(req.auth.permissions).toEqual(['tool:use']);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 });
 
