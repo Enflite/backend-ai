@@ -35,6 +35,8 @@ export interface SytelineTaskDetail extends SytelineTaskListItem {
   plan: unknown[];
   steps: TaskStepLog[];
   autoApproveWrites: boolean;
+  /** Who asked for the work — creation-time record from the task store. */
+  requesterUserId?: string;
   resultSummary?: string;
   blockedReason?: string;
   conversationId?: string;
