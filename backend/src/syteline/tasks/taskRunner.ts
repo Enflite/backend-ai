@@ -177,6 +177,20 @@ export function authFromSnapshot(task: SytelineTaskDoc): AuthContext {
 }
 
 /**
+ * Minimal requester reference for live auth resolution (the runner only
+ * needs identity + tenant; both SyteLine tasks and flow runs satisfy it).
+ */
+export interface RunnerRequesterRef {
+  requesterUserId: string;
+  tenantId: string;
+  /**
+   * Optional id of the work being run (task id / run id): keeps the
+   * synthetic runner sessionId scoped to the work, as before.
+   */
+  workId?: string;
+}
+
+/**
  * Resolve the requester's LIVE auth context at run time, through the same
  * permission resolution as login (buildAuth). Returns null when the user
  * is gone, deactivated, no longer a member of the task's tenant, or their
@@ -184,16 +198,16 @@ export function authFromSnapshot(task: SytelineTaskDoc): AuthContext {
  * not keep driving the user's SyteLine session after revocation — the
  * runner fails closed on anything but a live `syteline:ui` grant.
  */
-async function liveRequesterAuth(task: SytelineTaskDoc): Promise<AuthContext | null> {
+export async function liveRequesterAuth(ref: RunnerRequesterRef): Promise<AuthContext | null> {
   const db = await getDb();
   const user = await db.collection<{
     _id: string; email: string; passwordHash: string; displayName: string;
     isActive: boolean; clearance: Classification;
-  }>('users').findOne({ _id: task.requesterUserId });
+  }>('users').findOne({ _id: ref.requesterUserId });
   if (!user || user.isActive === false) return null;
   const membership = await db.collection<{ _id: string; userId: string; tenantId: string; roleId: string }>(
     'memberships',
-  ).findOne({ userId: task.requesterUserId, tenantId: task.tenantId });
+  ).findOne({ userId: ref.requesterUserId, tenantId: ref.tenantId });
   if (!membership) return null;
   const [tenant, role] = await Promise.all([
     db.collection<{ _id: string; name: string }>('tenants').findOne({ _id: membership.tenantId }),
@@ -213,7 +227,7 @@ async function liveRequesterAuth(task: SytelineTaskDoc): Promise<AuthContext | n
     },
     row,
   );
-  return { ...base, sessionId: `task-runner:${task._id}` };
+  return { ...base, sessionId: `task-runner:${ref.workId ?? ref.requesterUserId}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +379,11 @@ export async function runTask(
     // Fail closed on LIVE permissions: the requester must still hold
     // syteline:ui at run time (demotion/deactivation after task creation
     // must not keep driving their SyteLine session).
-    const auth = await liveRequesterAuth(task);
+    const auth = await liveRequesterAuth({
+      requesterUserId: task.requesterUserId,
+      tenantId: task.tenantId,
+      workId: task._id,
+    });
     if (!auth || !auth.permissions.includes('syteline:ui')) {
       await blockTask(tenantId, taskId, 'requester-lost-permission');
       await auditTask(task, 'SYTELINE_TASK_BLOCKED', false, {

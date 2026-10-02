@@ -29,6 +29,8 @@ import { retentionRoutes } from './retention/routes.js';
 import { learningRoutes } from './learning/routes.js';
 import { startRetentionScheduler, stopRetentionScheduler } from './retention/scheduler.js';
 import { startTaskRunnerScheduler, stopTaskRunnerScheduler } from './syteline/tasks/taskScheduler.js';
+import { flowRoutes, closeFlowSseStreams } from './flows/routes.js';
+import { startFlowRunnerScheduler, stopFlowRunnerScheduler } from './flows/flowScheduler.js';
 import { recoverIngestionJobs } from './documents/queue.js';
 import { closeDb } from './db/mongo.js';
 
@@ -234,6 +236,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(evalRoutes);
       await api.register(retentionRoutes);
       await api.register(learningRoutes);
+      await api.register(flowRoutes);
     },
     { prefix: '/api/v1' }
   );
@@ -251,6 +254,13 @@ export async function buildServer(): Promise<FastifyInstance> {
   // The timer is unref'd and sweeps never overlap.
   startTaskRunnerScheduler();
 
+  // Flows platform runner (ADR-022): in-process poll scheduler that claims
+  // `queued` flow runs and executes their frozen version definitions.
+  // Fail-closed behind FLOW_RUNNER_ENABLED (default false).
+  // Started here so it runs in every serving process; stopped on preClose.
+  // The timer is unref'd and sweeps never overlap.
+  startFlowRunnerScheduler();
+
   // Root health endpoints
   await fastify.register(healthRoutes);
   // Prometheus exposition (gated by METRICS_PUBLIC; see observability/metrics.ts)
@@ -260,8 +270,10 @@ export async function buildServer(): Promise<FastifyInstance> {
   // explicitly so a client holding a stream open cannot stall shutdown.
   fastify.addHook('preClose', async () => {
     closeActiveSseStreams();
+    closeFlowSseStreams();
     stopRetentionScheduler();
     stopTaskRunnerScheduler();
+    stopFlowRunnerScheduler();
   });
 
   return fastify;

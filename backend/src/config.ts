@@ -356,6 +356,29 @@ const envSchema = z.object({
   // Max tasks claimed per scheduler sweep (bounds one tick's work).
   SYTELINE_TASK_RUNNER_SWEEP_LIMIT: z.coerce.number().int().min(1).max(100).default(10),
   // ---------------------------------------------------------------------------
+  // Flows platform (ADR-022): deterministic versioned pipelines executed by
+  // the server-side flow runner. DISABLED BY DEFAULT: FLOWS_ENABLED=false is
+  // the fail-closed kill-switch — when off, every /flows route returns 403
+  // FEATURE_DISABLED and no runs execute.
+  // ---------------------------------------------------------------------------
+  FLOWS_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(false),
+  // In-process flow-run scheduler (claim queued runs → execute). Fail-closed
+  // behind this flag (default false): when off, sweeps are no-ops and runs
+  // wait in `queued`.
+  FLOW_RUNNER_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(false),
+  // Poll interval for the in-process flow-runner scheduler.
+  FLOW_RUNNER_INTERVAL_MS: z.coerce.number().int().min(1000).max(3600000).default(15000),
+  // Default per-step timeout for tool/subflow/agent steps (overridable per step).
+  FLOW_STEP_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(30000),
+  // Bound for inline (?sync=true) run execution via POST /flows/:name/runs.
+  FLOW_SYNC_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(60000),
+  // Max runs claimed per scheduler sweep (bounds one tick's work).
+  FLOW_RUNNER_SWEEP_LIMIT: z.coerce.number().int().min(1).max(100).default(10),
+  // ---------------------------------------------------------------------------
   // Enterprise OIDC login (Phase 5b): Authorization Code + PKCE as the
   // primary enterprise login path, alongside password login. When
   // OIDC_ENABLED, the required fields are validated at boot (fail fast);

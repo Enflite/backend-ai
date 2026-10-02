@@ -40,6 +40,8 @@ export const PERMISSIONS = [
   'syteline:read',
   'syteline:forms',
   'syteline:ui',
+  'flows:manage',
+  'flows:run',
   'repo:read',
   'repo:manage',
   'audit:read',
@@ -91,6 +93,12 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     // UI automation drives SyteLine as the user: privileged, granted here
     // (and seeded by migration 031) but never to User or Developer roles.
     'syteline:ui',
+    // Flows: deterministic versioned pipelines (ADR-022). Authoring flows
+    // (flows:manage) and running them (flows:run) are privileged: a flow
+    // executes tools as its requester, so both stay Admin / AI Admin only
+    // (seeded by migration 033).
+    'flows:manage',
+    'flows:run',
     'feedback:curate',
     'finetune:manage',
     'repo:read',
