@@ -49,11 +49,10 @@ Endpoint contract: `POST` `{ "model", "query", "documents": [text, ...] }` and
 expect `{ "results": [{ "index", "relevance_score" }] }` (Cohere-rerank
 compatible; a `score` field is accepted as an alias). Only the query text and
 the already permission-filtered chunk texts are sent — no credentials, tenant
-ids, user ids, or `Authorization` header. The endpoint origin must be listed in
-`AI_PROVIDER_ALLOWED_ORIGINS`, the same egress allowlist the AI gateway
-enforces.
+ids, user ids, or `Authorization` header. The endpoint is operator-configured
+(`RERANKER_URL`) — no allowlist gate.
 
-Fail-open: a timeout, HTTP error, malformed response, allowlist denial, or
+Fail-open: a timeout, HTTP error, malformed response, or
 missing URL never fails retrieval — the hybrid order is returned unchanged, a
 `reranker_fallbacks_total{reason}` metric is recorded, and a warning is logged
 (reason only, no query or chunk content). See ADR-011 for the rationale.

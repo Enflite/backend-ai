@@ -289,7 +289,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   // This suite exercises the DB-driven permission path (seedLiveAuth seeds
   // role_permissions/permissions), so disable the code-level all-grant posture.
-  vi.stubEnv('PERMISSIONS_ALL_GRANTED', 'false');
+  // PERMISSIONS_ALL_GRANTED lives in the zod schema (config.ts), parsed once
+  // at import — mutate the config object directly (same setConfig pattern as
+  // the other flags below); every beforeEach re-pins it, so this is idempotent.
+  setConfig('PERMISSIONS_ALL_GRANTED', false);
   db = memoryDb();
   db.seedLiveAuth();
   getDbMock.mockImplementation(async () => ({ collection: db.collection }));

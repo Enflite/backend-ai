@@ -6,7 +6,7 @@
  * provider factory prefers `model.endpoint` over the configured
  * `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` — so an operator pointing the
  * base URL at a proxy got seeds that silently ignored their own config.
- * Seeds now derive the endpoint from config (still allowlisted).
+ * Seeds now derive the endpoint from config.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -17,7 +17,7 @@ vi.mock('../src/db/mongo.js', () => ({
   tenantOp: vi.fn(async (_tenantId: string, cb: (db: any) => Promise<any>) => cb(await getDbMock())),
 }));
 
-// Claude configured, pointing at a proxy that IS allowlisted.
+// Claude configured, pointing at a proxy.
 vi.mock('../src/config.js', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../src/config.js')>();
   return {
@@ -27,7 +27,6 @@ vi.mock('../src/config.js', async (importOriginal) => {
       ANTHROPIC_API_KEY: 'test-key',
       CLAUDE_ENABLED: true,
       ANTHROPIC_BASE_URL: 'https://proxy.example.test',
-      AI_PROVIDER_ALLOWED_ORIGINS: 'https://proxy.example.test,http://localhost:11434',
     },
   };
 });

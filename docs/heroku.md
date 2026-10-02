@@ -116,8 +116,7 @@ heroku config:set EMBEDDING_PROVIDER=openai-compatible \
   --app enflite-ai-api
 ```
 
-`https://api.openai.com` is already on the default `AI_PROVIDER_ALLOWED_ORIGINS`,
-so no allowlist change is needed. Warning: switching embedding providers on an
+Warning: switching embedding providers on an
 existing deployment invalidates previously ingested chunks — re-ingest documents
 afterwards.
 

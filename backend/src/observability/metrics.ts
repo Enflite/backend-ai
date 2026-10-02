@@ -204,7 +204,7 @@ export const retrievalQueryDuration = metricsRegistry.register(
 /**
  * Cross-encoder reranker fallbacks. Every fallback returns the hybrid order
  * unchanged: retrieval must never hard-fail because the reranker endpoint is
- * down. `reason`: not_configured | not_allowed | timeout | http_error |
+ * down. `reason`: not_configured | timeout | http_error |
  * invalid_response.
  */
 export const rerankerFallbacksTotal = metricsRegistry.register(
@@ -273,7 +273,6 @@ export function recordRetrieval(outcome: RetrievalOutcome, durationSeconds: numb
 
 export type RerankerFallbackReason =
   | 'not_configured'
-  | 'not_allowed'
   | 'timeout'
   | 'http_error'
   | 'invalid_response';

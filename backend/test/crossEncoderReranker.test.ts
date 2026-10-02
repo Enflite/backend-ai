@@ -20,7 +20,7 @@ import { config } from '../src/config.js';
 import { rerankerFallbacksTotal, resetMetrics } from '../src/observability/metrics.js';
 import type { Permission } from '../src/authz/permissions.js';
 
-const ALLOWED_URL = 'http://localhost:8000/rerank'; // on AI_PROVIDER_ALLOWED_ORIGINS
+const ALLOWED_URL = 'http://localhost:8000/rerank'; // operator-configured scoring endpoint
 
 function makeChunk(chunkId: string, score: number, text = `text-${chunkId}`): AuthorizedChunk {
   return {
@@ -229,16 +229,6 @@ describe('cross-encoder reranker: fail-open fallbacks', () => {
       expect(out.map((chunk) => chunk.chunkId)).toEqual(['a']);
     }
     expect(fallbackSeriesCount('invalid_response')).toBe(4);
-  });
-
-  it('never calls an endpoint whose origin is outside the egress allowlist', async () => {
-    const { calls, fetchImpl } = capturingFetch(okResponse({ results: [{ index: 0, relevance_score: 0.9 }] }));
-    const reranker = createCrossEncoderReranker({ url: 'http://evil.example.com/rerank', fetchImpl });
-    const chunks = [makeChunk('a', 0.9), makeChunk('b', 0.5)];
-    const out = await reranker.rerank('q', chunks);
-    expect(out.map((chunk) => chunk.chunkId)).toEqual(['a', 'b']);
-    expect(calls).toHaveLength(0);
-    expect(fallbackSeriesCount('not_allowed')).toBe(1);
   });
 
   it('falls back without calling anything when no URL is configured', async () => {

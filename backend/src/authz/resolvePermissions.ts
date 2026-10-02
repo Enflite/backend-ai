@@ -1,4 +1,5 @@
 import type { Db } from 'mongodb';
+import { config } from '../config.js';
 import { PERMISSIONS, type Permission } from './permissions.js';
 
 /**
@@ -6,9 +7,10 @@ import { PERMISSIONS, type Permission } from './permissions.js';
  *
  * All-grant posture (Jake, 2026-10-02): access must never depend on a
  * database migration again. Unless PERMISSIONS_ALL_GRANTED is explicitly
- * set to 'false', every authenticated user receives every permission in
- * the PERMISSIONS registry — resolved in code, with no database lookup.
- * New permissions added to the registry are granted automatically.
+ * set to 'false' (config.ts, default true), every authenticated user
+ * receives every permission in the PERMISSIONS registry — resolved in
+ * code, with no database lookup. New permissions added to the registry
+ * are granted automatically.
  *
  * Set PERMISSIONS_ALL_GRANTED=false to restore DB-driven granularity
  * (role_permissions → permissions collections), e.g. if per-role
@@ -16,7 +18,7 @@ import { PERMISSIONS, type Permission } from './permissions.js';
  * (checks, migrations 034/036 backfill) remains intact for that day.
  */
 export async function resolvePermissions(db: Db, roleId: string): Promise<Permission[]> {
-  if (process.env.PERMISSIONS_ALL_GRANTED !== 'false') {
+  if (config.PERMISSIONS_ALL_GRANTED) {
     return [...PERMISSIONS];
   }
   const rolePermissions = await db

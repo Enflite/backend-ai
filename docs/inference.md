@@ -99,13 +99,12 @@ Windows-first deployments.
   text chat model. The text default (`llama3.1:8b`) is text-only and never
   receives image payloads; a missing/unusable vision model fails the turn
   closed rather than silently answering blind. See ADR-017.
-- **Egress allowlist.** Model endpoints are validated against
-  `AI_PROVIDER_ALLOWED_ORIGINS` twice: at model *registration* time
-  (`assertEndpointAllowed`, exported from the gateway for the admin API) and
-  at request time before any fetch. A model can never be registered with —
-  or stream from — an endpoint outside the allowlist. No arbitrary URLs,
-  ever. The default allowlist already includes both Ollama origins
-  (`http://localhost:11434`, `http://ollama:11434`).
+- **Model endpoints are operator-controlled.** Endpoints come from the model
+  registry (admin API) and provider base-URL config — there is no egress
+  allowlist gate on model endpoints (removed 2026-10-02; the gateway's
+  authorization boundary is model approval, classification policy, and
+  tenant grants). Model *sources* (artifact URLs) are still
+  origin-allowlisted via `MODEL_SOURCE_ALLOWLIST`.
 - **Failover, not retry.** Each model record may name a `fallback_model_id`.
   On upstream failure the gateway fails over once to the fallback, which
   must independently satisfy approval, enablement, tenant, classification,
@@ -285,9 +284,8 @@ REGISTERED → DOWNLOADING → VALIDATING → EVALUATING → PENDING_APPROVAL
    (see the learning-flywheel docs). The admin API's pull endpoint can do
    this too (allowlisted names only, `ALLOW_DEV_PROVIDERS` still required,
    audited).
-2. Register it: `POST /admin/models` with provider `ollama`, endpoint
-   (must be in `AI_PROVIDER_ALLOWED_ORIGINS` — both Ollama origins are in
-   the default), `source` (artifact URL, origin-allowlisted via
+2. Register it: `POST /admin/models` with provider `ollama`, endpoint,
+   `source` (artifact URL, origin-allowlisted via
    `MODEL_SOURCE_ALLOWLIST`), `sha256` (pinned), and `license`. It enters at
    `REGISTERED` and serves no traffic.
 3. Walk it through `DOWNLOADING → VALIDATING → EVALUATING →
@@ -317,7 +315,6 @@ REGISTERED → DOWNLOADING → VALIDATING → EVALUATING → PENDING_APPROVAL
 | `OLLAMA_EMBEDDING_MODEL` / `OLLAMA_EMBEDDING_DIMENSIONS` | Embedding model wiring | `nomic-embed-text` / `768` |
 | `VLLM_BASE_URL` | Private vLLM OpenAI-compatible base URL (high-throughput option) | `http://vllm:8000/v1` |
 | `VLLM_API_KEY` | Bearer token for vLLM (if required) | empty |
-| `AI_PROVIDER_ALLOWED_ORIGINS` | Egress allowlist for model endpoints | `http://localhost:8000,http://vllm:8000,http://localhost:11434,http://ollama:11434` |
 | `AI_REQUEST_TIMEOUT_MS` | Default per-request inference timeout | `120000` |
 | `PROMPT_CACHE_ENABLED` | Deterministic prompt-prefix contract + prefix telemetry (vLLM automatic prefix caching) | `true` |
 | `EMBEDDING_PROVIDER` | `ollama` \| `openai-compatible` | `ollama` |

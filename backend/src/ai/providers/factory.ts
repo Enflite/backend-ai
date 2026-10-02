@@ -8,8 +8,7 @@
  *
  * Security-boundary note: the factory makes NO trust decisions. The AI
  * Gateway authorizes every call BEFORE a provider is constructed — model
- * approval, endpoint allowlist (AI_PROVIDER_ALLOWED_ORIGINS),
- * classification policy, tenant grants, DLP. Ollama is the primary
+ * approval, classification policy, tenant grants, DLP. Ollama is the primary
  * inference provider (Windows-native, GPU-capable) and needs no special
  * gate: the gateway's authorization is the boundary, not the provider
  * binary. vLLM remains a supported provider for high-throughput

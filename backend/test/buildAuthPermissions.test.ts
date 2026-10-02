@@ -4,7 +4,7 @@
  *
  * VALIDATED IN CI with mocks; no live infrastructure.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { PERMISSIONS } from '../src/authz/permissions.js';
 
 const { getDbMock, tenantOpMock } = vi.hoisted(() => {
@@ -25,6 +25,7 @@ vi.mock('../src/auth/jwt.js', () => ({ verifyToken }));
 
 import { buildAuth } from '../src/auth/routes.js';
 import { requireAuth } from '../src/auth/middleware.js';
+import { config } from '../src/config.js';
 
 // Mock collections registry
 const mockCollections: Record<string, any> = {};
@@ -49,9 +50,11 @@ const USER = {
 const MEMBERSHIP = { tenantId: 'tenant-1', roleId: 'role-admin', roleName: 'Admin' };
 
 describe('buildAuth permission resolution', () => {
-  const OLD = process.env.PERMISSIONS_ALL_GRANTED;
   beforeEach(() => {
-    delete process.env.PERMISSIONS_ALL_GRANTED;
+    // PERMISSIONS_ALL_GRANTED lives in the zod schema (config.ts), parsed
+    // once at import — pin it via direct mutation; the 'false' tests below
+    // override per-test.
+    (config as Record<string, unknown>).PERMISSIONS_ALL_GRANTED = true;
     for (const c of Object.values(mockCollections)) {
       c.find.mockClear();
       c.findOne.mockClear();
@@ -59,10 +62,6 @@ describe('buildAuth permission resolution', () => {
     getDbMock.mockReset().mockImplementation(async () => ({
       collection: (name: string) => getMockCollection(name),
     }));
-  });
-  afterEach(() => {
-    if (OLD === undefined) delete process.env.PERMISSIONS_ALL_GRANTED;
-    else process.env.PERMISSIONS_ALL_GRANTED = OLD;
   });
 
   it('grants the full registry at login by default (no DB permission lookup)', async () => {
@@ -76,7 +75,7 @@ describe('buildAuth permission resolution', () => {
   });
 
   it('restores the DB-driven set when PERMISSIONS_ALL_GRANTED=false', async () => {
-    process.env.PERMISSIONS_ALL_GRANTED = 'false';
+    (config as Record<string, unknown>).PERMISSIONS_ALL_GRANTED = false;
     const rp = getMockCollection('role_permissions');
     rp.find.mockImplementation(() => ({
       toArray: vi.fn().mockResolvedValue([{ _id: 'rp1', permissionId: 'p1' }]),
@@ -91,9 +90,8 @@ describe('buildAuth permission resolution', () => {
 });
 
 describe('requireAuth per-request permission resolution', () => {
-  const OLD = process.env.PERMISSIONS_ALL_GRANTED;
   beforeEach(() => {
-    delete process.env.PERMISSIONS_ALL_GRANTED;
+    (config as Record<string, unknown>).PERMISSIONS_ALL_GRANTED = true;
     for (const c of Object.values(mockCollections)) {
       c.find.mockClear();
       c.findOne.mockClear();
@@ -113,10 +111,6 @@ describe('requireAuth per-request permission resolution', () => {
       collection: (name: string) => getMockCollection(name),
     }));
   });
-  afterEach(() => {
-    if (OLD === undefined) delete process.env.PERMISSIONS_ALL_GRANTED;
-    else process.env.PERMISSIONS_ALL_GRANTED = OLD;
-  });
 
   it('resolves the full registry per request by default (sorted, no DB permission lookup)', async () => {
     const req: any = { headers: { authorization: 'Bearer token' }, requestId: 'r1', ip: '127.0.0.1' };
@@ -128,7 +122,7 @@ describe('requireAuth per-request permission resolution', () => {
   });
 
   it('restores the DB-driven set per request when PERMISSIONS_ALL_GRANTED=false', async () => {
-    process.env.PERMISSIONS_ALL_GRANTED = 'false';
+    (config as Record<string, unknown>).PERMISSIONS_ALL_GRANTED = false;
     const rp = getMockCollection('role_permissions');
     rp.find.mockImplementation(() => ({
       toArray: vi.fn().mockResolvedValue([{ _id: 'rp1', permissionId: 'p1' }]),

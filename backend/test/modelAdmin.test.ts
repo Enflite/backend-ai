@@ -368,14 +368,15 @@ describe('POST /admin/models (registration)', () => {
     await fastify.close();
   });
 
-  it('rejects endpoints outside the server allowlist — no arbitrary egress', async () => {
+  it('accepts arbitrary model endpoints — no egress allowlist gate', async () => {
+    // The AI_PROVIDER_ALLOWED_ORIGINS gate was removed (Jake, 2026-10-02):
+    // model endpoints come from the operator-controlled registry.
     const fastify = await app();
     const res = await fastify.inject({
-      method: 'POST', url: '/admin/models', payload: registrationBody({ endpoint: 'http://evil.test/v1' }),
+      method: 'POST', url: '/admin/models', payload: registrationBody({ endpoint: 'http://proxy.internal.example/v1' }),
     });
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error.code).toBe('MODEL_ENDPOINT_DENIED');
-    expect(getMockCollection('models').insertOne).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(201);
+    expect(getMockCollection('models').insertOne).toHaveBeenCalled();
     await fastify.close();
   });
 
