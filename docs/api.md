@@ -306,19 +306,22 @@ Request lifecycle (the kanban data model for form work):
 `requested → in_progress → blocked` and `(any non-terminal) →
 cancelled`. `awaiting_review` is the agent's terminal state (work done,
 PR open, completion report attached); `completed` is reached only when
-a human merges the PR. Backup-first is an intake gate: the request
-requires both FormSync originals (`originals.trn`, `originals.prd`);
-missing originals or TRN/PRD drift mark the request `blocked` with an
-enumerated `blockedReason` (`missing-formsync-originals`,
-`trn-prd-drift`, `missing-github-token`, `invalid-requirements`,
-`build-check-failed`). TRN import, UET setup, staging checks,
+a human merges the PR. The request carries Jake's five-input contract
+(current form `.xml`, IDO-properties CSV, SQL-columns CSV, instruction
+list, optional attachments — multipart or JSON-inline); the SOP
+knowledge is baked into the agent, not re-explained per request.
+Backup-first is enforced by the agent's baked-in SOP: input 1 is the
+TRN original, and the production FormSync export arrives as an
+attachment (`*.production.original.xml`) or the request blocks with
+`missing-production-original`; TRN/PRD drift blocks with
+`trn-prd-drift`. TRN import, UET setup, staging checks,
 launch-to-production, and rollback stay numbered human runbook steps
 in the generated implementation plan — the API automates the build,
 not the go-live.
 
 | Method | Path | Auth / Permission | Purpose |
 |---|---|---|---|
-| POST | `/form-customizations` | auth + `syteline:forms` (10/min) | Create a request: `{ formName, title, requirements[], originals: { trn, prd }, requestedBy? }`; `202 { id, status: 'requested' }` — rejected (`400 FORM_SYNC_ORIGINALS_MISSING`) unless both FormSync originals are supplied |
+| POST | `/form-customizations` | auth + `syteline:forms` (10/min) | Create a request from the five-input contract: multipart file parts (`formXml`, `idoPropertiesCsv`, `sqlColumnsCsv`, `attachments[]`) or JSON-inline equivalents, plus `formName`, `title`, `instructions[]`; `202 { id, status: 'requested' }` — per-part validation (`400 VALIDATION_ERROR` names the failing part) |
 | GET | `/form-customizations/:id` | auth + `syteline:forms` | Full request record: status, step log, `resultSummary` / `blockedReason` + `blockedDetail`, and on `awaiting_review` the `evidence` completion report (`repoUrl`, `prUrl`, `<Form>.xml` and deck artifacts, recorded originals with SHA-256 prefix, `openItems`, `assumptions`) |
 | GET | `/form-customizations` | auth + `syteline:forms` | List the requester's (or, for admins, the tenant's) requests; optional `status` filter — the kanban-board query for form work |
 | POST | `/form-customizations/:id/cancel` | auth + `syteline:forms` | Cancel a request (ends work in flight); requester or admin only; terminal states return `409 REQUEST_ALREADY_TERMINAL` |

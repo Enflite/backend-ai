@@ -21,12 +21,66 @@ merge. Design: ADR-021.
 ## What it is
 
 The Runtype-style dispatch for form work: typed REST endpoints that
-turn `{ formName, requirements }` into a tracked unit of work
-executed by a server-side agent, reporting back with a completion
-report and the GitHub PR link. It drives the same workflow as
+turn five inputs into a tracked unit of work executed by a server-side
+agent, reporting back with a completion report and the GitHub PR link.
+It drives the same workflow as
 [`Enflite/Form-Project-Templates`](https://github.com/Enflite/Form-Project-Templates)
 (the template the team already uses with Claude), behind the
 `syteline:forms` permission.
+
+### The five inputs (Jake, 2026-10-02)
+
+The requester supplies **exactly** these five inputs — nothing else.
+The SOP knowledge lives in the agent (see "What the AI already
+knows"), not in the request:
+
+1. **The current form `.xml`** — file upload or inline content.
+   This is the TRN export: the before-anything baseline the agent
+   builds `<Form>.xml` from.
+2. **IDO properties as a CSV** — the IDO's properties (names, types,
+   alias prefix), feeding the UET design tables and the build.
+3. **SQL columns as a CSV** — the backing SQL Table's columns, so the
+   agent knows what exists before designing `Uf_ENF_*` fields.
+4. **A list of instructions** — the actual customization
+   requirements: add field / relabel / resize. Each item should be
+   specific: field type, label, tab, position — the
+   mockup-or-spreadsheet rule applies to what goes in these strings.
+5. **Other information / attachments** — free-form context files the
+   requester wants the AI to have (mockup screenshots, spreadsheets,
+   notes). A `*.production.original.xml` attachment here is treated
+   as the production FormSync original for the backup-first check.
+
+### What the AI already knows (baked into the agent)
+
+The requester never re-explains the Form-Project-Templates SOP — it
+is part of the agent's knowledge/planner prompt. The agent knows:
+
+- **Procedures 01–07**: start a project from the template (01), UET
+  setup (02), FormSync backup/import (03), UET field confirmation and
+  staging checks (04), launch to production (05), rollback (06), new
+  SQL Table + IDO (07) — plus the troubleshooting notes.
+- **UET-only `Uf_ENF_*` field naming** on the existing IDO/SQL
+  Tables; a new SQL Table + IDO only when the feature needs its own
+  record.
+- **TRN-first development**: everything is built from the TRN
+  original; production is a comparison input and a rollback copy.
+- **Backup-first**: the TRN and production FormSync exports are
+  recorded unchanged before anything is built — they are the rollback
+  copies.
+- **Byte preservation**: UTF-8 with BOM, CRLF line endings — never
+  open and re-save an export in an editor.
+- **Deterministic rebuild**: `<Form>.xml` is always rebuilt from the
+  original by the build script (never hand-edited); the rebuild check
+  must pass.
+- **Purple highlighting** on every change in the built XML.
+- **TRN/PRD drift stops the build**: when the two originals differ,
+  production has local changes — stop and ask, don't guess.
+- **Property patterns**: relabels are label-only; component Type /
+  Read-Only / Inline List changes don't survive re-import and become
+  manual form-design steps in the implementation plan.
+
+So the five inputs above are the whole request: the agent applies
+this knowledge automatically.
 
 What the API automates (the *build* work):
 
@@ -97,24 +151,48 @@ Lifecycle (ADR-021 §2):
 
 ### 1. Create — `POST /api/v1/form-customizations`
 
+Two submission shapes, both accepted. **Multipart** (file parts +
+text fields) is preferred for large inputs; **JSON** takes the same
+content inline. The backend already registers Fastify multipart in
+`server.ts`; this endpoint raises its file limits for the XML/CSV
+parts (see the per-part table).
+
+**Multipart example** (`multipart/form-data`):
+
 ```bash
 curl -X POST https://api.example.com/api/v1/form-customizations \
   -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "formName": "Incidents",
-    "title": "Date of Manufacture and Product Code",
-    "requirements": [
-      "Add a new date field \"Date of Manufacture\" to the General tab, to the right of Item Description",
-      "Add a new text field \"Product Code\" to the General tab, under Date of Manufacture",
-      "Relabel \"Notes\" to \"Internal Notes\" on the Comments tab (label only)"
-    ],
-    "originals": {
-      "trn": "document:01J9…",
-      "prd": "document:01J9…"
-    },
-    "requestedBy": "Jane Smith / Engineering"
-  }'
+  -F "formName=Incidents" \
+  -F "title=Date of Manufacture and Product Code" \
+  -F 'instructions=["Add a new date field \"Date of Manufacture\" to the General tab, to the right of Item Description","Add a new text field \"Product Code\" to the General tab, under Date of Manufacture","Relabel \"Notes\" to \"Internal Notes\" on the Comments tab (label only)"]' \
+  -F "formXml=@Incidents.trn.original.xml" \
+  -F "idoPropertiesCsv=@Incidents_IDO_properties.csv" \
+  -F "sqlColumnsCsv=@Incidents_sql_columns.csv" \
+  -F "attachments[]=@Incidents.production.original.xml" \
+  -F "attachments[]=@mockup.png" \
+  -F "requestedBy=Jane Smith / Engineering"
+```
+
+**JSON example** (`application/json`) — same five inputs inline:
+
+```json
+{
+  "formName": "Incidents",
+  "title": "Date of Manufacture and Product Code",
+  "instructions": [
+    "Add a new date field \"Date of Manufacture\" to the General tab, to the right of Item Description",
+    "Add a new text field \"Product Code\" to the General tab, under Date of Manufacture",
+    "Relabel \"Notes\" to \"Internal Notes\" on the Comments tab (label only)"
+  ],
+  "formXml": "<form>…current form XML content…</form>",
+  "idoPropertiesCsv": "Property,Type,Alias\n…",
+  "sqlColumnsCsv": "Column,DataType,Nullable\n…",
+  "attachments": [
+    { "filename": "Incidents.production.original.xml", "content": "<form>…production export…</form>" },
+    { "filename": "mockup.png", "contentBase64": "iVBORw0KGgo…" }
+  ],
+  "requestedBy": "Jane Smith / Engineering"
+}
 ```
 
 Response (`202 Accepted`):
@@ -128,21 +206,33 @@ Response (`202 Accepted`):
 }
 ```
 
-**Backup-first is an intake gate, not a suggestion.** The request is
-rejected (`400 FORM_SYNC_ORIGINALS_MISSING`, naming which export is
-absent) unless **both** originals are supplied: the FormSync export
-of the current form from TRN and from production. These are the
-rollback copies the agent records in `original/` unchanged (UTF-8
-with BOM, CRLF — never opened and re-saved). If you don't have them
-yet, export them from FormSync first (template procedure 3), upload
-each via `POST /api/v1/documents`, and pass the document ids as
-`originals.trn` / `originals.prd`.
+#### Per-part validation rules and size limits
 
-Validation on create: `formName` matches `^[A-Za-z0-9_]+$`
-(the SyteLine form name); `title` 1–200 chars; `requirements` is a
-non-empty array of 1–500-char strings (be specific: field type,
-label, tab, position — the mockup-or-spreadsheet rule applies to
-what you put in these strings); `requestedBy` optional, 1–200 chars.
+Limits mirror existing repo conventions (the documents upload cap,
+the `codeFiles` ≤ 20 files / ≤ 200 KB rule); the code PR implements
+them. Failed validation → `400 VALIDATION_ERROR` with `details`
+naming the failing part.
+
+| Input | Part name | Rules |
+|---|---|---|
+| Current form `.xml` | `formXml` | Exactly one (required); `.xml` extension; ≤ 10 MB; must parse as XML and contain the form definition; the form name in the XML must match the request's `formName` |
+| IDO properties CSV | `idoPropertiesCsv` | Exactly one (required); `.csv`; ≤ 5 MB; UTF-8; must have a header row with a property-name-like first column |
+| SQL columns CSV | `sqlColumnsCsv` | Exactly one (required); `.csv`; ≤ 5 MB; UTF-8; must have a header row with a column-name-like first column |
+| Instructions | `instructions` | Required; non-empty array (multipart: JSON array or newline-delimited text field); 1–100 items; each 1–500 chars; be specific — field type, label, tab, position |
+| Attachments | `attachments[]` | Optional; 0–20 files; ≤ 200 KB each; common formats (images, CSV, spreadsheets, PDFs). A `*.production.original.xml` attachment is treated as the production FormSync original. Multipart file parts pass through the same malware boundary as document uploads — a quarantine marks the request `blocked` with `blockedReason: 'attachment-quarantined'` |
+| `formName` | (text field) | Required; SyteLine form name; `^[A-Za-z0-9_]+$` |
+| `title` | (text field) | Required; 1–200 chars |
+| `requestedBy` | (text field) | Optional; 1–200 chars |
+
+**Backup-first still holds — enforced by the agent's baked-in
+knowledge.** The current form `.xml` (input 1) is the TRN original.
+The agent also needs the production FormSync export before it builds
+anything — the rollback copies. If the requester supplied it as an
+attachment (input 5), the agent records it in `original/` unchanged
+and compares SHA-256 against TRN per template procedure 3. If it is
+absent, the request is created but the runner marks it `blocked` with
+`blockedReason: 'missing-production-original'`. The agent never
+starts building until both originals are recorded.
 
 ### 2. Status — `GET /api/v1/form-customizations/:id`
 
@@ -188,6 +278,11 @@ Response at `awaiting_review` (`200`) — the completion report:
     "prUrl": "https://github.com/Enflite/Incidents/pull/3",
     "formXml": "Incidents.xml",
     "deck": "plan/Incidents_Implementation_Plan.pptx",
+    "inputs": {
+      "formXml": "input/Incidents.trn.original.xml",
+      "idoPropertiesCsv": "input/Incidents_IDO_properties.csv",
+      "sqlColumnsCsv": "input/Incidents_sql_columns.csv"
+    },
     "originals": {
       "trn": "original/Incidents.trn.original.xml",
       "prd": "original/Incidents.production.original.xml",
@@ -233,10 +328,12 @@ be cancelled (`409 REQUEST_ALREADY_TERMINAL`).
 
 | `blockedReason` | What happened | What to do |
 |---|---|---|
-| `missing-formsync-originals` | TRN and/or production export not recorded | Export both from FormSync and create a new request with them (or re-run intake once supplied) |
+| `missing-current-form-xml` | Input 1 (the current form `.xml`) was not supplied or failed validation | Supply the TRN FormSync export as `formXml` |
+| `missing-production-original` | No production FormSync export was supplied, so the agent cannot complete the backup-first check | Export the same form from production FormSync and attach it (`*.production.original.xml`) |
 | `trn-prd-drift` | TRN and production originals differ — production has local changes | Resolve the drift: build from the production export per template procedure 3, or confirm TRN is authoritative; create a follow-up request |
 | `missing-github-token` | No GitHub token configured; the agent cannot create the repo / open the PR | Set `GITHUB_TOKEN` and retry the request |
-| `invalid-requirements` | The requirements could not be turned into a plan (e.g. the form name isn't in the TRN export) | Restate the requirements more concretely (field type, label, tab, position) and create a new request |
+| `invalid-requirements` | The instructions could not be turned into a plan (e.g. the form name isn't in the supplied form XML) | Restate the instructions more concretely (field type, label, tab, position) and create a new request |
+| `attachment-quarantined` | An uploaded part tripped the malware boundary | Remove or replace the flagged attachment and create a new request |
 | `build-check-failed` | The build script's deterministic-rebuild check failed | Read the step log; this indicates the tooling, not the request — file it with the backend team |
 
 When blocked, the record is the report: which template step failed,
@@ -291,27 +388,53 @@ except as noted. Error shape:
 
 ### `POST /form-customizations`
 
-Creates a form-customization request. `202` on acceptance.
+Creates a form-customization request from Jake's five-input contract.
+`202` on acceptance. Two content types accepted.
 
-Request body (`application/json`):
+**`multipart/form-data`** — preferred for large inputs. Text fields:
 
 | Field | Type | Required | Constraints |
 |---|---|---|---|
 | `formName` | string | yes | SyteLine form name; `^[A-Za-z0-9_]+$` |
 | `title` | string | yes | 1–200 chars |
-| `requirements` | string[] | yes | Non-empty; each 1–500 chars |
-| `originals.trn` | string | yes | Document id (`document:<id>`) or repo path of the TRN FormSync export |
-| `originals.prd` | string | yes | Document id (`document:<id>`) or repo path of the production FormSync export |
+| `instructions` | string | yes | JSON array or newline-delimited; 1–100 items, each 1–500 chars |
 | `requestedBy` | string | no | 1–200 chars |
+
+File parts:
+
+| Part | Type | Required | Constraints |
+|---|---|---|---|
+| `formXml` | file | yes | `.xml`; ≤ 10 MB; parses as XML; form name in XML matches `formName` |
+| `idoPropertiesCsv` | file | yes | `.csv`; ≤ 5 MB; UTF-8; header row with property-name-like first column |
+| `sqlColumnsCsv` | file | yes | `.csv`; ≤ 5 MB; UTF-8; header row with column-name-like first column |
+| `attachments[]` | file[] | no | 0–20 files; ≤ 200 KB each; a `*.production.original.xml` is the production FormSync original |
+
+**`application/json`** — the same contract inline:
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `formName` | string | yes | `^[A-Za-z0-9_]+$` |
+| `title` | string | yes | 1–200 chars |
+| `instructions` | string[] | yes | Non-empty; 1–100 items; each 1–500 chars |
+| `formXml` | string | yes | XML content as a string (≤ 10 MB); form name in XML matches `formName` |
+| `idoPropertiesCsv` | string | yes | CSV content as a string (≤ 5 MB); header row required |
+| `sqlColumnsCsv` | string | yes | CSV content as a string (≤ 5 MB); header row required |
+| `attachments` | `{ filename, content }` / `{ filename, contentBase64 }` [] | no | 0–20 items; ≤ 200 KB content each |
+| `requestedBy` | string | no | 1–200 chars |
+
+Multipart parts are scanned through the same malware boundary as
+document uploads; a quarantine yields `blockedReason:
+'attachment-quarantined'`.
 
 Responses:
 
 | Code | Meaning | Body |
 |---|---|---|
 | `202` | Accepted | `{ id, status: "requested", formName, createdAt }` |
-| `400` | Validation failed | `error.code` ∈ `VALIDATION_ERROR`, `FORM_SYNC_ORIGINALS_MISSING` (details name which export is absent), `INVALID_FORM_NAME` |
+| `400` | Validation failed | `error.code` ∈ `VALIDATION_ERROR` (`details` names the failing part), `INVALID_FORM_NAME`, `MULTIPART_LIMIT_EXCEEDED` |
 | `401` / `403` | Unauthenticated / missing `syteline:forms` | `error.code` ∈ `UNAUTHENTICATED`, `FORBIDDEN` |
 | `403` | Feature disabled | `error.code: "FEATURE_DISABLED"` when `FORM_CUSTOMIZATION_API_ENABLED=false` |
+| `413` | A part exceeded its size limit | `error.code: "PART_TOO_LARGE"` (`details` names the part) |
 | `429` | Rate limited (10/min) | standard error shape |
 
 ### `GET /form-customizations/{id}`
@@ -321,8 +444,9 @@ title, requestedBy?, steps[], resultSummary?, blockedReason?,
 blockedDetail?, evidence?, createdAt, updatedAt, completedAt? }`.
 `steps[]` items: `{ name, status: "pending"|"running"|"done"|"failed",
 startedAt?, completedAt? }`. `evidence` (on `awaiting_review`):
-`{ repoUrl, prUrl, formXml, deck, originals: { trn, prd,
-sha256Prefix }, openItems[], assumptions[] }`.
+`{ repoUrl, prUrl, formXml, deck, inputs: { formXml, idoPropertiesCsv,
+sqlColumnsCsv }, originals: { trn, prd, sha256Prefix }, openItems[],
+assumptions[] }`.
 
 | Code | Meaning |
 |---|---|
@@ -353,9 +477,14 @@ their own.
 
 ### Error codes (summary)
 
-`VALIDATION_ERROR` · `FORM_SYNC_ORIGINALS_MISSING` ·
-`INVALID_FORM_NAME` · `FEATURE_DISABLED` · `UNAUTHENTICATED` ·
+`VALIDATION_ERROR` · `INVALID_FORM_NAME` · `PART_TOO_LARGE` ·
+`MULTIPART_LIMIT_EXCEEDED` · `FEATURE_DISABLED` · `UNAUTHENTICATED` ·
 `FORBIDDEN` · `NOT_FOUND` · `REQUEST_ALREADY_TERMINAL` · `RATE_LIMITED`
+
+Blocked-reason codes (on the request record, not errors):
+`missing-current-form-xml` · `missing-production-original` ·
+`trn-prd-drift` · `missing-github-token` · `invalid-requirements` ·
+`attachment-quarantined` · `build-check-failed`
 
 ### Audit events
 
@@ -373,7 +502,9 @@ their own.
 |---|---|---|
 | `403 FEATURE_DISABLED` on every call | `FORM_CUSTOMIZATION_API_ENABLED` is `false`/unset | Set `FORM_CUSTOMIZATION_API_ENABLED=true` and restart |
 | `403 FORBIDDEN` | Caller lacks `syteline:forms` (User role) | Form customization is Admin/AI-Admin only — grant the role or have an admin submit |
-| `400 FORM_SYNC_ORIGINALS_MISSING` | TRN and/or production export not supplied | Export both from FormSync (template procedure 3), upload via `POST /api/v1/documents`, pass the document ids |
+| `400 VALIDATION_ERROR` on a part | A part failed validation (size, format, header row) | Read `details` for the failing part and fix it |
+| `blocked` with `missing-current-form-xml` | Input 1 (the current form `.xml`) was not supplied or failed validation | Supply the TRN FormSync export as `formXml` |
+| `blocked` with `missing-production-original` | No production FormSync export was supplied | Export the same form from production FormSync and attach it (`*.production.original.xml`) |
 | Request stuck in `requested` | `FORM_CUSTOMIZATION_RUNNER_ENABLED` is `false`/unset | Set it `true` and restart; check `FORM_CUSTOMIZATION_API_ENABLED` too |
 | `blocked` with `trn-prd-drift` | Production form has local changes the TRN export doesn't include | Per template procedure 3: decide whether production or TRN is authoritative, then create a follow-up request |
 | `blocked` with `missing-github-token` | `GITHUB_TOKEN` unset or lacking org access | Set the token (repo + PR scope in `FORM_CUSTOMIZATION_GITHUB_ORG`); the request can be retried |

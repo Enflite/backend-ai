@@ -47,7 +47,7 @@ permission bar as the `syteline.form_*` tools):
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/v1/form-customizations` | Create a request: `{ formName, title, requirements, originals, requestedBy? }`; returns `202 { id, status: 'requested' }` |
+| POST | `/api/v1/form-customizations` | Create a request from Jake's five-input contract — current form `.xml`, IDO-properties CSV, SQL-columns CSV, instruction list, optional attachments; returns `202 { id, status: 'requested' }` |
 | GET | `/api/v1/form-customizations/:id` | Full request record: status, agent progress log, `resultSummary` / `blockedReason`, completion evidence (`repoUrl`, `prUrl`, artifacts) |
 | GET | `/api/v1/form-customizations` | List the requester's (or, for admins, the tenant's) requests; optional `status` filter — the kanban-board query for form work |
 | POST | `/api/v1/form-customizations/:id/cancel` | Cancel (ends work in flight); requester or admin only |
@@ -57,6 +57,78 @@ system (Jake: "so people can easily customize a form using our AI" —
 people *and* systems). The shape mirrors the ADR-020 task-agent
 endpoints deliberately: the same intake → tracked work → report
 pattern, with form-specific lifecycle and gating.
+
+### 1a. The request input contract (Jake, 2026-10-02): exactly five inputs
+
+The requester supplies exactly these five inputs — nothing else.
+The SOP knowledge lives in the agent, not the request (decision 1b):
+
+1. **The current form `.xml`** — file upload or inline content.
+   This is the TRN export: the before-anything baseline the agent
+   builds `<Form>.xml` from.
+2. **IDO properties as a CSV** — the IDO's properties (names, types,
+   the alias prefix), feeding the UET design tables and the build.
+3. **SQL columns as a CSV** — the backing SQL Table's columns, so the
+   agent knows what exists before designing `Uf_ENF_*` fields.
+4. **A list of instructions** — the actual customization
+   requirements (add field / relabel / resize), each item specific:
+   field type, label, tab, position.
+5. **Other information / attachments** — free-form context files the
+   requester wants the AI to have (mockup screenshots, spreadsheets,
+   notes). This is also where the **production FormSync export** can
+   arrive (see decision 6).
+
+Two submission shapes, both accepted:
+
+- `multipart/form-data` — file parts
+  (`formXml`, `idoPropertiesCsv`, `sqlColumnsCsv`,
+  `attachments[]`) plus text fields (`formName`, `title`,
+  `instructions` as JSON array or newline-delimited). The backend
+  already registers Fastify multipart in `server.ts`; this endpoint
+  raises its file limits (see decision 7).
+- `application/json` — the same fields with `formXml`, `idoPropertiesCsv`,
+  `sqlColumnsCsv` as inline strings, `instructions` as a string
+  array, `attachments` as `[{ filename, content }]` items.
+
+Per-part validation rules and size limits are in decision 7 and
+`docs/form-customizations.md`; the code PR implements them.
+
+### 1b. The SOP knowledge is baked into the agent — the requester never re-explains it
+
+The Form-Project-Templates SOP is part of the agent's
+knowledge/planner prompt, not part of the request. The requester does
+not re-explain naming conventions, the TRN-first flow, or
+byte-preservation rules — they supply the five inputs above and the
+agent knows the rest. The baked-in knowledge includes:
+
+- **Procedures 01–07**: start a project from the template (01), UET
+  setup (02), FormSync backup/import (03), UET field confirmation /
+  staging checks (04), launch to production (05), rollback (06),
+  new SQL Table + IDO (07) — plus the troubleshooting notes.
+- **UET-only `Uf_ENF_*` field naming** on the existing IDO/SQL
+  Tables; a new SQL Table + IDO only when the feature needs its own
+  record.
+- **TRN-first development**: everything is built from the TRN
+  original; production is a comparison input and a rollback copy.
+- **Backup-first**: the TRN and production FormSync exports are
+  recorded unchanged before anything is built — they are the rollback
+  copies.
+- **Byte preservation**: UTF-8 with BOM, CRLF line endings — never
+  open and re-save an export in an editor.
+- **Deterministic rebuild**: `<Form>.xml` is always rebuilt from the
+  original by the build script (never hand-edited); the rebuild check
+  must pass.
+- **Purple highlighting** on every change in the built XML.
+- **TRN/PRD drift stops the build**: when the two originals differ,
+  production has local changes — stop and ask, don't guess.
+- **Property patterns**: relabels are label-only; component Type /
+  Read-Only / Inline List changes don't survive re-import and become
+  manual form-design steps in the implementation plan.
+
+*Rationale (Jake, 2026-10-02):* the friction in the templates flow is
+the requester having to re-explain the SOP every time. Baked-in
+knowledge makes the API a true dispatch: five inputs in, a review PR
+out.
 
 ### 2. Lifecycle: `requested → in_progress → awaiting_review → completed`, plus `blocked` and `cancelled`
 
@@ -126,27 +198,28 @@ Additional hard prerequisites, checked at request start (missing →
 - The requester's identity (auth context) — anonymous creation is
   impossible.
 
-### 6. The backup-first rule is enforced by the state machine, not by convention
+### 6. The backup-first rule is enforced by the agent's baked-in SOP knowledge
 
 The templates SOP's first rule — *export TRN and production originals
-before anything is imported, they are the rollback copies* — becomes
-an intake gate:
+before anything is imported, they are the rollback copies* — is baked
+into the agent (decision 1b), and input 1 of the contract (the current
+form `.xml`) is the TRN original. How the runner gets the production
+original:
 
-- `POST /api/v1/form-customizations` requires `originals: { trn,
-  prd }`: references to the two FormSync exports (document ids of
-  uploaded files, or repo paths — see `docs/form-customizations.md`).
-  If either is missing, the request is created but the runner
-  immediately marks it `blocked` with
-  `blockedReason: 'missing-formsync-originals'`, naming which export
-  is absent. The agent never starts building until both originals are
-  recorded.
-- The agent then compares TRN vs. production (SHA-256, per procedure
-  3). If they differ, production has local changes: the runner marks
-  the request `blocked` with `blockedReason: 'trn-prd-drift'` — the
-  templates SOP's "stop and ask" — and the completion report carries
-  the drift detail instead of a PR link. A human resolves the drift
-  (build from the production export, per procedure 3) and creates a
-  follow-up request.
+- If the requester supplied it as an attachment (input 5 — e.g. a
+  file named `*.production.original.xml` or identified as such), the
+  agent records it in `original/` unchanged and compares SHA-256
+  against TRN per procedure 3.
+- If it is absent, the runner marks the request `blocked` with
+  `blockedReason: 'missing-production-original'`. The agent never
+  starts building until both originals are recorded.
+
+The agent then compares TRN vs. production. If they differ, production
+has local changes: the runner marks the request `blocked` with
+`blockedReason: 'trn-prd-drift'` — the templates SOP's "stop and ask"
+— and the completion report carries the drift detail instead of a PR
+link. A human resolves the drift (build from the production export,
+per procedure 3) and creates a follow-up request.
 
 The same TRN-first principle shapes the whole execution order the
 runner enforces, in templates order:
@@ -167,6 +240,28 @@ TRN import, UET setup, staging checks, launch-to-production, and
 rollback stay **numbered human runbook steps** in the generated
 implementation plan — they are operations on the live ERP systems,
 and the API automates the build, not the go-live.
+
+### 7. Per-part validation rules and size limits
+
+The five inputs are validated at intake (per part, before anything
+runs). Limits mirror existing repo conventions (the documents upload
+cap, the `codeFiles` ≤ 20 files / ≤ 200 KB rule):
+
+| Input | Part name | Rules |
+|---|---|---|
+| Current form `.xml` | `formXml` | Exactly one; `.xml` extension; ≤ 10 MB; must parse as XML and contain the form definition; the form name in the XML must match the request's `formName` |
+| IDO properties CSV | `idoPropertiesCsv` | Exactly one; `.csv`; ≤ 5 MB; UTF-8; must have a header row (property-name-like first column); rows are not required to be non-empty |
+| SQL columns CSV | `sqlColumnsCsv` | Exactly one; `.csv`; ≤ 5 MB; UTF-8; must have a header row (column-name-like first column) |
+| Instructions | `instructions` | Non-empty array (multipart: JSON array or newline-delimited text field); 1–100 items; each 1–500 chars. Each item should be specific: field type, label, tab, position — the mockup-or-spreadsheet rule applies to what goes in these strings |
+| Attachments | `attachments[]` | 0–20 files; ≤ 200 KB each; common formats (images, CSV, spreadsheets, PDFs); a `*.production.original.xml` attachment is treated as the production FormSync original |
+| Envelope | `formName` | `^[A-Za-z0-9_]+$` (the SyteLine form name) |
+| Envelope | `title` | 1–200 chars |
+| Envelope | `requestedBy` | Optional, 1–200 chars |
+
+Failed validation → `400 VALIDATION_ERROR` with `details` naming the
+failing part. Multipart file parts are scanned through the same
+malware boundary as document uploads; a quarantine marks the request
+`blocked` with `blockedReason: 'attachment-quarantined'`.
 
 ### 7. Completion report and evidence
 
@@ -210,8 +305,10 @@ only), `FORM_CUSTOMIZATION_BLOCKED` (reason),
 
 This ADR is the design record. The code PR must validate: lifecycle
 transitions (create → claim → in_progress → awaiting_review / blocked
-/ cancelled), atomic claim, tenant + requester scoping,
-`missing-formsync-originals` and `trn-prd-drift` blocking, no-merge
+/ cancelled), atomic claim, tenant + requester scoping, both
+submission shapes (multipart and JSON-inline), per-part validation,
+`missing-current-form-xml` / `missing-production-original` /
+`trn-prd-drift` / `attachment-quarantined` blocking, no-merge
 capability (no code path that can merge), authorization
 (`FORBIDDEN` without `syteline:forms`), and both kill switches
 default-off. **REQUIRES REAL GITHUB / REAL SYTELINE:** end-to-end
