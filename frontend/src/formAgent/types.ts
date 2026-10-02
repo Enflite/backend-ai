@@ -43,6 +43,45 @@ export interface CustomizationEvidence {
   assumptions: string[];
 }
 
+/**
+ * The validated customization plan (backend `customizationPlanSchema` in
+ * steps.ts, exposed on the detail view as `plan`). Every change row in the
+ * UI is rendered from this — never invented.
+ */
+export interface PlanField {
+  field: string;
+  caption: string;
+  kind: 'text' | 'date' | 'dropdown' | 'notes';
+  userDefinedType?: string;
+  container: string;
+  top: number;
+  labelLeft: number;
+  labelWidth: number;
+  editLeft: number;
+  editWidth: number;
+}
+
+export interface PlanRelabel {
+  component: string;
+  newCaption: string;
+}
+
+export interface PlanResize {
+  component: string;
+  changes: Record<string, number | string>;
+}
+
+export interface CustomizationPlan {
+  aliasPrefix: string;
+  idoName: string;
+  tableName: string;
+  fields: PlanField[];
+  relabels: PlanRelabel[];
+  resizes: PlanResize[];
+  designNotes: string;
+  openItems: string[];
+}
+
 export interface FormCustomizationDetail {
   id: string;
   status: FormCustomizationStatus;
@@ -52,6 +91,8 @@ export interface FormCustomizationDetail {
   product: { name: string; version: string };
   flow: { name: string; version: string };
   steps: FlowStepLog[];
+  /** The validated change plan — present once the plan-changes step has run. */
+  plan?: CustomizationPlan;
   resultSummary?: string;
   evidence?: CustomizationEvidence;
   prUrl?: string;

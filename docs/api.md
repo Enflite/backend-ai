@@ -369,7 +369,7 @@ not the go-live.
 | Method | Path | Auth / Permission | Purpose |
 |---|---|---|---|
 | POST | `/form-customizations` | auth + `syteline:forms` (10/min) | Create a request from the five-input contract: multipart file parts (`formXml`, `idoPropertiesCsv`, `sqlColumnsCsv`, `attachments[]`) or JSON-inline equivalents, plus `formName`, `title`, `instructions[]`; `202 { id, status: 'requested' }` — per-part validation (`400 VALIDATION_ERROR` names the failing part) |
-| GET | `/form-customizations/:id` | auth + `syteline:forms` | Full request record: status, step log, `resultSummary` / `blockedReason` + `blockedDetail`, and on `awaiting_review` the `evidence` completion report (`repoUrl`, `prUrl`, `<Form>.xml` and deck artifacts, recorded originals with SHA-256 prefix, `openItems`, `assumptions`) |
+| GET | `/form-customizations/:id` | auth + `syteline:forms` | Full request record: status, step log, the validated change `plan` (fields/relabels/resizes/designNotes/openItems — present once the plan step has run), `resultSummary` / `blockedReason` + `blockedDetail`, and on `awaiting_review` the `evidence` completion report (`repoUrl`, `prUrl`, `<Form>.xml` and deck artifacts, recorded originals with SHA-256 prefix, `openItems`, `assumptions`) |
 | GET | `/form-customizations` | auth + `syteline:forms` | List the requester's (or, for admins, the tenant's) requests; optional `status` filter — the kanban-board query for the SyteLine Form AI Agent |
 | POST | `/form-customizations/:id/cancel` | auth + `syteline:forms` | Cancel a request (ends work in flight); requester or admin only; terminal states return `409 REQUEST_ALREADY_TERMINAL` |
 

@@ -93,7 +93,7 @@ import {
 import { overrideFlowAgentFn } from '../src/flows/flowRunner.js';
 import { overrideDeckBuild, overrideOpenPr } from '../src/formAgent/steps.js';
 import { isFormAgentSchedulerRunning } from '../src/formAgent/scheduler.js';
-import { blockCustomization, claimCustomization } from '../src/formAgent/store.js';
+import { blockCustomization, claimCustomization, saveCustomizationPlan } from '../src/formAgent/store.js';
 import {
   assertWellFormedXml,
   validateFormXml,
@@ -718,6 +718,42 @@ describe('GET /form-customizations, cancel, mark-merged', () => {
     expect(body.steps[0].name).toBe('intake');
     expect(body.steps[0].status).toBe('done');
     expect(body).not.toHaveProperty('authSnapshot');
+  });
+
+  it('omits the plan until stored, then exposes the validated plan', async () => {
+    const created = await postJson(validJsonBody());
+    const id = created.json().id;
+    const before = await app.inject({ method: 'GET', url: `/api/v1/form-customizations/${id}` });
+    expect(before.statusCode).toBe(200);
+    expect(before.json()).not.toHaveProperty('plan');
+
+    const plan = {
+      aliasPrefix: 'lot',
+      idoName: 'SLLots',
+      tableName: 'lot',
+      fields: [
+        {
+          field: 'Uf_ENF_Priority',
+          caption: 'Priority',
+          kind: 'text',
+          container: 'GeneralTab',
+          top: 10,
+          labelLeft: 4,
+          labelWidth: 20,
+          editLeft: 26,
+          editWidth: 40,
+        },
+      ],
+      relabels: [{ component: 'LotsEdit', newCaption: 'Lot' }],
+      resizes: [{ component: 'LotsEdit', changes: { Width: 200 } }],
+      designNotes: 'Adds one UET field bound to lot.',
+      openItems: ['Alias assumed until Staging check A.'],
+    };
+    await saveCustomizationPlan('tenant-a', id, plan);
+    const after = await app.inject({ method: 'GET', url: `/api/v1/form-customizations/${id}` });
+    expect(after.statusCode).toBe(200);
+    expect(after.json().plan).toEqual(plan);
+    expect(after.json()).not.toHaveProperty('authSnapshot');
   });
 
   it('refuses strangers with 403 (no existence leak via 404 for unknown ids)', async () => {

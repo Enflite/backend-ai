@@ -219,3 +219,25 @@ destinations are omitted, never shown as available.
   layouts. Reduced-motion preferences are respected.
 - Keyboard: visible focus, Escape closes dialogs/panels, icon buttons have
   accessible names, don't rely on color alone for state.
+
+### Agent result review (SyteLine Form AI Agent detail)
+
+The pattern for presenting an agent run that ends in a human approval gate
+(`/forms/:id`, `components/formAgent/CustomizationDetail.tsx`):
+
+- **Review hero first:** the result state leads with the outcome
+  ("Ready for review"), the result summary, the commit metadata (repository,
+  pull request, flow name/version, requested by), and the approve actions as
+  the prominent primary actions — the agent never merges; the human merges
+  on GitHub and records it.
+- **Changes rendered from the real plan:** file-by-file rows (fields added
+  with name/caption/kind, relabels, resizes, deck artifact) from the
+  backend's validated `plan` — never fabricated; empty categories are
+  omitted, not shown as zeros. The actual diff lives on the review PR:
+  a "View full diff on GitHub" action links to `{prUrl}/files`.
+- **Honest pending states:** while the pipeline is still running, actions
+  whose target doesn't exist yet render as disabled buttons with a title
+  explaining what is pending — never dead links.
+- Sections use `Card` + `SectionLabel` + `Badge` for counts,
+  `.animate-fade-up` for entrance, `aria-labelledby` headings, and list
+  markup for change rows.
