@@ -110,7 +110,7 @@ describe('POST /syteline-tasks/generate', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json() as { tasks: Array<{ id: string; title: string }> };
     expect(body.tasks).toHaveLength(2);
-    expect(body.tasks[0].title).toBe('Inspect the PO form');
+    expect(body.tasks[0]!.title).toBe('Inspect the PO form');
     // Real path: docs carry tenant, requester, and the 'assigned' status the
     // runner claims.
     expect(tasks.size).toBe(2);
@@ -127,7 +127,7 @@ describe('POST /syteline-tasks/generate', () => {
     const summary = recordAuditMock.mock.calls.find(
       (c) => c[0].action === 'SYTELINE_TASK_GENERATED',
     );
-    expect(summary[0].metadata.created).toBe(2);
+    expect(summary![0].metadata.created).toBe(2);
     await app.close();
   });
 
@@ -249,7 +249,7 @@ describe('extractTaskListJson', () => {
       'Here you go:\n[{"title":"A","goal":"B"}]\nLet me know!',
     ) as Array<{ title: string }>;
     expect(out).toHaveLength(1);
-    expect(out[0].title).toBe('A');
+    expect(out[0]!.title).toBe('A');
   });
 
   it('throws 502 on non-JSON text', () => {
