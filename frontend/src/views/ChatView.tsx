@@ -437,7 +437,7 @@ export default function ChatView() {
     <div className="flex flex-1 min-h-0 overflow-hidden" style={{ background: 'var(--background)' }}>
       <Sidebar conversations={conversations} activeId={activeId} onSelect={selectConversation} onNew={() => void newConversation()}
         onDelete={(id) => void deleteConversation(id)} onRename={(id, title) => void renameConversation(id, title)}
-        collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((value) => !value)} identity={{ name: user.displayName, role: user.roleName }} />
+        collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((value) => !value)} />
       <div className="flex flex-col flex-1 min-w-0">
         <TopBar
           ariaLabel="Conversation controls"

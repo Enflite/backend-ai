@@ -12,10 +12,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { migration034 } from '../src/db/migrations/034_all_permissions_all_roles.js';
 
+/** Grant document shape, mirroring the migration's grant objects. */
+type GrantDoc = { _id: string; roleId: string; permissionId: string };
+
 function fakeDb(roleNames: string[], permNames: string[], pregrants: Array<[string, string]> = []) {
   const roles = roleNames.map((name, i) => ({ _id: `role-${i}`, name }));
   const permissions = permNames.map((name, i) => ({ _id: `perm-${i}`, name }));
-  const rolePermissions = pregrants.map(([rn, pn], i) => {
+  const rolePermissions: GrantDoc[] = pregrants.map(([rn, pn], i) => {
     const r = roles.find((x) => x.name === rn)!;
     const p = permissions.find((x) => x.name === pn)!;
     return { _id: `grant-${i}`, roleId: r._id, permissionId: p._id };
@@ -35,7 +38,7 @@ function fakeDb(roleNames: string[], permNames: string[], pregrants: Array<[stri
     if (name === 'role_permissions') {
       return {
         find: vi.fn((_f: unknown, _o: unknown) => findCursor(rolePermissions)),
-        insertMany: vi.fn(async (docs: Array<{ _id: string; roleId: string; permissionId: string }>) => {
+        insertMany: vi.fn(async (docs: GrantDoc[]) => {
           for (const doc of docs) {
             if (rolePermissions.some((g) => g.roleId === doc.roleId && g.permissionId === doc.permissionId)) {
               const err = new Error('duplicate key') as Error & { code: number };
