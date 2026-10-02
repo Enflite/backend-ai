@@ -139,6 +139,13 @@ Human: review the PR, import <Form>.xml into TRN, test
 Human: merge the PR when it looks right → status "completed"
 ```
 
+The pipeline executes as a versioned flow on the Flows platform
+(`flows/syteline-form-customization.flow.json` — eight steps: seven
+`formagent.*` tool steps plus the `plan_changes` agent step). The
+runner ensures the flow is live from the repo JSON before each run;
+the API, permissions, kill-switches, blocked codes, and audit events
+are unchanged — only the execution substrate moved.
+
 Lifecycle (ADR-021 §2):
 
 | Status | Meaning |

@@ -31,9 +31,9 @@ import { AppError, Errors } from '../errors.js';
 import { config } from '../config.js';
 import { recordAudit } from '../audit/audit.js';
 import { formProjectsRoot } from '../syteline/forms/index.js';
-import { FORM_CUSTOMIZATION_FLOW } from './flow.js';
-import { runFlowStep, StepInputError, type FlowRunContext } from './flowRunner.js';
-import { STEP_HANDLERS, cleanupInbox } from './steps.js';
+import { FORM_CUSTOMIZATION_FLOW_NAME } from './flowEnsure.js';
+import { StepInputError, cleanupInbox, stageIntake } from './steps.js';
+import { cancelCustomizationRun } from './runner.js';
 import { kickFormAgentRunner } from './scheduler.js';
 import { FORM_AGENT_VERSION, PRODUCT_NAME } from './version.js';
 import {
@@ -50,6 +50,7 @@ import {
   MAX_MULTIPART_FILES,
   MAX_XML_PART_BYTES,
   type CreateCustomizationInput,
+  type FlowStepOutcome,
   type FormCustomizationDoc,
 } from './types.js';
 import {
@@ -294,47 +295,28 @@ export async function formAgentRoutes(fastify: FastifyInstance): Promise<void> {
       seen.add(attachment.filename);
     }
 
-    // Run the flow's `intake` step through the shared step registry:
-    // semantic validation + inbox staging. Failures → 4xx, no run created.
-    const runId = randomUUID();
-    const flowCtx: FlowRunContext = {
-      runId,
-      flowName: FORM_CUSTOMIZATION_FLOW.name,
-      flowVersion: FORM_CUSTOMIZATION_FLOW.version,
-      actor: {
-        tenantId: auth.tenantId,
-        userId: auth.userId,
-        roleId: auth.roleId,
-        clearance: auth.clearance,
-        displayName: auth.displayName,
-      },
-      values: {
-        'request.formName': input.formName,
-        'request.title': input.title,
-        'request.requestedBy': input.requestedBy,
-        'request.instructions': input.instructions,
-        'input.formXml': Buffer.from(input.formXml, 'utf8'),
-        'input.idoCsv': input.idoPropertiesCsv,
-        'input.sqlCsv': input.sqlColumnsCsv,
-        'input.attachments': attachments,
-        'input.source': source,
-        repo: `${config.FORM_CUSTOMIZATION_GITHUB_ORG}/${input.formName}`,
-      },
-    };
-    let intakeOutcome;
+    // Intake runs synchronously here (direct stageIntake call, before any
+    // run exists): semantic validation + inbox staging. Failures → 4xx,
+    // no run created. The platform flow's `intake` step short-circuits on
+    // the staged manifest when the runner executes.
+    const customizationId = randomUUID();
+    let inboxDir: string;
+    let hasPrdOriginal: boolean;
     try {
-      intakeOutcome = await runFlowStep(
-        FORM_CUSTOMIZATION_FLOW,
-        'intake',
-        flowCtx,
-        {
-          stepHandlers: STEP_HANDLERS,
-          judge: async () => {
-            throw new Error('intake never escalates to judgment');
-          },
-        },
-        AbortSignal.timeout(60000),
-      );
+      const staged = await stageIntake({
+        formName: input.formName,
+        title: input.title,
+        instructions: input.instructions,
+        formXml: Buffer.from(input.formXml, 'utf8'),
+        idoCsv: input.idoPropertiesCsv,
+        sqlCsv: input.sqlColumnsCsv,
+        attachments,
+        source,
+        repo: `${config.FORM_CUSTOMIZATION_GITHUB_ORG}/${input.formName}`,
+        customizationId,
+      });
+      inboxDir = staged.inboxDir;
+      hasPrdOriginal = staged.hasPrdOriginal;
     } catch (error) {
       if (error instanceof StepInputError) {
         return reply.status(error.httpStatus).send({
@@ -343,20 +325,25 @@ export async function formAgentRoutes(fastify: FastifyInstance): Promise<void> {
       }
       throw error;
     }
-
-    const inboxDir = intakeOutcome.outputs?.['inbox.dir'] as string;
-    const hasPrdOriginal = intakeOutcome.outputs?.['inbox.hasPrdOriginal'] === true;
-    const projectDir = `${input.formName}-${runId.slice(0, 8)}`;
+    const intakeOutcome: FlowStepOutcome = {
+      name: 'intake',
+      status: 'done',
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      outputs: { 'inbox.dir': inboxDir, 'inbox.hasPrdOriginal': hasPrdOriginal },
+      detail: `form=${input.formName}`,
+    };
+    const projectDir = `${input.formName}-${customizationId.slice(0, 8)}`;
     let doc;
     try {
       doc = await createCustomization(auth, {
-      _id: runId,
+      _id: customizationId,
       formName: input.formName,
       title: input.title,
       requestedBy: input.requestedBy,
       instructions: input.instructions,
-      flowName: FORM_CUSTOMIZATION_FLOW.name,
-      flowVersion: FORM_CUSTOMIZATION_FLOW.version,
+      flowName: FORM_CUSTOMIZATION_FLOW_NAME,
+      flowVersion: 'live',
       inboxDir: relative(formProjectsRoot(), inboxDir),
       projectDir,
       repo: `${config.FORM_CUSTOMIZATION_GITHUB_ORG}/${input.formName}`,
@@ -448,7 +435,30 @@ export async function formAgentRoutes(fastify: FastifyInstance): Promise<void> {
 
   fastify.post('/form-customizations/:id/cancel', {
     preHandler: formAgentPreHandlers,
-  }, mutableAction('cancel', cancelCustomization, 'FORM_CUSTOMIZATION_CANCELLED'));
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const params = customizationIdParam.safeParse(req.params);
+    if (!params.success) validationError('Invalid request id', params.error.flatten());
+    const doc: FormCustomizationDoc | null = await getCustomization(auth.tenantId, params.data.id);
+    if (!doc) throw Errors.notFound('NOT_FOUND', 'Request not found');
+    assertRequestReadable(doc, auth.userId, isRequestAdmin(auth));
+    // Bridge the cancel onto the platform flow run (if one is in flight)
+    // before marking the customization cancelled.
+    await cancelCustomizationRun(doc).catch(() => undefined);
+    const updated = await cancelCustomization(auth.tenantId, params.data.id);
+    if (!updated) {
+      throw Errors.conflict('REQUEST_ALREADY_TERMINAL', `Request is already ${doc.status}`);
+    }
+    await recordAudit({
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      requestId: req.requestId,
+      action: 'FORM_CUSTOMIZATION_CANCELLED',
+      success: true,
+      metadata: { customizationId: doc._id, formName: doc.formName, action: 'cancel' },
+    });
+    return reply.send({ id: updated._id, status: updated.status, product: productInfo() });
+  });
 
   // A human records the review-PR merge: awaiting_review → completed.
   // The agent has no merge capability and never calls this.

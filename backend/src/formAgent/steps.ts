@@ -1,12 +1,11 @@
 /**
- * steps.ts — the SyteLine Form AI Agent's flow step handlers and
- * registries.
+ * steps.ts — the SyteLine Form AI Agent's pipeline step implementations.
  *
- * STEP_HANDLERS maps the flow definition's `handlerRef`s to the code
- * that runs each step. PROMPT_BUILDERS / SCHEMAS serve the
- * `agentJudgment` steps (promptRef / schemaRef). PRECONDITION_CHECKS
- * serve the flow's preconditions. The flow definition itself (flow.ts)
- * stays pure data; this module holds the implementations it references.
+ * Each step is a pure async function with explicit arguments (no shared
+ * values bag): the platform flow runner invokes them through the
+ * `formagent.*` tools (flowTools.ts), and the route invokes `stageIntake`
+ * directly for synchronous request validation. The canonical pipeline
+ * definition lives in flows/syteline-form-customization.flow.json.
  *
  * Step implementations reuse the `syteline/forms` machinery through its
  * public exports only (index.ts) — never reimplemented here.
@@ -16,6 +15,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node
 import { join } from 'node:path';
 import { z } from 'zod';
 import { config } from '../config.js';
+import { Errors } from '../errors.js';
 import {
   assertExportBytes,
   assertUetFieldName,
@@ -24,7 +24,6 @@ import {
   componentStem,
   decodeExport,
   encodeExport,
-  githubPrAvailable,
   newFieldSchema,
   projectDirOrThrow,
   projectsSubdirOrThrow,
@@ -40,7 +39,6 @@ import {
   type NewFieldSpec,
   type ReadmeInput,
 } from '../syteline/forms/index.js';
-import { liveRequesterAuth } from '../syteline/requesterAuth.js';
 import { malwareScanner } from '../documents/malware.js';
 import { FORM_CUSTOMIZATION_KNOWLEDGE } from './knowledge.js';
 import {
@@ -50,25 +48,36 @@ import {
   validateFormXml,
   withBom,
 } from './types.js';
-import {
-  StepInputError,
-  type FlowRunContext,
-  type StepHandler,
-  type StepHandlerContext,
-  type StepResult,
-} from './flowRunner.js';
+
+// ---------------------------------------------------------------------------
+// Step result type
+// ---------------------------------------------------------------------------
+
+/**
+ * Error thrown for bad step inputs. At intake the route maps it onto HTTP
+ * (400 VALIDATION_ERROR / 413 PART_TOO_LARGE); inside a run it surfaces
+ * as a failed step.
+ */
+export class StepInputError extends Error {
+  readonly code: string;
+  readonly details?: unknown;
+  readonly httpStatus: number;
+  constructor(code: string, message: string, details?: unknown, httpStatus = 400) {
+    super(message);
+    this.name = 'StepInputError';
+    this.code = code;
+    this.details = details;
+    this.httpStatus = httpStatus;
+  }
+}
+
+export type PureStepResult =
+  | { status: 'done'; outputs: Record<string, unknown>; detail?: string }
+  | { status: 'blocked'; blockedCode: string; blockedDetail: string };
 
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
-
-function blocked(blockedCode: string, blockedDetail: string, detail?: string): StepResult {
-  return { status: 'blocked', blockedCode, blockedDetail, ...(detail ? { detail } : {}) };
-}
-
-function done(outputs: Record<string, unknown>, detail?: string): StepResult {
-  return { status: 'done', outputs, ...(detail ? { detail } : {}) };
-}
 
 function readManifest(inboxDir: string): {
   formName: string;
@@ -83,19 +92,36 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Inbox dir for a customization id (confined under the projects root). */
+export function inboxDirFor(customizationId: string): string {
+  return projectsSubdirOrThrow('.inbox', customizationId);
+}
+
 // ---------------------------------------------------------------------------
 // intake — validate the five inputs, stage them into the inbox
 // (runs in the route, before any run record exists; failures → HTTP)
 // ---------------------------------------------------------------------------
 
-async function intake({ ctx }: StepHandlerContext): Promise<StepResult> {
-  const v = ctx.values;
-  const formName = v['request.formName'] as string;
-  const formXml = v['input.formXml'] as Buffer;
-  const idoCsv = v['input.idoCsv'] as string;
-  const sqlCsv = v['input.sqlCsv'] as string;
-  const attachments = (v['input.attachments'] as { filename: string; bytes: Buffer }[]) ?? [];
-  const inline = (v['input.source'] as string) === 'json';
+export interface StageIntakeArgs {
+  formName: string;
+  title: string;
+  instructions: string[];
+  formXml: Buffer;
+  idoCsv: string;
+  sqlCsv: string;
+  attachments: { filename: string; bytes: Buffer }[];
+  /** 'json' = inline content (normalized to CRLF+BOM on staging); 'multipart' = byte-exact upload. */
+  source: 'json' | 'multipart';
+  repo: string;
+  customizationId: string;
+}
+
+export async function stageIntake(args: StageIntakeArgs): Promise<{
+  inboxDir: string;
+  hasPrdOriginal: boolean;
+}> {
+  const { formName, formXml, idoCsv, sqlCsv, attachments } = args;
+  const inline = args.source === 'json';
 
   const invalid = (part: string, message: string): never => {
     throw new StepInputError('VALIDATION_ERROR', message, { part });
@@ -132,7 +158,7 @@ async function intake({ ctx }: StepHandlerContext): Promise<StepResult> {
     }
   }
 
-  const inboxDir = projectsSubdirOrThrow('.inbox', ctx.runId);
+  const inboxDir = inboxDirFor(args.customizationId);
   mkdirSync(join(inboxDir, 'attachments'), { recursive: true });
   writeFileSync(join(inboxDir, 'form.xml'), formBytes);
   writeFileSync(join(inboxDir, 'ido.csv'), idoCsv, 'utf8');
@@ -148,21 +174,20 @@ async function intake({ ctx }: StepHandlerContext): Promise<StepResult> {
   writeFileSync(
     join(inboxDir, 'manifest.json'),
     JSON.stringify(
-      { formName, source: inline ? 'json' : 'multipart', inlineNormalized: inline, attachmentNames, createdAt: new Date().toISOString() },
+      { formName, source: args.source, inlineNormalized: inline, attachmentNames, createdAt: new Date().toISOString() },
       null,
       2,
     ),
     'utf8',
   );
-  return done({ 'inbox.dir': inboxDir, 'inbox.hasPrdOriginal': hasPrdOriginal }, `form=${formName}`);
+  return { inboxDir, hasPrdOriginal };
 }
 
 // ---------------------------------------------------------------------------
-// validate-inputs — malware scan + XML/CSV shapes (runner; failures → blocked)
+// validate-inputs — malware scan + XML/CSV shapes (failures → blocked)
 // ---------------------------------------------------------------------------
 
-async function validateInputs({ ctx }: StepHandlerContext): Promise<StepResult> {
-  const inboxDir = ctx.values['inbox.dir'] as string;
+export async function validateStagedInputs(inboxDir: string): Promise<PureStepResult> {
   const manifest = readManifest(inboxDir);
   const formName = manifest.formName;
   const parts: [string, Buffer][] = [
@@ -179,39 +204,107 @@ async function validateInputs({ ctx }: StepHandlerContext): Promise<StepResult> 
   for (const [part, bytes] of parts) {
     const result = await malwareScanner.scan(bytes);
     if (result.verdict === 'INFECTED') {
-      return blocked('attachment-quarantined', `Part "${part}" tripped the malware boundary.`);
+      return {
+        status: 'blocked',
+        blockedCode: 'attachment-quarantined',
+        blockedDetail: `Part "${part}" tripped the malware boundary.`,
+      };
     }
   }
 
   try {
     validateFormXml(parts[0]![1].toString('utf8'), formName);
   } catch (error) {
-    return blocked('missing-current-form-xml', error instanceof Error ? error.message : 'The current form XML is invalid.');
+    return {
+      status: 'blocked',
+      blockedCode: 'missing-current-form-xml',
+      blockedDetail: error instanceof Error ? error.message : 'The current form XML is invalid.',
+    };
   }
   try {
     parseIdoPropertiesCsv(parts[1]![1].toString('utf8'));
     parseSqlColumnsCsv(parts[2]![1].toString('utf8'));
   } catch (error) {
-    return blocked('invalid-requirements', error instanceof Error ? error.message : 'The CSV inputs are unusable.');
+    return {
+      status: 'blocked',
+      blockedCode: 'invalid-requirements',
+      blockedDetail: error instanceof Error ? error.message : 'The CSV inputs are unusable.',
+    };
   }
-  return done({ 'validated.formName': formName }, `form=${formName}`);
+  return { status: 'done', outputs: { formName }, detail: `form=${formName}` };
+}
+
+// ---------------------------------------------------------------------------
+// Planner context — the excerpts the agent step's prompt is built from
+// ---------------------------------------------------------------------------
+
+const PLAN_XML_EXCERPT_CHARS = 8000;
+const PLAN_CSV_CHARS = 6000;
+const PLAN_ATTACHMENT_CHARS = 2000;
+
+export interface PlanContext {
+  formName: string;
+  title: string;
+  instructionsText: string;
+  xmlExcerpt: string;
+  idoExcerpt: string;
+  sqlExcerpt: string;
+  attachmentsText: string;
+}
+
+/**
+ * Build the planner's view of the validated inputs. Same excerpts the
+ * bespoke planner used; now returned as structured data so the platform
+ * flow's agent step can template them into its prompt.
+ */
+export function buildPlanContext(args: {
+  inboxDir: string;
+  formName: string;
+  title: string;
+  instructions: string[];
+}): PlanContext {
+  const { inboxDir, formName, title, instructions } = args;
+  const manifest = readManifest(inboxDir);
+  const formXmlText = decodeExport(readFileSync(join(inboxDir, 'form.xml')));
+  const idoCsv = readFileSync(join(inboxDir, 'ido.csv'), 'utf8');
+  const sqlCsv = readFileSync(join(inboxDir, 'sql.csv'), 'utf8');
+  const attachmentSections: string[] = [];
+  for (const name of manifest.attachmentNames) {
+    if (/\.production\.original\.xml$/i.test(name)) continue;
+    const content = readFileSync(join(inboxDir, 'attachments', name), 'utf8');
+    attachmentSections.push(`--- ${name} ---\n${content.slice(0, PLAN_ATTACHMENT_CHARS)}`);
+  }
+  return {
+    formName,
+    title,
+    instructionsText: instructions.map((instruction, i) => `${i + 1}. ${instruction}`).join('\n'),
+    xmlExcerpt: formXmlText.slice(0, PLAN_XML_EXCERPT_CHARS),
+    idoExcerpt: idoCsv.slice(0, PLAN_CSV_CHARS),
+    sqlExcerpt: sqlCsv.slice(0, PLAN_CSV_CHARS),
+    attachmentsText: attachmentSections.join('\n'),
+  };
 }
 
 // ---------------------------------------------------------------------------
 // backup-originals — scaffold the project, record TRN + production originals
 // ---------------------------------------------------------------------------
 
-async function backupOriginals({ ctx }: StepHandlerContext): Promise<StepResult> {
-  const inboxDir = ctx.values['inbox.dir'] as string;
-  const formName = ctx.values['validated.formName'] as string;
-  const title = ctx.values['request.title'] as string;
-  const repo = ctx.values['repo'] as string;
+export interface BackupOriginalsArgs {
+  inboxDir: string;
+  formName: string;
+  title: string;
+  repo: string;
+  customizationId: string;
+}
+
+export async function backupOriginals(args: BackupOriginalsArgs): Promise<PureStepResult> {
+  const { inboxDir, formName, title, repo, customizationId } = args;
   const templateDir = config.SYTELINE_FORM_TEMPLATES_DIR;
   if (!templateDir) {
     throw new Error('No Form-Project-Templates checkout configured (SYTELINE_FORM_TEMPLATES_DIR)');
   }
 
-  const projectFolder = `${formName}-${ctx.runId.slice(0, 8)}`;
+  const projectFolder = `${formName}-${customizationId.slice(0, 8)}`;
   const dir = projectDirOrThrow(projectFolder);
   scaffoldProject({ formName, title, repo, destDir: dir, templateDir });
 
@@ -220,12 +313,14 @@ async function backupOriginals({ ctx }: StepHandlerContext): Promise<StepResult>
   const manifest = readManifest(inboxDir);
   const match = manifest.attachmentNames.find((n) => /\.production\.original\.xml$/i.test(n));
   if (!match) {
-    return blocked(
-      'missing-production-original',
-      'No production FormSync export was supplied, so the SyteLine Form AI Agent cannot complete the backup-first check. ' +
+    return {
+      status: 'blocked',
+      blockedCode: 'missing-production-original',
+      blockedDetail:
+        'No production FormSync export was supplied, so the SyteLine Form AI Agent cannot complete the backup-first check. ' +
         'Export the same form from FormSync on production and attach it as *.production.original.xml, then create a new request. ' +
         'The agent never builds without both rollback copies.',
-    );
+    };
   }
   const prdBytes = readFileSync(join(inboxDir, 'attachments', match));
 
@@ -234,11 +329,13 @@ async function backupOriginals({ ctx }: StepHandlerContext): Promise<StepResult>
     assertExportBytes(trnBytes, `${formName}.trn.original.xml`);
     assertExportBytes(prdBytes, `${formName}.production.original.xml`);
   } catch {
-    return blocked(
-      'missing-production-original',
-      'A supplied original is not a byte-for-byte FormSync export (UTF-8 with BOM and CRLF required). ' +
+    return {
+      status: 'blocked',
+      blockedCode: 'missing-production-original',
+      blockedDetail:
+        'A supplied original is not a byte-for-byte FormSync export (UTF-8 with BOM and CRLF required). ' +
         'Export the form from FormSync again without opening it in an editor and create a new request.',
-    );
+    };
   }
   mkdirSync(join(dir, 'original'), { recursive: true });
   const trnFile = join(dir, 'original', `${formName}.trn.original.xml`);
@@ -252,31 +349,37 @@ async function backupOriginals({ ctx }: StepHandlerContext): Promise<StepResult>
     writeFileSync(join(dir, 'context', 'attachments', name), readFileSync(join(inboxDir, 'attachments', name)));
   }
   const sha256Prefix = (await sha256Hex(trnBytes)).slice(0, 16);
-  return done(
-    { 'project.dir': dir, 'originals.trnFile': trnFile, 'originals.prdFile': prdFile, 'originals.sha256Prefix': sha256Prefix },
-    `sha=${sha256Prefix}`,
-  );
+  return {
+    status: 'done',
+    outputs: { projectDir: dir, trnFile, prdFile, sha256Prefix },
+    detail: `sha=${sha256Prefix}`,
+  };
 }
 
 // ---------------------------------------------------------------------------
 // compare-trn-prd — drift stops the build
 // ---------------------------------------------------------------------------
 
-async function compareTrnPrd({ ctx }: StepHandlerContext): Promise<StepResult> {
-  const trnBytes = readFileSync(ctx.values['originals.trnFile'] as string);
-  const prdBytes = readFileSync(ctx.values['originals.prdFile'] as string);
+export async function compareTrnPrd(trnFile: string, prdFile: string): Promise<PureStepResult> {
+  const trnBytes = readFileSync(trnFile);
+  const prdBytes = readFileSync(prdFile);
   if ((await sha256Hex(trnBytes)) !== (await sha256Hex(prdBytes))) {
-    return blocked(
-      'trn-prd-drift',
-      'STOP: the TRN and production originals differ — production has local form changes. ' +
+    return {
+      status: 'blocked',
+      blockedCode: 'trn-prd-drift',
+      blockedDetail:
+        'STOP: the TRN and production originals differ — production has local form changes. ' +
         'Record them under Open items in docs/Implementation-Plan.md before any design work.',
-    );
+    };
   }
-  return done({ 'drift.checked': true }, 'trn==prd');
+  return { status: 'done', outputs: { driftChecked: true }, detail: 'trn==prd' };
 }
 
 // ---------------------------------------------------------------------------
-// plan-changes — agentJudgment: the SOP-knowing planner
+// Customization plan schema (zod) — the agent step's outputSchema is the
+// JSON-Schema translation of this, embedded in
+// flows/syteline-form-customization.flow.json. A test asserts the two stay
+// in sync.
 // ---------------------------------------------------------------------------
 
 export const customizationPlanSchema = z
@@ -327,90 +430,72 @@ export const CUSTOMIZATION_PLANNER_SYSTEM_PROMPT =
   `- "designNotes": one paragraph — which UET fields, the ENF_* class, the SQL table link.\n` +
   `- "openItems": every ambiguity or assumption the requester or the TRN tester must resolve (alias assumed, container uncertain, missing SQL column, ...).`;
 
-const PLAN_XML_EXCERPT_CHARS = 8000;
-const PLAN_CSV_CHARS = 6000;
-const PLAN_ATTACHMENT_CHARS = 2000;
-
-function buildPlanUserMessage(values: Record<string, unknown>): string {
-  const inboxDir = values['inbox.dir'] as string;
-  const manifest = readManifest(inboxDir);
-  const formName = values['validated.formName'] as string;
-  const title = values['request.title'] as string;
-  const instructions = values['request.instructions'] as string[];
-  const formXmlText = decodeExport(readFileSync(join(inboxDir, 'form.xml')));
-  const idoCsv = readFileSync(join(inboxDir, 'ido.csv'), 'utf8');
-  const sqlCsv = readFileSync(join(inboxDir, 'sql.csv'), 'utf8');
-  const lines = [
-    `Form: ${formName}`,
-    `Title: ${title}`,
-    '',
-    'Instructions:',
-    ...instructions.map((instruction, i) => `${i + 1}. ${instruction}`),
-    '',
-    'IDO properties CSV:',
-    idoCsv.slice(0, PLAN_CSV_CHARS),
-    '',
-    'SQL columns CSV:',
-    sqlCsv.slice(0, PLAN_CSV_CHARS),
-    '',
-    'Form XML excerpt (TRN original):',
-    formXmlText.slice(0, PLAN_XML_EXCERPT_CHARS),
-  ];
-  if (manifest.attachmentNames.length > 0) {
-    lines.push('', 'Attachments:');
-    for (const name of manifest.attachmentNames) {
-      if (/\.production\.original\.xml$/i.test(name)) continue;
-      const content = readFileSync(join(inboxDir, 'attachments', name), 'utf8');
-      lines.push(`--- ${name} ---`, content.slice(0, PLAN_ATTACHMENT_CHARS));
-    }
-  }
-  lines.push('', 'Produce the plan JSON now.');
-  return lines.join('\n');
-}
-
-async function planChanges({ step, ctx, judge, signal }: StepHandlerContext): Promise<StepResult> {
-  const buildPrompt = PROMPT_BUILDERS[step.promptRef ?? ''];
-  const schema = SCHEMAS[step.schemaRef ?? ''];
-  if (!buildPrompt || !schema) {
-    return { status: 'failed', errorCode: 'missing-prompt', detail: step.promptRef ?? step.schemaRef };
-  }
-  const { systemPrompt, userMessage } = buildPrompt(ctx.values);
-  const result = await judge(
-    ctx,
-    { judgmentRef: step.promptRef!, systemPrompt, userMessage, schema },
-    signal,
-  );
-  if (!result.ok) {
-    return blocked(
-      'invalid-requirements',
-      'The SyteLine Form AI Agent could not turn the instructions into a valid plan. ' +
-        'Restate them more concretely (field type, label, tab, position) and create a new request.',
-    );
-  }
-  const plan = result.decision as CustomizationPlan;
-  return done({ plan }, `fields=${plan.fields.length}`);
-}
+/**
+ * The dynamic template section of the platform flow's agent step prompt.
+ * The full prompt in flows/syteline-form-customization.flow.json is
+ * CUSTOMIZATION_PLANNER_SYSTEM_PROMPT + "\n\n" + this template. A test
+ * asserts the committed JSON stays in sync with both constants.
+ */
+export const PLAN_AGENT_PROMPT_TEMPLATE = [
+  'Form: {{steps.validate_inputs.output.planContext.formName}}',
+  'Title: {{steps.validate_inputs.output.planContext.title}}',
+  '',
+  'Instructions:',
+  '{{steps.validate_inputs.output.planContext.instructionsText}}',
+  '',
+  'IDO properties CSV:',
+  '{{steps.validate_inputs.output.planContext.idoExcerpt}}',
+  '',
+  'SQL columns CSV:',
+  '{{steps.validate_inputs.output.planContext.sqlExcerpt}}',
+  '',
+  'Form XML excerpt (TRN original):',
+  '{{steps.validate_inputs.output.planContext.xmlExcerpt}}',
+  '',
+  'Attachments:',
+  '{{steps.validate_inputs.output.planContext.attachmentsText}}',
+  '',
+  'Produce the plan JSON now.',
+].join('\n');
 
 // ---------------------------------------------------------------------------
 // apply-changes-trn — build <Form>.xml from the TRN original
 // ---------------------------------------------------------------------------
 
-async function applyChangesTrn({ ctx }: StepHandlerContext): Promise<StepResult> {
-  const plan = ctx.values['plan'] as CustomizationPlan;
-  const trnBytes = readFileSync(ctx.values['originals.trnFile'] as string);
-  const projectDir = ctx.values['project.dir'] as string;
-  const formName = ctx.values['validated.formName'] as string;
-  const fields: NewFieldSpec[] = plan.fields.map((f) => {
+export interface ApplyChangesArgs {
+  plan: CustomizationPlan;
+  trnFile: string;
+  projectDir: string;
+  formName: string;
+}
+
+export async function applyChangesTrn(args: ApplyChangesArgs): Promise<PureStepResult> {
+  // Belt-and-suspenders: the platform already validated the agent's output
+  // against the flow's outputSchema, but the UET contract (field names,
+  // shapes) is re-checked here with the canonical zod schema.
+  const plan = customizationPlanSchema.safeParse(args.plan);
+  if (!plan.success) {
+    return {
+      status: 'blocked',
+      blockedCode: 'invalid-requirements',
+      blockedDetail:
+        'The generated plan failed re-validation — the agent produced fields outside the UET contract. ' +
+        'Refine the instructions and create a new request.',
+    };
+  }
+  const { trnFile, projectDir, formName } = args;
+  const trnBytes = readFileSync(trnFile);
+  const fields: NewFieldSpec[] = plan.data.fields.map((f) => {
     assertUetFieldName(f.field);
     return { ...f, stem: componentStem(f.field) };
   });
   const rendered = encodeExport(
     buildFormXml(decodeExport(trnBytes), {
       formName,
-      aliasPrefix: plan.aliasPrefix,
+      aliasPrefix: plan.data.aliasPrefix,
       newFields: fields,
-      relabels: plan.relabels,
-      resizes: plan.resizes,
+      relabels: plan.data.relabels,
+      resizes: plan.data.resizes,
       addGridColumns: true,
       highlight: true,
     }),
@@ -422,10 +507,11 @@ async function applyChangesTrn({ ctx }: StepHandlerContext): Promise<StepResult>
     `${f.stem}Edit`,
     ...(f.kind === 'notes' ? [] : [`${f.stem}GridCol`]),
   ]);
-  return done(
-    { 'build.formXmlFile': outPath, 'build.components': components },
-    `components=${components.length}`,
-  );
+  return {
+    status: 'done',
+    outputs: { formXmlFile: outPath, components },
+    detail: `components=${components.length}`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -436,17 +522,26 @@ function uetDataType(kind: string): string {
   return kind === 'date' ? 'date' : 'string';
 }
 
+export interface VerifyArgs {
+  plan: CustomizationPlan;
+  projectDir: string;
+  formName: string;
+  sha256Prefix: string;
+  formXmlFile: string;
+  trnFile: string;
+  title: string;
+  instructions: string[];
+  requestedBy?: string;
+  repo: string;
+}
+
 function buildImplementationPlanInput(
-  values: Record<string, unknown>,
+  args: VerifyArgs,
   plan: CustomizationPlan,
-  sha256Prefix: string,
 ): ImplementationPlanInput {
   const date = todayIso();
-  const formName = values['validated.formName'] as string;
-  const title = values['request.title'] as string;
-  const repo = values['repo'] as string;
-  const instructions = values['request.instructions'] as string[];
-  const displayName = (values['request.requestedBy'] as string | undefined) ?? 'the requester';
+  const { formName, title, repo, instructions, sha256Prefix } = args;
+  const displayName = args.requestedBy ?? 'the requester';
   return {
     formName,
     title,
@@ -502,9 +597,8 @@ function buildImplementationPlanInput(
   };
 }
 
-function buildReadmeInput(values: Record<string, unknown>, plan: CustomizationPlan, deckFileName: string): ReadmeInput {
-  const formName = values['validated.formName'] as string;
-  const repo = values['repo'] as string;
+function buildReadmeInput(args: VerifyArgs, plan: CustomizationPlan, deckFileName: string): ReadmeInput {
+  const { formName, repo } = args;
   const changeBullets = [
     ...plan.fields.map((f) => `New ${f.kind} field "${f.caption}" (${f.field}) on ${f.container}`),
     ...plan.relabels.map((r) => `Relabeled ${r.component} to "${r.newCaption}"`),
@@ -532,10 +626,8 @@ const STANDARD_PHASE_BULLETS: [string, string[]][] = [
   ['Optimize', ['Review feedback after go-live; fold follow-ups into the next change']],
 ];
 
-function buildDeckInput(values: Record<string, unknown>, plan: CustomizationPlan): DeckInput {
-  const formName = values['validated.formName'] as string;
-  const title = values['request.title'] as string;
-  const instructions = values['request.instructions'] as string[];
+function buildDeckInput(args: VerifyArgs, plan: CustomizationPlan): DeckInput {
+  const { formName, title, instructions } = args;
   return {
     formName,
     title,
@@ -590,15 +682,11 @@ export function overrideDeckBuild(fn: DeckBuildFn | null): void {
   deckBuildOverride = fn;
 }
 
-async function verify({ ctx }: StepHandlerContext): Promise<StepResult> {
-  const plan = ctx.values['plan'] as CustomizationPlan;
-  const projectDir = ctx.values['project.dir'] as string;
-  const formName = ctx.values['validated.formName'] as string;
-  const sha256Prefix = ctx.values['originals.sha256Prefix'] as string;
-  const formXmlFile = ctx.values['build.formXmlFile'] as string;
+export async function verifyBuild(args: VerifyArgs): Promise<PureStepResult> {
+  const { plan, projectDir, formName, sha256Prefix, formXmlFile, trnFile } = args;
 
   // Deterministic rebuild check: rebuild in-memory and compare bytes.
-  const trnBytes = readFileSync(ctx.values['originals.trnFile'] as string);
+  const trnBytes = readFileSync(trnFile);
   const fields: NewFieldSpec[] = plan.fields.map((f) => {
     assertUetFieldName(f.field);
     return { ...f, stem: componentStem(f.field) };
@@ -615,17 +703,19 @@ async function verify({ ctx }: StepHandlerContext): Promise<StepResult> {
     }),
   );
   if (!rebuilt.equals(readFileSync(formXmlFile))) {
-    return blocked(
-      'build-check-failed',
-      "The build script's deterministic-rebuild check failed: rebuilding <Form>.xml from the TRN original " +
+    return {
+      status: 'blocked',
+      blockedCode: 'build-check-failed',
+      blockedDetail:
+        "The build script's deterministic-rebuild check failed: rebuilding <Form>.xml from the TRN original " +
         'did not reproduce the committed file. This indicates the tooling, not the request — file it with the backend team.',
-    );
+    };
   }
 
   mkdirSync(join(projectDir, 'docs'), { recursive: true });
-  const planInput = buildImplementationPlanInput(ctx.values, plan, sha256Prefix);
+  const planInput = buildImplementationPlanInput(args, plan);
   const deckFileName = `${formName}_Implementation_Plan.pptx`;
-  const readmeInput = buildReadmeInput(ctx.values, plan, deckFileName);
+  const readmeInput = buildReadmeInput(args, plan, deckFileName);
   const write = (rel: string, content: string): void => {
     writeFileSync(join(projectDir, rel), content, 'utf8');
   };
@@ -645,19 +735,22 @@ async function verify({ ctx }: StepHandlerContext): Promise<StepResult> {
 
   let pptxPath: string;
   try {
-    const deckInput = buildDeckInput(ctx.values, plan);
+    const deckInput = buildDeckInput(args, plan);
     pptxPath = await (deckBuildOverride ?? defaultDeckBuild)(deckInput, projectDir);
   } catch {
-    return blocked(
-      'build-check-failed',
-      'The implementation-plan deck could not be built. This indicates the tooling, not the request — file it with the backend team.',
-    );
+    return {
+      status: 'blocked',
+      blockedCode: 'build-check-failed',
+      blockedDetail:
+        'The implementation-plan deck could not be built. This indicates the tooling, not the request — file it with the backend team.',
+    };
   }
   const docs = ['README.md', 'docs/Implementation-Plan.md', 'docs/troubleshooting.md', 'original/README.md'];
-  return done(
-    { 'artifacts.docs': docs, 'artifacts.deck': pptxPath, 'verify.rebuildOk': true },
-    'rebuild=ok',
-  );
+  return {
+    status: 'done',
+    outputs: { docs, deck: pptxPath, rebuildOk: true },
+    detail: 'rebuild=ok',
+  };
 }
 
 async function defaultDeckBuild(deck: DeckInput, projectDir: string): Promise<string> {
@@ -698,21 +791,26 @@ async function defaultOpenPr(args: OpenPrArgs): Promise<{ prUrl: string }> {
   return { prUrl: result.prUrl };
 }
 
-async function openPr({ ctx }: StepHandlerContext): Promise<StepResult> {
-  const plan = ctx.values['plan'] as CustomizationPlan;
-  const projectDir = ctx.values['project.dir'] as string;
-  const formName = ctx.values['validated.formName'] as string;
-  const title = ctx.values['request.title'] as string;
-  const repo = ctx.values['repo'] as string;
+export interface OpenReviewPrArgs {
+  plan: CustomizationPlan;
+  projectDir: string;
+  formName: string;
+  title: string;
+  repo: string;
+  customizationId: string;
+}
+
+export async function openReviewPr(args: OpenReviewPrArgs): Promise<PureStepResult> {
+  const { plan, projectDir, formName, title, repo, customizationId } = args;
   const changeBullets = [
     ...plan.fields.map((f) => `New ${f.kind} field "${f.caption}" (${f.field}) on ${f.container}`),
     ...plan.relabels.map((r) => `Relabeled ${r.component} to "${r.newCaption}"`),
     ...plan.resizes.map((r) => `Resized ${r.component}`),
   ];
-  const branch = `form-ai/${formName.toLowerCase()}-${ctx.runId.slice(0, 8)}`;
+  const branch = `form-ai/${formName.toLowerCase()}-${customizationId.slice(0, 8)}`;
   const prTitle = `[SyteLine Form AI Agent] ${title} (${formName})`;
   const prBody = [
-    `Built by the SyteLine Form AI Agent from request \`${ctx.runId.slice(0, 8)}\`.`,
+    `Built by the SyteLine Form AI Agent from request \`${customizationId.slice(0, 8)}\`.`,
     '',
     '## What changed',
     ...changeBullets.map((b) => `- ${b}`),
@@ -732,53 +830,12 @@ async function openPr({ ctx }: StepHandlerContext): Promise<StepResult> {
     prTitle,
     prBody,
   });
-  return done({ 'pr.url': opened.prUrl, 'pr.repo': repo }, `repo=${repo}`);
+  return {
+    status: 'done',
+    outputs: { prUrl: opened.prUrl, prRepo: repo },
+    detail: `repo=${repo}`,
+  };
 }
-
-// ---------------------------------------------------------------------------
-// Registries (the flow definition references these by string ref)
-// ---------------------------------------------------------------------------
-
-export const STEP_HANDLERS: Record<string, StepHandler> = {
-  intake,
-  'validate-inputs': validateInputs,
-  'backup-originals': backupOriginals,
-  'compare-trn-prd': compareTrnPrd,
-  'plan-changes': planChanges,
-  'apply-changes-trn': applyChangesTrn,
-  verify,
-  'open-pr': openPr,
-};
-
-export const PROMPT_BUILDERS: Record<
-  string,
-  (values: Record<string, unknown>) => { systemPrompt: string; userMessage: string }
-> = {
-  'plan-changes': (values) => ({
-    systemPrompt: CUSTOMIZATION_PLANNER_SYSTEM_PROMPT,
-    userMessage: buildPlanUserMessage(values),
-  }),
-};
-
-export const SCHEMAS: Record<string, z.ZodType<unknown>> = {
-  'customization-plan': customizationPlanSchema,
-};
-
-export const PRECONDITION_CHECKS: Record<
-  string,
-  (ctx: FlowRunContext) => Promise<{ ok: boolean; detail?: string }>
-> = {
-  'requester-holds-forms-permission': async (ctx) => {
-    const auth = await liveRequesterAuth({
-      _id: ctx.runId,
-      requesterUserId: ctx.actor.userId,
-      tenantId: ctx.actor.tenantId,
-    }).catch(() => null);
-    if (!auth || !auth.permissions.includes('syteline:forms')) return { ok: false };
-    return { ok: true };
-  },
-  'github-available': async () => ({ ok: githubPrAvailable() }),
-};
 
 /** Remove a staged inbox (best-effort cleanup after backup-originals). */
 export function cleanupInbox(inboxDir: string): void {

@@ -287,6 +287,13 @@ export interface CreateRunOptions {
   idempotencyKey?: string;
   /** Explicit version; defaults to the live alias. */
   version?: number;
+  /**
+   * Create the run already claimed by this runner (status `running`).
+   * Used by drivers that create a run they immediately execute in-process
+   * (e.g. the SyteLine Form AI Agent): the run never sits `queued` where
+   * the generic sweep could claim it.
+   */
+  claimBy?: string;
 }
 
 /**
@@ -356,7 +363,7 @@ export async function createRun(
     tenantId: auth.tenantId,
     flowName,
     flowVersion: resolvedVersion,
-    status: 'queued',
+    status: options.claimBy ? 'running' : 'queued',
     inputs: options.inputs ?? {},
     steps: definition.steps.map((step) => ({
       stepId: step.id,
@@ -368,6 +375,7 @@ export async function createRun(
     requestedBy: snapshotRequesterAuth(auth, classification),
     createdAt: now,
     updatedAt: now,
+    ...(options.claimBy ? { runnerId: options.claimBy } : {}),
   };
   try {
     await runs.insertOne(doc);
