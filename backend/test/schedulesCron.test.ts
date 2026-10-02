@@ -124,10 +124,17 @@ describe('nextCronRun', () => {
     expect(next.toISOString()).toBe('2026-11-01T00:00:00.000Z');
   });
 
-  it('throws CronNoOccurrenceError for impossible schedules', () => {
-    const fields = parseCronExpression('0 0 30 2 *');
-    expect(() => nextCronRun(fields, utc('2026-10-02T12:00:00Z'), 'UTC')).toThrow(
-      CronNoOccurrenceError,
-    );
-  });
+  it(
+    'throws CronNoOccurrenceError for impossible schedules',
+    () => {
+      const fields = parseCronExpression('0 0 30 2 *');
+      expect(() => nextCronRun(fields, utc('2026-10-02T12:00:00Z'), 'UTC')).toThrow(
+        CronNoOccurrenceError,
+      );
+    },
+    // Full 366-day scan, minute by minute — slow by design (only runs
+    // for crons with no occurrence inside a year, i.e. write-time
+    // rejections and this test).
+    30000,
+  );
 });

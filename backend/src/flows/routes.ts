@@ -95,7 +95,7 @@ function flowSummary(flow: FlowDoc): Record<string, unknown> {
   };
 }
 
-function runSummary(run: FlowRunDoc): Record<string, unknown> {
+export function runSummary(run: FlowRunDoc): Record<string, unknown> {
   return {
     id: run._id,
     flowName: run.flowName,

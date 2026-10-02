@@ -42,6 +42,8 @@ export const PERMISSIONS = [
   'syteline:ui',
   'flows:manage',
   'flows:run',
+  'schedules:manage',
+  'schedules:run',
   'repo:read',
   'repo:manage',
   'audit:read',
@@ -74,6 +76,10 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'memory:read',
     'memory:write',
     'feedback:submit',
+    // All-grant posture (Jake, 2026-10-02): every role holds every
+    // permission for now; checks stay enforced.
+    'schedules:manage',
+    'schedules:run',
   ],
   Admin: PERMISSIONS,
   'Security Admin': [
@@ -83,6 +89,9 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'document:read',
     'document:classify',
     'retention:manage',
+    // All-grant posture (Jake, 2026-10-02).
+    'schedules:manage',
+    'schedules:run',
   ],
   'AI Admin': [
     'model:manage',
@@ -99,6 +108,11 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     // (seeded by migration 033).
     'flows:manage',
     'flows:run',
+    // Schedules: run flows on a timetable (ADR-023). All-grant posture
+    // (Jake, 2026-10-02): every role holds every permission for now
+    // (seeded by migration 034).
+    'schedules:manage',
+    'schedules:run',
     'feedback:curate',
     'finetune:manage',
     'repo:read',
@@ -123,8 +137,18 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'memory:read',
     'memory:write',
     'feedback:submit',
+    // All-grant posture (Jake, 2026-10-02).
+    'schedules:manage',
+    'schedules:run',
   ],
-  'Read Only': ['conversation:read', 'document:read', 'memory:read'],
+  'Read Only': [
+    'conversation:read',
+    'document:read',
+    'memory:read',
+    // All-grant posture (Jake, 2026-10-02).
+    'schedules:manage',
+    'schedules:run',
+  ],
 };
 
 export interface AuthContext {
