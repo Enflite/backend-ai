@@ -39,7 +39,13 @@ function refresh(): Promise<AuthUser | null> {
 
 async function request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
   const headers = new Headers(init.headers);
-  if (!(init.body instanceof FormData)) headers.set('content-type', 'application/json');
+  // Only send content-type when there is actually a body (and it isn't
+  // FormData, which sets its own boundary). A bodiless GET/DELETE without
+  // this header is a CORS-simple request — no preflight — which removes an
+  // entire class of environment/proxy preflight failures.
+  if (init.body !== undefined && init.body !== null && !(init.body instanceof FormData)) {
+    headers.set('content-type', 'application/json');
+  }
   if (accessToken) headers.set('authorization', `Bearer ${accessToken}`);
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers, credentials: 'include' });
   if (response.status === 401 && retry && await refresh()) return request<T>(path, init, false);
