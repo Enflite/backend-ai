@@ -13,6 +13,7 @@ import { sytelineFormToolDefinitions } from './sytelineForms.js';
 import { sytelineUiToolDefinitions } from './sytelineUi.js';
 import { sytelineTaskToolDefinitions } from './sytelineTasks.js';
 import { formAiToolDefinitions } from '../formAgent/flowTools.js';
+import { apsToolDefinitions } from '../aps/apsTools.js';
 
 /**
  * Context handed to every tool execution. Carries the caller's auth (tenant,
@@ -80,6 +81,14 @@ export interface ToolDefinition<T = unknown> {
    * Flows platform's in-memory step outputs keep full data.
    */
   outputLimit?: number;
+  /**
+   * Optional per-tool execution deadline in ms. When set, runToolCall
+   * enforces it instead of the global AI_TOOL_TIMEOUT_MS (clamped to the
+   * config's 1000–600000ms bounds). Used by batch collectors whose
+   * sequential upstream lookups legitimately exceed the default 60s budget
+   * (aps.collectSupplyFacts: up to 5 minutes for 200 rows).
+   */
+  timeoutMs?: number;
   schema: z.ZodType<T>;
   execute(input: T, ctx: ToolExecutionContext, signal: AbortSignal): Promise<unknown>;
 }
@@ -243,6 +252,11 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
   // invokes these; the formAgent runner drives that flow. Same
   // 'syteline:forms' permission as the syteline.form_* family.
   ...formAiToolDefinitions,
+  // APS exception-resolution flow (deterministic tool substrate: report
+  // parsing, row normalization, SyteLine evidence collection, rules engine,
+  // issue snapshots, verify/close). 'document:read' for the report parse;
+  // 'syteline:read' for everything else.
+  ...apsToolDefinitions,
 ];
 
 export function getTool(name: string): ToolDefinition<any> {
@@ -464,16 +478,22 @@ export async function runToolCall(options: {
   const executionId = String(pending.insertedId);
   // Per-tool timeout on top of the caller's signal: a hung tool must not hold
   // a chat turn or worker slot indefinitely, even when the client is gone.
+  // Tools may declare their own timeoutMs (clamped to the config's validated
+  // 1000–600000ms bounds); the global AI_TOOL_TIMEOUT_MS is the default.
   // The combined signal aborts cooperatively for adapters that listen, but a
   // non-cooperative adapter (one that ignores the signal) would still never
-  // settle — so the guarded Promise.race rejects at the configured deadline
+  // settle — so the guarded Promise.race rejects at the effective deadline
   // regardless of whether the adapter ever resolves or rejects.
-  const toolSignal = AbortSignal.any([signal, AbortSignal.timeout(config.AI_TOOL_TIMEOUT_MS)]);
+  const effectiveTimeoutMs = Math.min(
+    Math.max(prepared.definition.timeoutMs ?? config.AI_TOOL_TIMEOUT_MS, 1000),
+    600000,
+  );
+  const toolSignal = AbortSignal.any([signal, AbortSignal.timeout(effectiveTimeoutMs)]);
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     deadlineTimer = setTimeout(() => {
       reject(Errors.internal('Tool execution timed out', { tool: name }, 'TOOL_TIMEOUT'));
-    }, config.AI_TOOL_TIMEOUT_MS);
+    }, effectiveTimeoutMs);
     // Never let a hung adapter keep the process alive: the timer only exists
     // to reject the race, and the finally block clears it once the call
     // settles either way.

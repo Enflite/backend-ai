@@ -293,6 +293,36 @@ Task audit events: `SYTELINE_TASK_CREATED` / `SYTELINE_TASK_STARTED`
 usernames and task ids in clear are fine; passwords and field values
 never.
 
+### APS exception-resolution tools
+
+Deterministic tool substrate for the APS exception-resolution flows
+(see `docs/aps-exception-flows.md` and `flows/aps-exception-analysis.flow.json`
+/ `flows/aps-exception-verify.flow.json`): the exception report is
+parsed from an uploaded xlsx, rows are normalized to canonical
+planning issues, SyteLine evidence is collected per issue, a
+deterministic rules engine computes findings, and issue snapshots are
+recorded for before/after verification. `aps.parseExceptionReport`
+requires `document:read` (and fails closed when the document's
+classification exceeds the caller's clearance); everything else
+requires `syteline:read` in addition to `tool:use`. All tools are
+read-only and non-destructive — the planner executes all SyteLine
+writes by hand. Real SyteLine/document behavior is
+**REQUIRES REAL INFRASTRUCTURE**; the rules engine, normalization,
+and snapshot/compare/close lifecycle are **VALIDATED IN CI**.
+
+| Tool | Purpose |
+|---|---|
+| `aps.parseExceptionReport` | Parse an uploaded exception-report xlsx (tenant-scoped document) into `{ sheetName, columns, rows, rowCount }` |
+| `aps.normalizeExceptionRows` | Map report headers to canonical planning issues `{ rowIndex, item?, orderNumber?, customerNumber?, workOrderNumber?, dueDate?, quantity?, exceptionText? }` (200-issue cap, `truncated` flag) |
+| `aps.collectSupplyFacts` | Per-issue supply evidence via the SyteLine adapter (availability + open POs); per-row errors never fail the batch |
+| `aps.collectDemandFacts` | Per-issue demand evidence (open sales orders by order or customer number) |
+| `aps.evaluateDueDates` | Per-issue schedule evidence (work orders by number or built item) |
+| `aps.applyRules` | Deterministic APS rules engine: `PAST_DUE_OPEN_ORDER`, `LATE_INBOUND_SUPPLY`, `MATERIAL_SHORTAGE`, `UNCOVERED_DEMAND`, `EXCESS_SUPPLY` → severity-tagged findings |
+| `aps.recordSnapshot` | Record an issue snapshot (issues + classifications + findings + root cause + recommendation + SyteLine steps); `""` issue id creates a new issue |
+| `aps.compareSnapshots` | Compare the latest snapshot against a new report → `{ resolved, resolvedCount, unresolvedCount, details }` |
+| `aps.closeIssue` | Close a resolved issue; called with `resolved=false` it performs no state change (fall-through-safe by flow design) |
+| `aps.getIssue` | Fetch an issue with its latest snapshot (planner handoff) |
+
 ## SyteLine Form AI Agent
 
 The **SyteLine Form AI Agent** is Runtype-style dispatch over the
