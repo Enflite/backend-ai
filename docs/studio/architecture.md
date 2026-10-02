@@ -138,7 +138,42 @@ triggers additionally require `SCHEDULES_ENABLED`.
   session auth, rate-limited)
 
 Audited: `STUDIO_AUTOMATION_CREATED/UPDATED/DELETED/DEPLOYED/UNDEPLOYED/
-TESTED/RUN`, `STUDIO_WEBHOOK_FIRED/ROTATED`, `STUDIO_AUTOMATION_LOG`.
+TESTED/RUN`, `STUDIO_WEBHOOK_FIRED/ROTATED`, `STUDIO_AUTOMATION_LOG`,
+`STUDIO_AUTOMATION_GENERATED`.
+
+## AI generation (Wave 3)
+
+Natural language → workflow draft, explanations, and step suggestions.
+
+- **`POST /studio/automations/generate`** (`studio:run`, 5/min): takes
+  `{ prompt (1–2000 chars), connectionId? }` and calls the model gateway
+  with the REAL action catalog as context (action ids, param shapes, which
+  are destructive, and per-connection support from the last capability
+  probe). The model must emit a draft automation (name/title/description/
+  trigger/steps) as JSON. The output is zod-validated against the
+  automation definition schema AND checked against the real catalog —
+  malformed JSON, schema mismatch, or an invented action id fails closed
+  with `502` and nothing is created. On success the draft is persisted as
+  `draft` with `deployment.status: 'never'`: no trigger is wired and
+  nothing is deployed. Generation prefers non-destructive actions; a
+  prompt that explicitly asks for a write may produce destructive steps,
+  flagged in the view — the draft still deploys only through the existing
+  explicit `confirmDestructive` gate. This is structural, not a prompt
+  plea: the AI **never silently deploys a destructive automation**.
+- **`POST /studio/automations/:id/explain`** (`studio:run`): a
+  plain-language step-by-step tour derived deterministically from the
+  stored definition and the real catalog — no model, so it cannot invent
+  steps. Destructive steps get a prominent warning section naming the
+  deploy-time confirmation they require.
+- **`POST /studio/automations/:id/suggest`** (`studio:run`): 1–3
+  catalog-grounded next-step suggestions (concrete, schema-valid step
+  JSON) with reasons — returned only, never applied automatically.
+
+The frontend's "Generate with AI" flow (automations list + new-automation
+route) renders the returned draft as step cards for review, with "Edit in
+builder" loading it into the canvas and "Discard draft" deleting the
+server-side draft. The builder top bar has an "Explain" drawer, and the
+add-step menu carries an "AI suggestions" section.
 
 ## Connection & capability model
 

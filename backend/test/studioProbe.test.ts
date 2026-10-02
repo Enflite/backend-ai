@@ -98,30 +98,45 @@ describe('probeConnection', () => {
   });
 
   it('reads one body chunk on GET probes, then cancels', async () => {
-    const chunks = [new TextEncoder().encode('{"items":[]}'), new TextEncoder().encode('x'.repeat(100000))];
-    let reads = 0;
-    let cancelled = false;
-    const stream = new ReadableStream({
-      async pull(controller) {
-        if (reads < chunks.length) {
-          reads++;
-          controller.enqueue(chunks[reads - 1]);
-        } else {
-          controller.close();
-        }
-      },
-      cancel() {
-        cancelled = true;
-      },
+    // Each GET fetch gets its own fresh body stream — exactly what real
+    // fetch does. (The old version shared one ReadableStream across all 11
+    // probe requests, so the read/cancel assertions depended on the stream
+    // engine's speculative pulling across sequential probes on the same
+    // stream — timing the test could not control. Pull counts also vary by
+    // environment: some Response implementations pull the body once on
+    // construction.)
+    //
+    // The deterministic contract: every GET body is sampled (read at least
+    // once) and released (cancelled). OPTIONS probes carry no body to read.
+    interface StreamStats {
+      reads: number;
+      cancelled: boolean;
+    }
+    const stats: StreamStats[] = [];
+    const fetchFn = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'OPTIONS') {
+        return new Response('{}', { status: 200, headers: { allow: 'POST, PUT' } });
+      }
+      const stat: StreamStats = { reads: 0, cancelled: false };
+      stats.push(stat);
+      const stream = new ReadableStream({
+        pull(controller) {
+          stat.reads++;
+          controller.enqueue(new TextEncoder().encode('{"items":[]}'));
+        },
+        cancel() {
+          stat.cancelled = true;
+        },
+      });
+      return new Response(stream, { status: 200 });
     });
-    const fetchFn = vi.fn(async () => new Response(stream, { status: 200 }));
     const result = await probeConnection(BASE, Buffer.from('t'), fetchFn as any);
     expect(result.operations.find((o) => o.operationId === 'syteline.getItem')!.status).toBe('ok');
-    // The consumer reads a single chunk then cancels; the stream engine may
-    // pull ahead speculatively before cancel lands, so assert the contract
-    // (body sampled, stream cancelled) rather than the internal pull count.
-    expect(reads).toBeGreaterThanOrEqual(1);
-    expect(cancelled).toBe(true);
+    expect(stats).toHaveLength(GET_CANDIDATES.length);
+    for (const stat of stats) {
+      expect(stat.reads).toBeGreaterThanOrEqual(1);
+      expect(stat.cancelled).toBe(true);
+    }
   });
 
   it('mixes statuses honestly across candidates', async () => {

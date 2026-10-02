@@ -10,9 +10,17 @@
  * instead of rendering invented shapes.
  */
 import { api, ApiError } from '../api';
+import {
+  adaptAutomation,
+  adaptAutomationSummary,
+  isBackendAutomationView,
+  toBackendDraft,
+} from './adapters';
 import type {
   StudioAction,
   StudioActionTestResult,
+  StudioAiExplanation,
+  StudioAiSuggestion,
   StudioAutomation,
   StudioAutomationSummary,
   StudioConnection,
@@ -49,26 +57,47 @@ export async function listStudioActions(): Promise<StudioAction[]> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Automations + runs (builder slice — 404 until the backend lands).    */
+/* Automations + runs                                                */
 /*                                                                     */
-/* Every getter validates its envelope; callers use isStudioUnavailable */
-/* to render the honest "backend slice in flight" state.               */
+/* Real backend contract: lists arrive as { items: [...] }; single     */
+/* resources arrive as the bare view (no envelope). Every getter        */
+/* validates its envelope; callers use isStudioUnavailable to render    */
+/* the honest "backend slice in flight" state on 404.                  */
 /* ------------------------------------------------------------------ */
 
 export async function listStudioAutomations(): Promise<StudioAutomationSummary[]> {
   const body = await api.request<unknown>(`${BASE}/automations`);
-  if (!isRecord(body) || !Array.isArray(body.automations)) {
+  if (!isRecord(body) || !Array.isArray(body.items)) {
     throw new ApiError(502, 'STUDIO_MALFORMED', 'Studio automations response was not in the expected shape.');
   }
-  return body.automations as StudioAutomationSummary[];
+  return (body.items as unknown[]).map((item) => {
+    if (!isBackendAutomationView(item)) {
+      throw new ApiError(502, 'STUDIO_MALFORMED', 'Studio automation item was not in the expected shape.');
+    }
+    return adaptAutomationSummary(item);
+  });
 }
 
 export async function getStudioAutomation(id: string): Promise<StudioAutomation> {
   const body = await api.request<unknown>(`${BASE}/automations/${encodeURIComponent(id)}`);
-  if (!isRecord(body) || !isRecord(body.automation)) {
+  if (!isBackendAutomationView(body)) {
     throw new ApiError(502, 'STUDIO_MALFORMED', 'Studio automation response was not in the expected shape.');
   }
-  return body.automation as unknown as StudioAutomation;
+  return adaptAutomation(body);
+}
+
+/** Create a draft automation (used by flows that create server-side, e.g. AI generation). */
+export async function createStudioAutomation(
+  draft: Pick<StudioAutomation, 'name' | 'title' | 'description' | 'trigger' | 'steps'>,
+): Promise<StudioAutomation> {
+  const body = await api.request<unknown>(`${BASE}/automations`, {
+    method: 'POST',
+    body: JSON.stringify(toBackendDraft(draft)),
+  });
+  if (!isBackendAutomationView(body)) {
+    throw new ApiError(502, 'STUDIO_MALFORMED', 'Studio automation create response was not in the expected shape.');
+  }
+  return adaptAutomation(body);
 }
 
 /** Save a draft: name, title, description, trigger, steps. */
@@ -77,13 +106,22 @@ export async function saveStudioAutomation(
   draft: Pick<StudioAutomation, 'name' | 'title' | 'description' | 'trigger' | 'steps'>,
 ): Promise<StudioAutomation> {
   const body = await api.request<unknown>(`${BASE}/automations/${encodeURIComponent(id)}`, {
-    method: 'PUT',
-    body: JSON.stringify({ automation: draft }),
+    method: 'PATCH',
+    body: JSON.stringify(toBackendDraft(draft)),
   });
-  if (!isRecord(body) || !isRecord(body.automation)) {
+  if (!isBackendAutomationView(body)) {
     throw new ApiError(502, 'STUDIO_MALFORMED', 'Studio automation save response was not in the expected shape.');
   }
-  return body.automation as unknown as StudioAutomation;
+  return adaptAutomation(body);
+}
+
+/** Delete an automation (tears down triggers and studio-managed flows first). */
+export async function deleteStudioAutomation(id: string): Promise<void> {
+  await api.request<unknown>(`${BASE}/automations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+function isDryRunReport(body: unknown): body is { steps: unknown[] } {
+  return isRecord(body) && Array.isArray(body.steps);
 }
 
 /** Dry-run: per-step results come back only from the real backend. */
@@ -92,23 +130,40 @@ export async function testStudioAutomation(id: string): Promise<StudioStepTestRe
     method: 'POST',
     body: JSON.stringify({}),
   });
-  if (!isRecord(body) || !Array.isArray(body.results)) {
+  if (!isDryRunReport(body)) {
     throw new ApiError(502, 'STUDIO_MALFORMED', 'Studio automation test response was not in the expected shape.');
   }
-  return body.results as StudioStepTestResult[];
+  return body.steps.map((raw) => {
+    const s = raw as Record<string, unknown>;
+    const status = s.status === 'ok' || s.status === 'failed' || s.status === 'skipped' ? s.status : 'failed';
+    return {
+      stepId: String(s.stepId ?? ''),
+      status,
+      skipped: s.skipped === true,
+      request: s.request,
+      response: s.response,
+      durationMs: typeof s.durationMs === 'number' ? s.durationMs : undefined,
+      error: typeof s.error === 'string' ? s.error : undefined,
+    } satisfies StudioStepTestResult;
+  });
 }
 
 /** Deploy. The caller must surface the destructive-confirmation UI first:
- *  this client only sends confirmDestructive: true when told to. */
+ *  this client only sends confirmDestructive: true when told to. A webhook
+ *  URL issued at deploy is merged onto the trigger for display. */
 export async function deployStudioAutomation(id: string, confirmDestructive: boolean): Promise<StudioAutomation> {
   const body = await api.request<unknown>(`${BASE}/automations/${encodeURIComponent(id)}/deploy`, {
     method: 'POST',
     body: JSON.stringify({ confirmDestructive }),
   });
-  if (!isRecord(body) || !isRecord(body.automation)) {
+  if (!isBackendAutomationView(body)) {
     throw new ApiError(502, 'STUDIO_MALFORMED', 'Studio automation deploy response was not in the expected shape.');
   }
-  return body.automation as unknown as StudioAutomation;
+  const automation = adaptAutomation(body);
+  const webhookUrl =
+    isRecord(body) && typeof body.webhookUrl === 'string' ? body.webhookUrl : undefined;
+  if (webhookUrl) automation.trigger = { ...automation.trigger, webhookUrl };
+  return automation;
 }
 
 export async function undeployStudioAutomation(id: string): Promise<StudioAutomation> {
@@ -116,10 +171,78 @@ export async function undeployStudioAutomation(id: string): Promise<StudioAutoma
     method: 'POST',
     body: JSON.stringify({}),
   });
-  if (!isRecord(body) || !isRecord(body.automation)) {
+  if (!isBackendAutomationView(body)) {
     throw new ApiError(502, 'STUDIO_MALFORMED', 'Studio automation undeploy response was not in the expected shape.');
   }
-  return body.automation as unknown as StudioAutomation;
+  return adaptAutomation(body);
+}
+
+/* ------------------------------------------------------------------ */
+/* AI generation (Wave 3)                                              */
+/*                                                                     */
+/*   POST /studio/automations/generate — NL prompt -> draft automation */
+/*     (created server-side as `draft`; never deployed). The preview    */
+/*     renders from the returned draft — nothing is invented client-    */
+/*     side.                                                           */
+/*   POST /studio/automations/:id/explain — deterministic explanation   */
+/*   POST /studio/automations/:id/suggest — next-step suggestions       */
+/* ------------------------------------------------------------------ */
+
+/** Generate a draft automation from natural language. The backend creates
+ *  the draft (status `draft`, never deployed); the caller renders the
+ *  returned draft for review before anything else happens. */
+export async function generateStudioAutomation(
+  prompt: string,
+  connectionId?: string,
+): Promise<StudioAutomation> {
+  const body = await api.request<unknown>(`${BASE}/automations/generate`, {
+    method: 'POST',
+    body: JSON.stringify(connectionId ? { prompt, connectionId } : { prompt }),
+  });
+  if (!isBackendAutomationView(body)) {
+    throw new ApiError(502, 'STUDIO_MALFORMED', 'Studio automation generate response was not in the expected shape.');
+  }
+  return adaptAutomation(body);
+}
+
+function isAiExplanation(body: unknown): body is StudioAiExplanation {
+  return (
+    isRecord(body) &&
+    typeof body.automationId === 'string' &&
+    typeof body.summary === 'string' &&
+    Array.isArray(body.steps) &&
+    Array.isArray(body.destructive)
+  );
+}
+
+/** Plain-language explanation of what the automation will do, derived
+ *  from its stored definition. Never invents steps. */
+export async function explainStudioAutomation(id: string): Promise<StudioAiExplanation> {
+  const body = await api.request<unknown>(`${BASE}/automations/${encodeURIComponent(id)}/explain`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  if (!isAiExplanation(body)) {
+    throw new ApiError(502, 'STUDIO_MALFORMED', 'Studio automation explain response was not in the expected shape.');
+  }
+  return body;
+}
+
+function isAiSuggestionList(body: unknown): body is { suggestions: StudioAiSuggestion[] } {
+  return isRecord(body) && Array.isArray(body.suggestions);
+}
+
+/** 1–3 catalog-grounded next-step suggestions. Returned only — the caller
+ *  inserts them explicitly; nothing is applied automatically. */
+export async function suggestStudioAutomationSteps(id: string): Promise<StudioAiSuggestion[]> {
+  const body = await api.request<unknown>(`${BASE}/automations/${encodeURIComponent(id)}/suggest`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  if (!isAiSuggestionList(body)) {
+    throw new ApiError(502, 'STUDIO_MALFORMED', 'Studio automation suggest response was not in the expected shape.');
+  }
+  return body.suggestions;
 }
 
 export async function listStudioRuns(): Promise<StudioRunSummary[]> {
