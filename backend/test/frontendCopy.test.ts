@@ -13,6 +13,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const APP_TSX = resolve(__dirname, '../../frontend/src/App.tsx');
+// PR #59 moved the chat loading empty state out of App.tsx into ChatView.
+const CHAT_VIEW_TSX = resolve(__dirname, '../../frontend/src/views/ChatView.tsx');
 
 describe('frontend default-open copy', () => {
   it('never renders the permissions-denial empty state', () => {
@@ -23,7 +25,7 @@ describe('frontend default-open copy', () => {
   });
 
   it('keeps a neutral loading/retry empty state when no model is selected yet', () => {
-    const source = readFileSync(APP_TSX, 'utf-8');
+    const source = readFileSync(CHAT_VIEW_TSX, 'utf-8');
     expect(source).toContain('Still loading the AI');
   });
 });
