@@ -29,6 +29,13 @@ export const TERMINAL_TASK_STATUSES: readonly TaskStatus[] = [
   'cancelled',
 ];
 
+/**
+ * blockedReason value when the runner finished read-only reconnaissance and
+ * parked the task for human write approval (§11.4). `syteline.task.approve`
+ * resumes exactly these tasks — never any other blocked reason.
+ */
+export const AWAITING_WRITE_APPROVAL = 'awaiting-write-approval';
+
 /** Per-step execution log entry. `detail` carries identifier keys only — never values. */
 export interface TaskStepLog {
   action: string;
@@ -84,6 +91,12 @@ export interface SytelineTaskDoc {
   autoApproveWrites: boolean;
   resultSummary?: string;
   blockedReason?: string;
+  /**
+   * Set when a blocked/awaiting-write-approval task is approved: who
+   * approved and when. Approval is requester-only and audited.
+   */
+  approvedBy?: string;
+  approvedAt?: Date;
   conversationId?: string;
   authSnapshot: TaskAuthSnapshot;
   runnerId?: string;
@@ -120,5 +133,8 @@ export const getTaskInput = z.object({ taskId: taskIdParam }).strict();
 
 export const cancelTaskInput = z.object({ taskId: taskIdParam }).strict();
 
+export const approveTaskInput = z.object({ taskId: taskIdParam }).strict();
+
 export type CreateTaskInput = z.input<typeof createTaskInput>;
 export type ListTasksInput = z.infer<typeof listTasksInput>;
+export type ApproveTaskInput = z.infer<typeof approveTaskInput>;

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import Sidebar from '../components/Sidebar';
 import TopBar from '../shell/TopBar';
 import MessageBubble from '../components/Message';
@@ -99,6 +100,8 @@ export default function ChatView() {
   const user = authUser as AuthUser;
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [models, setModels] = useState<Model[]>([]);
   const [selectedModel, setSelectedModel] = useState<Model | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -125,6 +128,17 @@ export default function ChatView() {
   const abortRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) ?? null;
+
+  /** Deep link from agent tasks: /?conversation=<id> opens that conversation (once). */
+  const conversationParamApplied = useRef(false);
+  useEffect(() => {
+    if (conversationParamApplied.current) return;
+    const target = searchParams.get('conversation');
+    if (target && conversations.some((conversation) => conversation.id === target)) {
+      conversationParamApplied.current = true;
+      setActiveId(target);
+    }
+  }, [searchParams, conversations]);
 
   /** Ref mirror so loadWorkspace reads the latest provider without re-fetching. */
   const activeProviderRef = useRef<ProviderGroup>(activeProvider);
@@ -487,6 +501,14 @@ export default function ChatView() {
                 </select>
               </label>
               <button className="text-sm px-3 py-1.5 rounded-md" style={{ border: '1px solid var(--border)' }} onClick={() => setShowDocuments(true)}>Documents{selectedDocumentIds.length ? ` (${selectedDocumentIds.length})` : ''}</button>
+              <button
+                className="text-sm px-3 py-1.5 rounded-md"
+                style={{ border: '1px solid var(--border)' }}
+                onClick={() => navigate(`/agents/tasks/new${activeId ? `?conversation=${encodeURIComponent(activeId)}` : ''}`)}
+                title="Turn this conversation into an agent task the AI plans and executes"
+              >
+                New agent task
+              </button>
             </>
           }
         />

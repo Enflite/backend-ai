@@ -48,6 +48,8 @@ export interface CreateSytelineTaskInput {
   title: string;
   goal: string;
   autoApproveWrites?: boolean;
+  /** Optional originating conversation: the runner posts its report there. */
+  conversationId?: string;
 }
 
 async function call<T>(tool: string, parameters: Record<string, unknown>, classification: DataClassification): Promise<T> {

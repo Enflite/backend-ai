@@ -9,10 +9,16 @@
  * land (task-agent landing, task detail, approvals, …). Surfaces whose
  * views haven't landed yet are not listed.
  */
-import { Link, Route, Routes } from 'react-router-dom';
+import { Link, Navigate, Route, Routes } from 'react-router-dom';
+import type { ReactNode } from 'react';
 import { useAuth } from '../auth';
 import { hasAnyPermission } from '../shell/AppShell';
 import { Badge, Card, PageHeader } from '../components/ui/primitives';
+import { NotAuthorizedState } from '../components/ui/ErrorState';
+import TasksLanding from '../agents/views/TasksLanding';
+import NewTaskView from '../agents/views/NewTaskView';
+import TaskDetailView from '../agents/views/TaskDetailView';
+import WorkflowsView from '../agents/views/WorkflowsView';
 
 export interface AgentSurface {
   id: string;
@@ -28,8 +34,8 @@ export const AGENT_SURFACES: AgentSurface[] = [
     id: 'syteline-task-agents',
     label: 'SyteLine Task Agents',
     description:
-      'Autonomous SyteLine UI tasks that run as you — every run carries a per-step audit trail and screenshot evidence.',
-    to: '/board',
+      'Give Enflite a task — it plans the SyteLine work, runs it as you, verifies each step, and pauses for your approval before any change. Full audit trail and screenshot evidence.',
+    to: '/agents/tasks',
     permissions: ['syteline:ui'],
   },
   {
@@ -42,6 +48,21 @@ export const AGENT_SURFACES: AgentSurface[] = [
   },
   // New agent surfaces register here as their views land (e.g. APS Planning Agent).
 ];
+
+/** Task workspaces drive SyteLine as the user — syteline:ui required. */
+function RequireTaskUi({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
+  if (!hasAnyPermission(user?.permissions ?? [], ['syteline:ui'])) {
+    return (
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-3xl mx-auto px-6 py-8">
+          <NotAuthorizedState product="SyteLine task agents" />
+        </div>
+      </div>
+    );
+  }
+  return <>{children}</>;
+}
 
 function AgentsDirectory() {
   const { user } = useAuth();
@@ -102,7 +123,40 @@ export default function AgentsView() {
   return (
     <Routes>
       <Route index element={<AgentsDirectory />} />
-      {/* Agent teams add sub-routes here as views land: task detail, approvals, … */}
+      <Route
+        path="tasks"
+        element={
+          <RequireTaskUi>
+            <TasksLanding />
+          </RequireTaskUi>
+        }
+      />
+      <Route
+        path="tasks/new"
+        element={
+          <RequireTaskUi>
+            <NewTaskView />
+          </RequireTaskUi>
+        }
+      />
+      <Route
+        path="tasks/:id"
+        element={
+          <RequireTaskUi>
+            <TaskDetailView />
+          </RequireTaskUi>
+        }
+      />
+      <Route
+        path="workflows"
+        element={
+          <RequireTaskUi>
+            <WorkflowsView />
+          </RequireTaskUi>
+        }
+      />
+      <Route path="*" element={<Navigate to="/agents" replace />} />
+      {/* Agent teams add sub-routes here as views land. */}
     </Routes>
   );
 }
