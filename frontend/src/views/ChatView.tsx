@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Sidebar from '../components/Sidebar';
+import TopBar from '../shell/TopBar';
 import MessageBubble from '../components/Message';
 import ChatInput from '../components/ChatInput';
 import ModelSelector from '../components/ModelSelector';
@@ -94,7 +95,7 @@ function toModel(value: any): Model {
 }
 
 export default function ChatView() {
-  const { user: authUser, logout, invalidate } = useAuth();
+  const { user: authUser, invalidate } = useAuth();
   const user = authUser as AuthUser;
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -433,20 +434,20 @@ export default function ChatView() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden" style={{ background: 'var(--background)' }}>
+    <div className="flex flex-1 min-h-0 overflow-hidden" style={{ background: 'var(--background)' }}>
       <Sidebar conversations={conversations} activeId={activeId} onSelect={selectConversation} onNew={() => void newConversation()}
         onDelete={(id) => void deleteConversation(id)} onRename={(id, title) => void renameConversation(id, title)}
         collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((value) => !value)} identity={{ name: user.displayName, role: user.roleName }} />
       <div className="flex flex-col flex-1 min-w-0">
-        <header className="flex items-center justify-between px-4 py-2.5 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-          <div className="flex items-center gap-3 min-w-0">
-            {/* Interactive assistant identity: avatar with live status underneath. */}
-            <div className="flex items-center gap-2 flex-shrink-0">
-              <AssistantAvatar state={assistantState} onClick={() => setShowActivity(true)} />
-              <div className="leading-tight hidden sm:block">
-                <div className="text-sm font-semibold" style={{ color: 'var(--foreground)' }}>Enflite AI</div>
+        <TopBar
+          ariaLabel="Conversation controls"
+          left={
+            <>
+              {/* Interactive assistant identity: avatar with live status. Brand lives in the shell nav. */}
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <AssistantAvatar state={assistantState} onClick={() => setShowActivity(true)} />
                 <div
-                  className="text-xs truncate max-w-[160px]"
+                  className="text-xs truncate max-w-[160px] hidden sm:block"
                   style={{ color: 'var(--muted-foreground)' }}
                   role="status"
                   aria-live="polite"
@@ -454,38 +455,41 @@ export default function ChatView() {
                   {deriveStatusText(assistantState, lastNotice, turnDocCountRef.current)}
                 </div>
               </div>
-            </div>
-            {activeConversation && <><h1 className="text-sm font-medium truncate max-w-xs">{activeConversation.title}</h1><ClassificationBadge level={activeConversation.classification} /></>}
-          </div>
-          <div className="flex items-center gap-3">
-            <ProviderSwitcher
-              providers={providers.map((p) => {
-                const hasModels = models.some((m) => m.enabled && m.providerGroup === p.key);
-                return {
-                  ...p,
-                  enabled: p.enabled && hasModels,
-                  hint: hasModels ? p.hint : 'No models available for this provider — ask your admin',
-                };
-              })}
-              active={activeProvider}
-              onSelect={switchProvider}
-            />
-            <label className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--muted-foreground)' }} title="Classification applied to newly created conversations">
-              Classification
-              <select
-                aria-label="Classification for new conversations"
-                value={draftClassification}
-                onChange={(event) => setDraftClassification(event.target.value as DataClassification)}
-                className="text-xs rounded-md px-1.5 py-1 bg-transparent"
-                style={{ border: '1px solid var(--border)', color: 'var(--foreground)' }}
-              >
-                {selectableClassifications(user.clearance).map((level) => (
-                  <option key={level} value={level}>{level}</option>
-                ))}
-              </select>
-            </label>
-            <button className="text-sm px-3 py-1.5 rounded-md" style={{ border: '1px solid var(--border)' }} onClick={() => setShowDocuments(true)}>Documents{selectedDocumentIds.length ? ` (${selectedDocumentIds.length})` : ''}</button><UserMenu user={user} onLogout={async () => { await logout(); setConversations([]); setDocuments([]); }} /></div>
-        </header>
+              {activeConversation && <><h1 className="text-sm font-medium truncate max-w-xs">{activeConversation.title}</h1><ClassificationBadge level={activeConversation.classification} /></>}
+            </>
+          }
+          right={
+            <>
+              <ProviderSwitcher
+                providers={providers.map((p) => {
+                  const hasModels = models.some((m) => m.enabled && m.providerGroup === p.key);
+                  return {
+                    ...p,
+                    enabled: p.enabled && hasModels,
+                    hint: hasModels ? p.hint : 'No models available for this provider — ask your admin',
+                  };
+                })}
+                active={activeProvider}
+                onSelect={switchProvider}
+              />
+              <label className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--muted-foreground)' }} title="Classification applied to newly created conversations">
+                Classification
+                <select
+                  aria-label="Classification for new conversations"
+                  value={draftClassification}
+                  onChange={(event) => setDraftClassification(event.target.value as DataClassification)}
+                  className="text-xs rounded-md px-1.5 py-1 bg-transparent"
+                  style={{ border: '1px solid var(--border)', color: 'var(--foreground)' }}
+                >
+                  {selectableClassifications(user.clearance).map((level) => (
+                    <option key={level} value={level}>{level}</option>
+                  ))}
+                </select>
+              </label>
+              <button className="text-sm px-3 py-1.5 rounded-md" style={{ border: '1px solid var(--border)' }} onClick={() => setShowDocuments(true)}>Documents{selectedDocumentIds.length ? ` (${selectedDocumentIds.length})` : ''}</button>
+            </>
+          }
+        />
         {error && <div role="alert" className="px-4 py-2 text-sm flex justify-between" style={{ color: '#a50a24', background: '#cf0c2c12' }}><span>{error}</span><button onClick={() => setError('')}>Dismiss</button></div>}
         <div className="flex-1 overflow-y-auto"><div className="max-w-3xl mx-auto px-4">
           {!activeConversation || !activeConversation.messages.length ? (
@@ -526,10 +530,4 @@ export default function ChatView() {
 function ClassificationBadge({ level }: { level: string }) {
   const color = CLASSIFICATION_COLOR[level] ?? '#6b7280';
   return <span className="px-2 py-0.5 rounded text-xs font-medium" style={{ background: color + '18', color, border: `1px solid ${color}40` }}>{level}</span>;
-}
-
-function UserMenu({ user, onLogout }: { user: AuthUser; onLogout: () => Promise<void> }) {
-  const [open, setOpen] = useState(false);
-  const initials = user.displayName.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase();
-  return <div className="relative"><button aria-label="Account menu" onClick={() => setOpen((value) => !value)} className="w-8 h-8 rounded-full text-xs font-semibold" style={{ background: 'var(--secondary)' }}>{initials}</button>{open && <div className="absolute right-0 top-10 rounded-lg py-1 z-50 w-56" style={{ background: 'var(--card)', border: '1px solid var(--border)' }}><div className="px-3 py-2"><p className="text-sm font-medium">{user.displayName}</p><p className="text-xs truncate" style={{ color: 'var(--muted-foreground)' }}>{user.email}</p><p className="text-xs" style={{ color: 'var(--muted-foreground)' }}>{user.roleName} · {user.clearance}</p></div><button className="w-full text-left px-3 py-2 text-sm" style={{ color: '#a50a24', borderTop: '1px solid var(--border)' }} onClick={() => void onLogout()}>Sign out</button></div>}</div>;
 }
