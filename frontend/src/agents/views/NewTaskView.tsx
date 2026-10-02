@@ -181,7 +181,7 @@ export default function NewTaskView() {
             >
               {busy ? 'Creating…' : 'Create task'}
             </button>
-            <Link to="/agents/tasks" className="text-sm" style={{ color: 'var(--muted-foreground)' }}>
+            <Link to="/tasks" className="text-sm" style={{ color: 'var(--muted-foreground)' }}>
               Cancel
             </Link>
           </div>

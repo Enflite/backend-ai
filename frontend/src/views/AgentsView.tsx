@@ -6,8 +6,7 @@
  * destination with honest permission-gated status, never a placeholder.
  *
  * Agent teams: add entries to AGENT_SURFACES and sub-routes below as views
- * land (task-agent landing, task detail, approvals, …). Surfaces whose
- * views haven't landed yet are not listed.
+ * land (approvals, …). Surfaces whose views haven't landed yet are not listed.
  */
 import { Link, Navigate, Route, Routes } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -15,7 +14,6 @@ import { useAuth } from '../auth';
 import { hasAnyPermission } from '../shell/AppShell';
 import { Badge, Card, PageHeader } from '../components/ui/primitives';
 import { NotAuthorizedState } from '../components/ui/ErrorState';
-import TasksLanding from '../agents/views/TasksLanding';
 import NewTaskView from '../agents/views/NewTaskView';
 import TaskRedirect from '../tasks/TaskRedirect';
 import WorkflowsView from '../agents/views/WorkflowsView';
@@ -35,7 +33,7 @@ export const AGENT_SURFACES: AgentSurface[] = [
     label: 'SyteLine Task Agents',
     description:
       'Give Enflite a task — it plans the SyteLine work, runs it as you, verifies each step, and pauses for your approval before any change. Full audit trail and screenshot evidence.',
-    to: '/agents/tasks',
+    to: '/tasks',
     permissions: ['syteline:ui'],
   },
   {
@@ -127,7 +125,7 @@ export default function AgentsView() {
         path="tasks"
         element={
           <RequireTaskUi>
-            <TasksLanding />
+            <Navigate to="/tasks" replace />
           </RequireTaskUi>
         }
       />

@@ -158,27 +158,30 @@ The app shell is three columns, mirroring the Relay reference layout:
    avatar + sign out at the bottom. The search trigger (⌘K) lives here too.
 2. **Contextual sidebar** (`shell/ContextSidebar.tsx`) — a 272px
    secondary panel rendered *inside the view that owns it* (Chat renders
-   its conversation list there; R3/R5 add task/form/SyteLine panels).
-   Slotted header + scrollable content + slotted footer, subtle
-   `--secondary` background, `SectionLabel` header, no brand mark — so
-   the app reads as one product instead of competing sidebars. Views
-   without sidebars (`/agents/*`, `/board`, `/forms/*`, `/syteline/*`)
-   simply don't render one.
+   its conversation list there; the agent workspace renders its task list
+   there; R5 adds form/SyteLine panels). Slotted header + scrollable
+   content + slotted footer, subtle `--secondary` background, `SectionLabel`
+   header, no brand mark — so the app reads as one product instead of
+   competing sidebars. Views without sidebars (`/agents/*` (except `/tasks`),
+   `/board`, `/forms/*`, `/syteline/*`) simply don't render one.
 3. **Main** — the routed view outlet (`<Outlet />`).
 
 The nav registry (`shell/navRegistry.tsx`) is the single source of truth:
 `NAV_ITEMS` with `{ to, label, icon, permissions?, section?, hideFromRail? }`.
 The rail renders `railNavItems()` (everything not `hideFromRail`); the
 palette renders all of `NAV_ITEMS`. Current rail order: **Home** `/`,
-**Chat** `/chat`, **Tasks** `/agents/tasks`, **Board** `/board`,
+**Chat** `/chat`, **Tasks** `/tasks`, **Board** `/board`,
 **Form AI Agent** `/forms`, **SyteLine** `/syteline`.
 
 - The **Agents** entry (`/agents`, `views/AgentsView.tsx`) takes no rail
   slot (`hideFromRail`) — the palette covers it — but stays discoverable
   as the index of the agent surfaces registered in `AGENT_SURFACES` (each
   a live destination with honest permission-gated status). Agent teams own
-  their views and sub-routes under `/agents/*` (task-agent landing, task
-  detail, approvals, …).
+  their views and sub-routes under `/agents/*` (task detail, approvals, …).
+  The agent execution workspace lives at `/tasks` + `/tasks/:id`
+  (`workspace/AgentWorkspace.tsx`): a live task list in the contextual
+  sidebar next to the task's run header, Activity / Evidence / Approvals
+  tabs, and the step-activity timeline.
 - **Agent extension slot:** specialized AI agents register as NavItems
   with `section: 'Agents'`. The section renders only when it has items, so
   no dead UI ships before an agent lands. Example:

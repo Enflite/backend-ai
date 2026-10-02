@@ -30,7 +30,7 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Home', icon: 'home' },
   { to: '/chat', label: 'Chat', icon: 'chat' },
-  { to: '/agents/tasks', label: 'Tasks', icon: 'activity', permissions: ['syteline:ui'] },
+  { to: '/tasks', label: 'Tasks', icon: 'activity', permissions: ['syteline:ui'] },
   { to: '/board', label: 'Board', icon: 'layout', permissions: ['syteline:ui', 'syteline:forms'] },
   { to: '/forms', label: 'Form AI Agent', icon: 'file', permissions: ['syteline:forms'] },
   { to: '/syteline', label: 'SyteLine', icon: 'server', permissions: ['syteline:ui'] },
