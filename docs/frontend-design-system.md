@@ -31,23 +31,67 @@ the only signal.
 
 Calm enterprise palette. Enflite Red `#CF0C2C` is the **single accent** —
 use sparingly: active nav, primary actions, AI activity, security cues,
-destructive actions. Never large red surfaces. On dark surfaces the accent
-brightens to `#E11D48` so it keeps its weight.
+destructive actions. Never large red surfaces. The dark theme is the
+Relay-adopted surface (see "Relay adoption" below); it no longer
+brightens the accent — the brand red carries both themes.
 
 | Token | Light | Dark | Use |
 |---|---|---|---|
-| `--background` | `#FAFAFA` | `#0B0B0D` | App background |
-| `--card` | `#FFFFFF` | `#141417` | Surfaces: nav rail, panels, dialogs, cards |
-| `--secondary` / `--muted` | `#F5F5F5` | `#1C1C21` | Subtle fills: contextual panels, hovers, wells |
-| `--border` | `#E7E7E7` | `#26262C` | Hairline borders/dividers |
-| `--foreground` | `#18181B` | `#F4F4F5` | Primary text |
-| `--muted-foreground` | `#71717A` | `#A1A1AA` | Secondary text |
-| `--accent` | `#CF0C2C` | `#E11D48` | Enflite red accent |
-| `--ring` | `#CF0C2C` | `#E11D48` | Focus ring |
+| `--background` | `#FAFAFA` | `#0D0F0E` | App background |
+| `--card` | `#FFFFFF` | `#111412` | Surfaces: nav rail, panels, dialogs, cards |
+| `--panel-raised` | — (dark only) | `#161A17` | Raised panels above `--card` |
+| `--secondary` / `--muted` | `#F5F5F5` | `#161A17` | Subtle fills: contextual panels, hovers, wells |
+| `--border` | `#E7E7E7` | `rgba(224,236,222,0.09)` | Hairline borders/dividers |
+| `--border-strong` | — (dark only) | `rgba(224,236,222,0.14)` | Emphasized hairlines |
+| `--foreground` | `#18181B` | `#E8E9E3` | Primary text |
+| `--muted-foreground` | `#71717A` | `#7D857F` | Secondary text |
+| `--muted-bright` | — (dark only) | `#AAB1AC` | Tertiary text, one step up from muted |
+| `--accent` | `#CF0C2C` | `#CF0C2C` | Enflite red accent |
+| `--accent-soft` | — (dark only) | `rgba(207,12,44,0.10)` | Accent wash (active nav, pills) |
+| `--ring` | `#CF0C2C` | `#CF0C2C` | Focus ring |
 | `--danger` | `#A50A24` | `#F87171` | Error text/icons; replaces hardcoded `#a50a24` |
 | `--danger-bg` | `#FEE2E2` | translucent `#F87171` | Error surface wash |
-| `--radius` / `--radius-lg` / `--radius-xl` | `6px` / `10px` / `14px` | unchanged | Corners |
+| `--radius` / `--radius-lg` / `--radius-xl` | `6px` / `10px` / `14px` | unchanged | Corners (`--radius-lg: 10px` matches Relay) |
 | `--shadow-xs` / `--sm` / `--md` / `--lg` | — | darker variants | Elevation (most surfaces stay flat on borders) |
+
+### Relay adoption (R1 — tokens & typography)
+
+The dark theme is retuned toward the Relay reference design
+(`workspace/reference/figma-relay/`): near-black green-tinted neutrals
+(`#0D0F0E` background, `#111412` card, `#161A17` raised), translucent
+green-white hairlines, Manrope/DM Mono type, 160ms-ease hover rhythm with
+a 1px hover lift (`.hover-lift`), and a whisper of red in a radial top
+glow (`radial-gradient(circle at 58% -20%, rgba(207,12,44,0.05),
+transparent 31%)` layered over `--background`). The glow lives on the
+`.app-shell-root` hook (AppShell's root div; its background moved from an
+inline style into the stylesheet so the theme owns it) and on `body`,
+so the signature is visible wherever the shell doesn't cover. Token names the
+views already use (`--background`, `--card`, `--secondary`, `--muted`,
+`--border`, `--foreground`, `--muted-foreground`, `--accent`, `--ring`,
+`--danger`) keep working; the remap is value-only, plus the additive
+`--panel-raised`, `--border-strong`, `--muted-bright`, `--accent-soft`
+tokens.
+
+**Accent swap rationale.** Relay's signature is its lime `#C8F76B`;
+Enflite's signature is Enflite Red `#CF0C2C` (the documented brand
+accent, from the light theme and the Enflite brand). R1 substitutes the
+brand red wherever Relay uses lime — `--accent`, `--accent-soft`,
+`--ring`, the top glow — used sparingly, never as large surfaces. The
+red stays at brand weight on both themes so the accent reads the same in
+light and dark. `--primary` keeps its brighter `#E11D48` dark variant for
+button contrast, and the classification colors keep their brightened
+dark hues (they are data colors, not the accent).
+
+### Typography
+
+Manrope (sans) + DM Mono (mono), loaded first in
+`frontend/src/index.css` via Google Fonts `@import` (with graceful
+fallbacks if the font fetch fails):
+
+- `--font-sans: 'Manrope', 'Inter', system-ui, sans-serif` — body text.
+  (Tailwind's `font-sans` utility and the `@theme` mapping follow this.)
+- `--font-mono: 'DM Mono', 'JetBrains Mono', monospace` — code, `Kbd`
+  chips, numeric/terminal readouts.
 
 Type scale: page title `20px/600` (`--text-page-title`), section title
 `15px/600` (`--text-section-title`), body `14px` (`--text-body`), secondary
@@ -83,13 +127,15 @@ Existing `ui/` pieces still in use: `ErrorState` (+ `DisabledState`,
 
 ## Motion (`frontend/src/index.css`)
 
-Small, fast, ease-out. Every entrance/state animation lives in the
+Small, fast, ease-out. The global `*` transition runs at **160ms ease**
+(Relay's hover rhythm); every entrance/state animation lives in the
 160–240ms band (exception: ambient indicators like the pulse dot are
 infinite). Compose these utilities — never invent one-off keyframes in
 views. Existing avatar/activity animations are unchanged.
 
 | Utility | Motion | Duration |
 |---|---|---|
+| `.hover-lift` | 1px rise on hover (eased by the global transition) | 160ms |
 | `.animate-fade-up` | 12px rise + fade | 200ms |
 | `.animate-fade-in` | fade | 180ms |
 | `.animate-slide-in-right` | slide 24px from right + fade | 220ms |
