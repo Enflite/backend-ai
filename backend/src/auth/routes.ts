@@ -5,7 +5,8 @@ import { getDb, tenantOp } from '../db/mongo.js';
 import { Errors } from '../errors.js';
 import { requireAuth } from './middleware.js';
 import { recordAudit } from '../audit/audit.js';
-import { AuthContext, Classification, Permission } from '../authz/permissions.js';
+import { AuthContext, Classification } from '../authz/permissions.js';
+import { resolvePermissions } from '../authz/resolvePermissions.js';
 import {
   REFRESH_COOKIE,
   clearRefreshCookie,
@@ -120,13 +121,7 @@ function chooseMembership(memberships: MembershipRow[], tenantId?: string): Memb
  */
 export async function buildAuth(user: UserRow, membership: MembershipRow): Promise<Omit<AuthContext, 'sessionId'>> {
   const db = await getDb();
-  const rolePermissions = await db.collection<{ _id: string; permissionId: string }>('role_permissions')
-    .find({ roleId: membership.roleId }, { projection: { permissionId: 1 } })
-    .toArray();
-  const permissionIds = rolePermissions.map((rp) => rp.permissionId);
-  const permissions = await db.collection<{ _id: string; name: string }>('permissions')
-    .find({ _id: { $in: permissionIds } }, { projection: { name: 1 } })
-    .toArray();
+  const permissions = await resolvePermissions(db, membership.roleId);
   return {
     userId: user.id,
     email: user.email,
@@ -135,7 +130,7 @@ export async function buildAuth(user: UserRow, membership: MembershipRow): Promi
     tenantId: membership.tenantId,
     roleId: membership.roleId,
     roleName: membership.roleName,
-    permissions: permissions.map((p) => p.name as Permission),
+    permissions,
   };
 }
 

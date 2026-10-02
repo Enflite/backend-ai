@@ -3,6 +3,7 @@ import { verifyToken } from './jwt.js';
 import { Errors } from '../errors.js';
 import { tenantOp } from '../db/mongo.js';
 import { recordAudit } from '../audit/audit.js';
+import { resolvePermissions } from '../authz/resolvePermissions.js';
 
 interface SessionDoc {
   _id: string;
@@ -63,14 +64,8 @@ export async function requireAuth(req: FastifyRequest, _reply: FastifyReply): Pr
         { projection: { name: 1 } }
       );
       if (!role) return null;
-      const rolePermissions = await db.collection<{ _id: string; permissionId: string }>('role_permissions')
-        .find({ roleId: role._id }, { projection: { permissionId: 1 } })
-        .toArray();
-      const permissionIds = rolePermissions.map((rp) => rp.permissionId);
-      const permissions = await db.collection<{ _id: string; name: string }>('permissions')
-        .find({ _id: { $in: permissionIds } }, { projection: { name: 1 } })
-        .toArray();
-      const names = permissions.map((p) => p.name).sort();
+      const permissions = await resolvePermissions(db, role._id);
+      const names = permissions.slice().sort();
       return { roleId: role._id, roleName: role.name, permissions: names };
     });
     if (!resolved) {
