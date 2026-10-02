@@ -78,10 +78,10 @@ function StepIcon({ status }: { status: FlowStepStatus | undefined }) {
         height="16"
         viewBox="0 0 16 16"
         fill="none"
-        stroke="#a50a24"
         strokeWidth="2"
         strokeLinecap="round"
         aria-label="Failed"
+        style={{ stroke: 'var(--danger)' }}
       >
         <path d="M4 4l8 8M12 4l-8 8" />
       </svg>
@@ -382,7 +382,7 @@ export default function CustomizationDetail() {
             className="mt-6 rounded-lg p-5"
             style={{ background: "#fef2f2", border: "1px solid #fecaca" }}
           >
-            <h2 className="text-sm font-semibold" style={{ color: "#a50a24" }}>
+            <h2 className="text-sm font-semibold" style={{ color: "var(--danger)" }}>
               {blockedTitle(detail.blockedReason)}
             </h2>
             {detail.blockedDetail && (
@@ -534,14 +534,14 @@ export default function CustomizationDetail() {
                 onClick={() => void handleCancel()}
                 disabled={acting !== null}
                 className="text-sm px-4 py-2 rounded-md disabled:opacity-60 inline-flex items-center gap-2"
-                style={{ border: "1px solid var(--border)", color: "#a50a24" }}
+                style={{ border: "1px solid var(--border)", color: "var(--danger)" }}
               >
                 {acting === "cancel" && <Spinner size={14} />}
                 Cancel customization
               </button>
             )}
             {actionError && (
-              <p className="text-sm mt-2" style={{ color: "#a50a24" }}>
+              <p className="text-sm mt-2" style={{ color: "var(--danger)" }}>
                 {actionError}
               </p>
             )}

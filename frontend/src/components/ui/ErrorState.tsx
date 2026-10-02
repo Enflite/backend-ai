@@ -2,7 +2,7 @@
 export default function ErrorState({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
     <div className="rounded-lg p-6 text-center" style={{ background: 'var(--card)', border: '1px solid var(--border)' }}>
-      <p className="text-sm font-medium" style={{ color: '#a50a24' }}>Something went wrong</p>
+      <p className="text-sm font-medium" style={{ color: 'var(--danger)' }}>Something went wrong</p>
       <p className="text-sm mt-1" style={{ color: 'var(--muted-foreground)' }}>{message}</p>
       {onRetry && (
         <button

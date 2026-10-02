@@ -69,7 +69,7 @@ function fieldErrorsFor(errors: string[]): Record<string, string[]> {
 function FieldError({ messages }: { messages?: string[] }) {
   if (!messages || messages.length === 0) return null
   return (
-    <div className="text-xs mt-1 space-y-0.5" style={{ color: "#a50a24" }}>
+    <div className="text-xs mt-1 space-y-0.5" style={{ color: "var(--danger)" }}>
       {messages.map((message, i) => (
         <p key={i}>{message}</p>
       ))}
@@ -393,9 +393,9 @@ export default function NewCustomizationForm() {
             <div
               className="rounded-lg p-4 text-sm"
               style={{
-                background: "#fee2e2",
+                background: "var(--danger-bg)",
                 border: "1px solid #fecaca",
-                color: "#a50a24",
+                color: "var(--danger)",
               }}
             >
               <p className="font-medium">Couldn't submit the request</p>

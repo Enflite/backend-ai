@@ -94,7 +94,7 @@ const STATUS_META: Record<FormCustomizationStatus, { label: string; color: strin
   in_progress: { label: 'In progress', color: '#1d4ed8', bg: '#dbeafe' },
   awaiting_review: { label: 'Awaiting review', color: '#b45309', bg: '#fef3c7' },
   completed: { label: 'Completed', color: '#15803d', bg: '#dcfce7' },
-  blocked: { label: 'Blocked', color: '#a50a24', bg: '#fee2e2' },
+  blocked: { label: 'Blocked', color: 'var(--danger)', bg: 'var(--danger-bg)' },
   cancelled: { label: 'Cancelled', color: '#6b7280', bg: '#f3f4f6' },
 };
 

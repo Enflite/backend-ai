@@ -109,7 +109,7 @@ export function Login({ onLogin, error }: { onLogin: (email: string, password: s
     event.preventDefault(); setBusy(true); setLocalError('');
     try { await onLogin(email, password); } catch (cause) { setLocalError(cause instanceof Error ? cause.message : 'Sign in failed'); } finally { setBusy(false); }
   }}><div><img src="/enflite-logo.png" alt="Enflite" className="h-9 w-auto mb-3" /><h1 className="text-xl font-semibold">Enflite</h1><p className="text-sm mt-1" style={{ color: 'var(--muted-foreground)' }}>Sign in with your enterprise account</p></div>
-    {(localError || error) && <p role="alert" className="text-sm" style={{ color: '#a50a24' }}>{localError || error}</p>}
+    {(localError || error) && <p role="alert" className="text-sm" style={{ color: 'var(--danger)' }}>{localError || error}</p>}
     {ssoEnabled && <button type="button" onClick={() => { window.location.href = api.oidcLoginUrl(); }} className="w-full rounded-md py-2 text-sm font-medium" style={{ background: 'var(--secondary)', color: 'var(--foreground)', border: '1px solid var(--border)' }}>Sign in with SSO</button>}
     {ssoEnabled && <div className="flex items-center gap-3 text-xs" style={{ color: 'var(--muted-foreground)' }}><span className="flex-1" style={{ borderTop: '1px solid var(--border)' }} /><span>or with password</span><span className="flex-1" style={{ borderTop: '1px solid var(--border)' }} /></div>}
     <label className="block text-sm">Email<input autoComplete="username" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} className="mt-1 w-full rounded-md px-3 py-2 bg-transparent" style={{ border: '1px solid var(--border)' }} /></label>

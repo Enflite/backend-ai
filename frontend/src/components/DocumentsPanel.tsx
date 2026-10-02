@@ -48,7 +48,7 @@ export default function DocumentsPanel({ user, documents, selectedIds, onSelecte
   return <div className="fixed inset-0 z-50 flex justify-end" style={{ background: '#0008' }} onMouseDown={onClose}>
     <section aria-label="Document knowledge" className="h-full w-full max-w-xl overflow-y-auto p-5" style={{ background: 'var(--background)', borderLeft: '1px solid var(--border)' }} onMouseDown={(event) => event.stopPropagation()}>
       <div className="flex items-center justify-between"><div><h2 className="text-lg font-semibold">Document knowledge</h2><p className="text-xs mt-1" style={{ color: 'var(--muted-foreground)' }}>Only READY, authorized documents can enter model context.</p></div><button aria-label="Close documents" onClick={onClose}>✕</button></div>
-      {error && <p role="alert" className="mt-3 p-2 rounded text-sm" style={{ color: '#a50a24', background: '#cf0c2c12' }}>{error}</p>}
+      {error && <p role="alert" className="mt-3 p-2 rounded text-sm" style={{ color: 'var(--danger)', background: '#cf0c2c12' }}>{error}</p>}
 
       <div className="mt-5 p-3 rounded-lg space-y-3" style={{ border: '1px solid var(--border)' }}>
         <label className="block text-sm font-medium">Upload an enterprise document</label>
@@ -67,9 +67,9 @@ export default function DocumentsPanel({ user, documents, selectedIds, onSelecte
           return <article key={document.id} className="rounded-lg p-3" style={{ border: '1px solid var(--border)' }}>
             <div className="flex gap-3 items-start">
               <input aria-label={`Use ${document.filename} in chat`} type="checkbox" checked={selected} disabled={document.status !== 'READY'} onChange={() => onSelectedIds(selected ? selectedIds.filter((id) => id !== document.id) : [...selectedIds, document.id])} />
-              <div className="min-w-0 flex-1"><p className="text-sm font-medium truncate">{document.filename}</p><p className="text-xs mt-1" style={{ color: 'var(--muted-foreground)' }}>{document.classification} · {document.status} · {(document.sizeBytes / 1024).toFixed(1)} KB</p>{document.errorCode && <p className="text-xs mt-1" style={{ color: '#a50a24' }}>{document.errorCode}</p>}</div>
+              <div className="min-w-0 flex-1"><p className="text-sm font-medium truncate">{document.filename}</p><p className="text-xs mt-1" style={{ color: 'var(--muted-foreground)' }}>{document.classification} · {document.status} · {(document.sizeBytes / 1024).toFixed(1)} KB</p>{document.errorCode && <p className="text-xs mt-1" style={{ color: 'var(--danger)' }}>{document.errorCode}</p>}</div>
               {(document.status === 'FAILED' || document.status === 'QUARANTINED') && <button disabled={busy} className="text-xs" onClick={() => void mutate(() => api.retryDocument(document.id))}>Retry</button>}
-              {user.permissions.includes('document:delete') && <button disabled={busy} className="text-xs" style={{ color: '#a50a24' }} onClick={() => void mutate(() => api.deleteDocument(document.id))}>Delete</button>}
+              {user.permissions.includes('document:delete') && <button disabled={busy} className="text-xs" style={{ color: 'var(--danger)' }} onClick={() => void mutate(() => api.deleteDocument(document.id))}>Delete</button>}
             </div>
           </article>;
         })}

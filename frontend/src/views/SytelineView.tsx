@@ -234,7 +234,7 @@ function CredentialsSection({
                           disabled={revoking}
                           onClick={handleRevoke}
                           className="text-xs px-2.5 py-1.5 rounded-md font-medium"
-                          style={{ background: '#a50a24', color: '#fff' }}
+                          style={{ background: 'var(--danger)', color: '#fff' }}
                         >
                           {revoking ? 'Revoking…' : 'Confirm revoke'}
                         </button>
@@ -264,7 +264,7 @@ function CredentialsSection({
             </tbody>
           </table>
           {revokeError && (
-            <p role="alert" className="text-xs mt-2" style={{ color: '#a50a24' }}>{revokeError}</p>
+            <p role="alert" className="text-xs mt-2" style={{ color: 'var(--danger)' }}>{revokeError}</p>
           )}
         </div>
       )}
@@ -323,7 +323,7 @@ function CredentialsSection({
           </span>
         </label>
         {saveError && (
-          <p role="alert" className="text-xs" style={{ color: '#a50a24' }}>{saveError}</p>
+          <p role="alert" className="text-xs" style={{ color: 'var(--danger)' }}>{saveError}</p>
         )}
         <button
           type="submit"
@@ -432,7 +432,7 @@ function SessionSection({
       )}
 
       {error && (
-        <p role="alert" className="text-xs" style={{ color: '#a50a24' }}>{error}</p>
+        <p role="alert" className="text-xs" style={{ color: 'var(--danger)' }}>{error}</p>
       )}
     </section>
   );

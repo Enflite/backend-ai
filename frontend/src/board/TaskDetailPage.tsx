@@ -23,7 +23,7 @@ const TASK_STATUS_META: Record<SytelineTaskDetail['status'], { label: string; co
   assigned: { label: 'Assigned', color: '#4a4a4a', bg: '#f0f0f0' },
   in_progress: { label: 'In progress', color: '#1d4ed8', bg: '#dbeafe' },
   completed: { label: 'Completed', color: '#15803d', bg: '#dcfce7' },
-  blocked: { label: 'Blocked', color: '#a50a24', bg: '#fee2e2' },
+  blocked: { label: 'Blocked', color: 'var(--danger)', bg: 'var(--danger-bg)' },
   cancelled: { label: 'Cancelled', color: '#6b7280', bg: '#f3f4f6' },
 };
 
@@ -31,7 +31,7 @@ const STEP_STATUS_META: Record<TaskStepLog['status'], { label: string; color: st
   pending: { label: 'Pending', color: '#6b7280' },
   running: { label: 'Running', color: '#1d4ed8' },
   ok: { label: 'Done', color: '#15803d' },
-  failed: { label: 'Failed', color: '#a50a24' },
+  failed: { label: 'Failed', color: 'var(--danger)' },
   skipped: { label: 'Skipped', color: '#9a3412' },
 };
 
@@ -94,7 +94,7 @@ function StepLogItem({ step, index }: { step: TaskStepLog; index: number }) {
       )}
       <div className="flex flex-wrap items-center gap-2 mt-2">
         {step.errorCode && (
-          <span className="text-xs font-mono px-2 py-0.5 rounded" style={{ background: '#fee2e2', color: '#a50a24' }}>
+          <span className="text-xs font-mono px-2 py-0.5 rounded" style={{ background: 'var(--danger-bg)', color: 'var(--danger)' }}>
             {step.errorCode}
           </span>
         )}
@@ -305,13 +305,13 @@ export default function TaskDetailPage() {
         {!terminal && (
           <section className="rounded-lg p-4" style={{ background: 'var(--card)', border: '1px solid var(--border)' }}>
             {cancelError && (
-              <p role="alert" className="text-sm mb-2" style={{ color: '#a50a24' }}>{cancelError}</p>
+              <p role="alert" className="text-sm mb-2" style={{ color: 'var(--danger)' }}>{cancelError}</p>
             )}
             <button
               onClick={() => void cancel()}
               disabled={cancelling}
               className="text-sm font-medium px-4 py-2 rounded-md disabled:opacity-50"
-              style={{ border: '1px solid #a50a24', color: '#a50a24' }}
+              style={{ border: '1px solid var(--danger)', color: 'var(--danger)' }}
             >
               {cancelling ? 'Cancelling…' : 'Cancel task'}
             </button>

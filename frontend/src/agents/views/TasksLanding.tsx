@@ -92,7 +92,7 @@ function TaskRow({
             className="h-full rounded-full"
             style={{
               width: `${Math.round((progress.done / progress.total) * 100)}%`,
-              background: display.status === 'failed' ? '#a50a24' : 'var(--accent)',
+              background: display.status === 'failed' ? 'var(--danger)' : 'var(--accent)',
             }}
           />
         </div>
@@ -193,7 +193,7 @@ export default function TasksLanding() {
         </div>
 
         {error && (
-          <p className="text-sm mt-4" style={{ color: '#a50a24' }} role="alert">
+          <p className="text-sm mt-4" style={{ color: 'var(--danger)' }} role="alert">
             {error}
           </p>
         )}

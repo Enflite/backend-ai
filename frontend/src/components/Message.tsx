@@ -210,7 +210,7 @@ export default function MessageBubble({ message, onCopy, onRegenerate, id, flash
                   </p>
                 )}
                 {message.error && (
-                  <div className="mt-2 px-3 py-2 rounded-md text-xs flex items-center justify-between gap-3" style={{ background: '#cf0c2c12', color: '#a50a24' }} role="alert">
+                  <div className="mt-2 px-3 py-2 rounded-md text-xs flex items-center justify-between gap-3" style={{ background: '#cf0c2c12', color: 'var(--danger)' }} role="alert">
                     <span>{message.error}</span>
                     {onRegenerate && (
                       <button onClick={onRegenerate} className="underline underline-offset-2 flex-shrink-0">Retry</button>
