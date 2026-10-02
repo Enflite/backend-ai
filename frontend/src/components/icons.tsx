@@ -29,7 +29,8 @@ export type IconName =
   | 'trash'
   | 'panel-left'
   | 'panel-right'
-  | 'spark';
+  | 'spark'
+  | 'bolt';
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
   home: (
@@ -111,6 +112,9 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
   ),
   spark: (
     <path d="m12 3 1.25 4.1a5.2 5.2 0 0 0 3.55 3.55L21 12l-4.2 1.35a5.2 5.2 0 0 0-3.55 3.55L12 21l-1.25-4.1a5.2 5.2 0 0 0-3.55-3.55L3 12l4.2-1.35a5.2 5.2 0 0 0 3.55-3.55Z" />
+  ),
+  bolt: (
+    <path d="M13.5 2.25 5.25 13.5h5.25L9 21.75l8.25-11.25H12l1.5-8.25Z" />
   ),
 };
 
