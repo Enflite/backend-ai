@@ -82,16 +82,15 @@ import { AppError } from '../src/errors.js';
 import { config } from '../src/config.js';
 import {
   FORM_AGENT_VERSION,
-  FORM_CUSTOMIZATION_FLOW_VERSION,
   PRODUCT_NAME,
-  FORM_CUSTOMIZATION_FLOW,
+  FORM_CUSTOMIZATION_FLOW_NAME,
   formAgentRoutes,
   processRequestedCustomizations,
-  overrideAgentJudge,
   kickFormAgentRunner,
   startFormAgentScheduler,
   stopFormAgentScheduler,
 } from '../src/formAgent/index.js';
+import { overrideFlowAgentFn } from '../src/flows/flowRunner.js';
 import { overrideDeckBuild, overrideOpenPr } from '../src/formAgent/steps.js';
 import { isFormAgentSchedulerRunning } from '../src/formAgent/scheduler.js';
 import { blockCustomization, claimCustomization } from '../src/formAgent/store.js';
@@ -379,7 +378,9 @@ beforeEach(async () => {
   liveRequesterAuthMock.mockReset();
   liveRequesterAuthMock.mockImplementation(async () => ({
     ...currentAuth,
-    permissions: ['syteline:forms'],
+    // syteline:forms for the product precondition; flows:run for the
+    // platform runner's own run-time permission check.
+    permissions: ['syteline:forms', 'flows:run'],
   }));
   githubAvailable.value = true;
   malwareVerdict.value = 'CLEAN';
@@ -392,7 +393,7 @@ beforeEach(async () => {
   setConfig('FORM_CUSTOMIZATION_RUNNER_ENABLED', false);
   setConfig('SYTELINE_FORM_PROJECTS_DIR', projectsDir);
   setConfig('SYTELINE_FORM_TEMPLATES_DIR', templateDir);
-  overrideAgentJudge(null);
+  overrideFlowAgentFn(null);
   overrideDeckBuild(null);
   overrideOpenPr(null);
   app = Fastify();
@@ -413,7 +414,7 @@ afterEach(async () => {
   rmSync(projectsDir, { recursive: true, force: true });
   rmSync(templateDir, { recursive: true, force: true });
   restoreConfig();
-  overrideAgentJudge(null);
+  overrideFlowAgentFn(null);
   overrideDeckBuild(null);
   overrideOpenPr(null);
 });
@@ -712,7 +713,7 @@ describe('GET /form-customizations, cancel, mark-merged', () => {
     expect(body.id).toBe(created.json().id);
     expect(body.status).toBe('requested');
     expect(body.product).toEqual({ name: 'SyteLine Form AI Agent', version: FORM_AGENT_VERSION });
-    expect(body.flow).toEqual({ name: 'syteline-form-customization', version: FORM_CUSTOMIZATION_FLOW_VERSION });
+    expect(body.flow).toEqual({ name: 'syteline-form-customization', version: 'live' });
     expect(body.steps).toHaveLength(1);
     expect(body.steps[0].name).toBe('intake');
     expect(body.steps[0].status).toBe('done');
@@ -771,13 +772,9 @@ describe('GET /form-customizations, cancel, mark-merged', () => {
 describe('flow runner', () => {
   const openedPrs: Array<{ prUrl: string; branch: string; base: string; prTitle: string; prBody: string }> = [];
 
-  /** Judge stub: validates the decision against the step's schema, like the real seam. */
+  /** Judge stub: the platform agent step returns the plan JSON directly. */
   function judgeWith(plan: unknown) {
-    overrideAgentJudge(async (_ctx, request) => {
-      const parsed = (request.schema as { safeParse: (v: unknown) => { success: boolean; data?: unknown } }).safeParse(plan);
-      if (!parsed.success) return { ok: false, code: 'invalid-decision' as const, detail: 'plan failed schema' };
-      return { ok: true, decision: parsed.data };
-    });
+    overrideFlowAgentFn(async () => JSON.stringify(plan));
   }
 
   beforeEach(() => {
@@ -985,45 +982,89 @@ describe('flow runner', () => {
 // ---------------------------------------------------------------------------
 
 describe('form-customization flow definition', () => {
-  it('declares the pipeline steps in order with inputs/outputs', () => {
-    const names = FORM_CUSTOMIZATION_FLOW.steps.map((s) => s.name);
-    expect(names).toEqual([
+  const flowJsonPath = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'flows', `${FORM_CUSTOMIZATION_FLOW_NAME}.flow.json`);
+  const flowJson = JSON.parse(readFileSync(flowJsonPath, 'utf8')) as {
+    name: string;
+    inputs: Record<string, unknown>;
+    steps: Array<{ id: string; kind: string; tool?: string; prompt?: string; outputSchema?: unknown; params?: Record<string, unknown> }>;
+  };
+
+  it('declares the pipeline steps in order with the platform step kinds', () => {
+    expect(flowJson.name).toBe(FORM_CUSTOMIZATION_FLOW_NAME);
+    expect(flowJson.steps.map((s) => s.id)).toEqual([
       'intake',
-      'validate-inputs',
-      'backup-originals',
-      'compare-trn-prd',
-      'plan-changes',
-      'apply-changes-trn',
+      'validate_inputs',
+      'backup_originals',
+      'compare_trn_prd',
+      'plan_changes',
+      'apply_changes_trn',
       'verify',
-      'open-pr',
+      'open_pr',
     ]);
-    for (const step of FORM_CUSTOMIZATION_FLOW.steps) {
-      expect(step.inputs.length, `${step.name} inputs`).toBeGreaterThan(0);
-      expect(step.outputs.length, `${step.name} outputs`).toBeGreaterThan(0);
-      expect(step.handlerRef, `${step.name} handlerRef`).toBe(step.name);
+    expect(flowJson.steps.map((s) => s.kind)).toEqual([
+      'tool',
+      'tool',
+      'tool',
+      'tool',
+      'agent',
+      'tool',
+      'tool',
+      'tool',
+    ]);
+    // Tool steps reference the formagent.* platform tools.
+    for (const step of flowJson.steps.filter((s) => s.kind === 'tool')) {
+      expect(step.tool, `${step.id} tool`).toMatch(/^formagent\./);
     }
-    // Exactly one agent-judgment step — the planner seam.
-    const judged = FORM_CUSTOMIZATION_FLOW.steps.filter((s) => s.kind === 'agentJudgment');
-    expect(judged.map((s) => s.name)).toEqual(['plan-changes']);
-    expect(judged[0]!.promptRef).toBeTruthy();
-    expect(judged[0]!.schemaRef).toBeTruthy();
+    // Exactly one agent step — the planner seam — with the plan output schema.
+    const agents = flowJson.steps.filter((s) => s.kind === 'agent');
+    expect(agents.map((s) => s.id)).toEqual(['plan_changes']);
+    expect(agents[0]!.prompt).toContain('PLAN CONTRACT');
+    expect(agents[0]!.outputSchema).toMatchObject({ type: 'object' });
   });
 
-  it('declares blocked codes and preconditions', () => {
-    const codes = new Set(FORM_CUSTOMIZATION_FLOW.steps.flatMap((s) => (s.blockedReasons ?? []).map((r) => r.code)));
-    for (const code of ['missing-production-original', 'trn-prd-drift', 'invalid-requirements', 'attachment-quarantined']) {
-      expect(codes.has(code), `blocked code ${code}`).toBe(true);
+  it('declares the five request inputs', () => {
+    for (const key of ['formXml', 'idoPropertiesCsv', 'sqlColumnsCsv', 'instructions']) {
+      expect(flowJson.inputs[key], `input ${key}`).toBeTruthy();
     }
-    expect(FORM_CUSTOMIZATION_FLOW.preconditions.map((p) => p.checkRef)).toEqual([
-      'requester-holds-forms-permission',
-      'github-available',
-    ]);
+    // Attachments ride as parallel name+content arrays.
+    expect(flowJson.inputs['attachmentNames']).toBeTruthy();
+    expect(flowJson.inputs['attachmentContents']).toBeTruthy();
   });
 
-  it('is versioned alongside the product version', () => {
-    expect(FORM_CUSTOMIZATION_FLOW.name).toBe('syteline-form-customization');
-    expect(FORM_CUSTOMIZATION_FLOW.version).toBe(FORM_CUSTOMIZATION_FLOW_VERSION);
-    expect(FORM_CUSTOMIZATION_FLOW_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  it('keeps the agent prompt in sync with the planner constants', async () => {
+    const { CUSTOMIZATION_PLANNER_SYSTEM_PROMPT, PLAN_AGENT_PROMPT_TEMPLATE } = await import('../src/formAgent/steps.js');
+    const agent = flowJson.steps.find((s) => s.id === 'plan_changes')!;
+    expect(agent.prompt).toBe(`${CUSTOMIZATION_PLANNER_SYSTEM_PROMPT}\n\n${PLAN_AGENT_PROMPT_TEMPLATE}`);
+  });
+
+  it('keeps the agent outputSchema aligned with the plan zod schema', async () => {
+    const { customizationPlanSchema } = await import('../src/formAgent/steps.js');
+    const agent = flowJson.steps.find((s) => s.id === 'plan_changes')!;
+    const schema = agent.outputSchema as {
+      properties: Record<string, { type?: string; pattern?: string; maxItems?: number }>;
+      required: string[];
+    };
+    // Spot-check the load-bearing constraints (full zod↔JSON-Schema
+    // equivalence isn't derivable without a converter; the pattern and
+    // the field cap are what the pipeline depends on).
+    for (const key of ['aliasPrefix', 'idoName', 'tableName', 'fields', 'designNotes']) {
+      expect(schema.properties[key], `outputSchema property ${key}`).toBeTruthy();
+      expect(schema.required).toContain(key);
+    }
+    expect(schema.properties['fields']!.maxItems).toBe(20);
+    const fieldPattern = (schema.properties['fields'] as any).items.properties.field.pattern as string;
+    expect(fieldPattern).toBe('^Uf_ENF_[A-Za-z0-9]+$');
+    // The zod schema's field-name rule matches the JSON Schema pattern.
+    const fieldsArray = customizationPlanSchema.shape.fields as unknown as {
+      _def: { innerType: { element: { shape: { field: { safeParse: (v: unknown) => { success: boolean } } } } } };
+    };
+    const fieldSchema = fieldsArray._def.innerType.element.shape.field;
+    expect(fieldSchema.safeParse('Uf_ENF_Test').success).toBe(true);
+    expect(fieldSchema.safeParse('Bad_Name').success).toBe(false);
+  });
+
+  it('is versioned by the Flows platform', () => {
+    expect(FORM_CUSTOMIZATION_FLOW_NAME).toBe('syteline-form-customization');
     expect(FORM_AGENT_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
     expect(PRODUCT_NAME).toBe('SyteLine Form AI Agent');
   });

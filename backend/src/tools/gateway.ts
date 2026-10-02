@@ -12,6 +12,7 @@ import { repoToolDefinitions } from './repos.js';
 import { sytelineFormToolDefinitions } from './sytelineForms.js';
 import { sytelineUiToolDefinitions } from './sytelineUi.js';
 import { sytelineTaskToolDefinitions } from './sytelineTasks.js';
+import { formAiToolDefinitions } from '../formAgent/flowTools.js';
 
 /**
  * Context handed to every tool execution. Carries the caller's auth (tenant,
@@ -71,6 +72,14 @@ export interface ToolDefinition<T = unknown> {
    * redaction is sufficient.
    */
   secretParams?: string[];
+  /**
+   * Maximum structured-output chars before runToolCall truncates `data`
+   * to a `{ truncated: true }` marker. Defaults to
+   * AI_TOOL_OUTPUT_MAX_CHARS. Steps whose legitimate output is large
+   * (e.g. the form agent's planner-context excerpts) raise this so the
+   * Flows platform's in-memory step outputs keep full data.
+   */
+  outputLimit?: number;
   schema: z.ZodType<T>;
   execute(input: T, ctx: ToolExecutionContext, signal: AbortSignal): Promise<unknown>;
 }
@@ -229,6 +238,11 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
   // 'syteline:ui' permission; the server-side runner executes tasks as the
   // requester through their own UI session.
   ...sytelineTaskToolDefinitions,
+  // SyteLine Form AI Agent pipeline steps as platform tools. The
+  // form-customization flow (flows/syteline-form-customization.flow.json)
+  // invokes these; the formAgent runner drives that flow. Same
+  // 'syteline:forms' permission as the syteline.form_* family.
+  ...formAiToolDefinitions,
 ];
 
 export function getTool(name: string): ToolDefinition<any> {
@@ -474,17 +488,18 @@ export async function runToolCall(options: {
       .collection<ToolExecutionDoc>('tool_executions')
       .updateOne({ _id: executionId, tenantId: auth.tenantId }, { $set: { status: 'SUCCEEDED', completedAt: new Date() } });
     const rendered = safeStringify(output);
+    const outputLimit = prepared.definition.outputLimit ?? config.AI_TOOL_OUTPUT_MAX_CHARS;
     // Bounded result-size metadata (counts only, never result content):
     // operators can see when an upstream returns pathological payloads.
-    await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId, action: 'TOOL_EXECUTION', tool: name, classification, metadata: { executionId, resultChars: rendered.length, truncated: rendered.length > config.AI_TOOL_OUTPUT_MAX_CHARS } });
-    if (rendered.length > config.AI_TOOL_OUTPUT_MAX_CHARS) {
+    await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId, action: 'TOOL_EXECUTION', tool: name, classification, metadata: { executionId, resultChars: rendered.length, truncated: rendered.length > outputLimit } });
+    if (rendered.length > outputLimit) {
       // Never hand API consumers truncated-then-reparsed JSON: the structured
       // result becomes an explicit marker while the model still gets a preview.
       return {
         ok: true,
         executionId,
-        output: `${rendered.slice(0, config.AI_TOOL_OUTPUT_MAX_CHARS)}\n[truncated: tool output exceeded ${config.AI_TOOL_OUTPUT_MAX_CHARS} chars]`,
-        data: { truncated: true, maxChars: config.AI_TOOL_OUTPUT_MAX_CHARS },
+        output: `${rendered.slice(0, config.AI_TOOL_OUTPUT_MAX_CHARS)}\n[truncated: tool output exceeded ${outputLimit} chars]`,
+        data: { truncated: true, maxChars: outputLimit },
         truncated: true,
       };
     }

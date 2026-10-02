@@ -453,6 +453,22 @@ export interface FlowStepLog {
   detail?: string;
 }
 
+/** A step outcome from a flow run (platform or bespoke). */
+export type FlowStepStatus = 'done' | 'blocked' | 'failed';
+
+export interface FlowStepOutcome {
+  name: string;
+  status: FlowStepStatus;
+  startedAt: string;
+  completedAt: string;
+  outputs?: Record<string, unknown>;
+  blockedCode?: string;
+  blockedDetail?: string;
+  errorCode?: string;
+  /** Identifier keys only — never values. */
+  detail?: string;
+}
+
 export interface CustomizationEvidence {
   formXml: string;
   deck: string;
@@ -511,6 +527,14 @@ export interface FormCustomizationDoc {
   blockedReason?: string;
   /** Human-readable blocked detail. */
   blockedDetail?: string;
+  /**
+   * Side-channel for flow tools: a blocked step records its (code, detail)
+   * here before throwing, so the runner can map the failed tool call back
+   * to the exact blocked outcome. Cleared on each claim.
+   */
+  pendingBlocked?: { code: string; detail: string };
+  /** Platform flow run id executing this request (cancel bridge). */
+  flowRunId?: string;
   authSnapshot: CustomizationAuthSnapshot;
   runnerId?: string;
   createdAt: Date;

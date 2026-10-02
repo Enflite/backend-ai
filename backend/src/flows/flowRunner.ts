@@ -369,6 +369,14 @@ function canonicalEqual(a: unknown, b: unknown): boolean {
 
 export interface RunFlowOptions {
   signal?: AbortSignal;
+  /**
+   * Optional in-memory sink for step outputs, keyed by step id. The
+   * platform deliberately never persists step outputs; a caller driving
+   * runFlow in-process (e.g. the SyteLine Form AI Agent's runner, which
+   * builds its domain result from the planner and PR step outputs) can
+   * collect them here.
+   */
+  collectOutputs?: Map<string, unknown>;
 }
 
 interface ExecutionContext {
@@ -389,6 +397,11 @@ interface ExecutionContext {
   onStepPatch: (index: number, patch: Partial<FlowRunStepLog>) => Promise<void>;
   /** In-memory step outputs for template resolution (never persisted). */
   outputs: Map<string, unknown>;
+  /**
+   * Optional caller-provided sink mirroring step outputs (never
+   * persisted by the platform; see RunFlowOptions.collectOutputs).
+   */
+  collectOutputs?: Map<string, unknown>;
   /** True for subflow recursion (skips the external-stop re-read; the parent checks). */
   nested: boolean;
 }
@@ -651,6 +664,7 @@ async function executeDefinition(
 
     if (failureCode === null) {
       ctx.outputs.set(step.id, output);
+      ctx.collectOutputs?.set(step.id, output);
       await ctx.onStepPatch(stepIndex, {
         status: 'ok',
         completedAt: new Date(),
@@ -781,6 +795,7 @@ export async function runFlow(
       checkCancelled,
       onStepPatch: (index, patch) => updateRunStep(tenantId, runId, index, patch),
       outputs,
+      collectOutputs: options.collectOutputs,
     });
 
     // Re-read: a cancel (or any external state change) wins over whatever

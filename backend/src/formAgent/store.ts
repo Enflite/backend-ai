@@ -11,11 +11,11 @@ import {
   type CustomizationAuthSnapshot,
   type CustomizationResult,
   type FlowStepLog,
+  type FlowStepOutcome,
   type FormCustomizationDoc,
   type FormCustomizationStatus,
   TERMINAL_FORM_CUSTOMIZATION_STATUSES,
 } from './types.js';
-import type { FlowStepOutcome } from './flowRunner.js';
 
 export function snapshotCustomizationRequester(auth: AuthContext): CustomizationAuthSnapshot {
   return {
@@ -223,9 +223,48 @@ export async function blockCustomization(
         completedAt: now,
         updatedAt: now,
       },
+      $unset: { pendingBlocked: '' },
     },
   );
   return res.matchedCount === 1;
+}
+
+/**
+ * Side-channel for flow tools: record a blocked step's (code, detail) on
+ * the doc before the tool throws. The runner reads it back in
+ * onStepOutcome to preserve the exact blocked codes/details.
+ */
+export async function notePendingBlocked(
+  tenantId: string,
+  id: string,
+  blockedCode: string,
+  blockedDetail: string,
+): Promise<void> {
+  const db = await getDb();
+  await db.collection<FormCustomizationDoc>('form_customizations').updateOne(
+    { _id: id, tenantId },
+    {
+      $set: { pendingBlocked: { code: blockedCode, detail: blockedDetail }, updatedAt: new Date() },
+    },
+  );
+}
+
+/** Record the platform flow run id executing this request (cancel bridge). */
+export async function setFlowRunId(tenantId: string, id: string, flowRunId: string): Promise<void> {
+  const db = await getDb();
+  await db.collection<FormCustomizationDoc>('form_customizations').updateOne(
+    { _id: id, tenantId },
+    { $set: { flowRunId, updatedAt: new Date() } },
+  );
+}
+
+/** Clear the blocked side-channel when a run is (re-)claimed. */
+export async function clearPendingBlocked(tenantId: string, id: string): Promise<void> {
+  const db = await getDb();
+  await db.collection<FormCustomizationDoc>('form_customizations').updateOne(
+    { _id: id, tenantId },
+    { $unset: { pendingBlocked: '' } },
+  );
 }
 
 export async function cancelCustomization(

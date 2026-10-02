@@ -14,9 +14,8 @@ export const PRODUCT_NAME = 'SyteLine Form AI Agent';
 export const FORM_AGENT_VERSION = '1.0.0';
 
 /**
- * Version of the form-customization flow definition (flow.ts). Bumped
- * whenever the pipeline's steps, contracts, or blocked semantics change.
- * Stored on every flow run so a future Flows platform can reconcile
- * runs against the definition that executed them.
+ * The pipeline's version is owned by the Flows platform now: the live
+ * version of the `syteline-form-customization` flow, converged from
+ * flows/syteline-form-customization.flow.json at the repo root. The old
+ * bespoke-flow version constant is retired.
  */
-export const FORM_CUSTOMIZATION_FLOW_VERSION = '1.0.0';
