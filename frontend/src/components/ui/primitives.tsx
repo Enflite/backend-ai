@@ -32,7 +32,7 @@ const BUTTON_VARIANT: Record<ButtonVariant, React.CSSProperties> = {
   secondary: { background: 'var(--secondary)', color: 'var(--foreground)' },
   outline: { background: 'transparent', color: 'var(--foreground)', border: '1px solid var(--border)' },
   ghost: { background: 'transparent', color: 'var(--muted-foreground)' },
-  danger: { background: 'var(--accent)', color: 'var(--accent-foreground)' },
+  danger: { background: 'var(--danger)', color: '#fff' },
 };
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {

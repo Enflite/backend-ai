@@ -61,7 +61,7 @@ function TaskRow({
   const progress = detail?.steps ? taskProgress({ steps: detail.steps }) : null;
   return (
     <Link
-      to={`/agents/tasks/${item._id}`}
+      to={`/tasks/${item._id}`}
       className="block rounded-lg p-4 hover:shadow-sm transition-shadow"
       style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
       aria-label={`${item.title} — ${display.label}`}
