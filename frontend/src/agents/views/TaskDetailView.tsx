@@ -73,7 +73,7 @@ function FinalReport({ task }: { task: SytelineTaskDetail }) {
           </p>
         )}
         {task.status === 'blocked' && task.blockedReason && (
-          <p className="text-sm mt-3" style={{ color: '#a50a24' }}>
+          <p className="text-sm mt-3" style={{ color: 'var(--danger)' }}>
             Blocked: <span className="font-mono text-xs">{task.blockedReason}</span>
           </p>
         )}
@@ -134,7 +134,7 @@ export default function TaskDetailView() {
     return (
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-6 py-8">
-          <p className="text-sm" style={{ color: '#a50a24' }} role="alert">
+          <p className="text-sm" style={{ color: 'var(--danger)' }} role="alert">
             {error}
           </p>
           <Link to="/agents/tasks" className="text-sm underline mt-2 inline-block" style={{ color: 'var(--accent)' }}>
@@ -216,7 +216,7 @@ export default function TaskDetailView() {
                   onClick={() => void doCancel()}
                   disabled={cancelling}
                   className="text-xs font-medium px-3 py-1.5 rounded-md"
-                  style={{ background: '#a50a24', color: '#fff' }}
+                  style={{ background: 'var(--danger)', color: '#fff' }}
                 >
                   {cancelling ? 'Cancelling…' : 'Yes, cancel'}
                 </button>
@@ -248,14 +248,14 @@ export default function TaskDetailView() {
               className="h-full rounded-full transition-all"
               style={{
                 width: `${Math.round((progress.done / progress.total) * 100)}%`,
-                background: display.status === 'failed' ? '#a50a24' : 'var(--accent)',
+                background: display.status === 'failed' ? 'var(--danger)' : 'var(--accent)',
               }}
             />
           </div>
         )}
 
         {error && (
-          <p className="text-sm mt-3" style={{ color: '#a50a24' }} role="alert">
+          <p className="text-sm mt-3" style={{ color: 'var(--danger)' }} role="alert">
             {error}
           </p>
         )}

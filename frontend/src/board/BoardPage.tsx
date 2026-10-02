@@ -206,7 +206,7 @@ function NewTaskForm({ onDone, onCancel }: { onDone: (taskId: string) => void; o
           </span>
         </span>
       </label>
-      {error && <p role="alert" className="text-sm" style={{ color: '#a50a24' }}>{error}</p>}
+      {error && <p role="alert" className="text-sm" style={{ color: 'var(--danger)' }}>{error}</p>}
       <div className="flex gap-2">
         <button
           type="submit"
@@ -291,7 +291,7 @@ function GenerateTasksBox({ onGenerated, disabled }: { onGenerated: () => void; 
           </button>
         </div>
       </label>
-      {error && <p role="alert" className="text-sm mt-2" style={{ color: '#a50a24' }}>{error}</p>}
+      {error && <p role="alert" className="text-sm mt-2" style={{ color: 'var(--danger)' }}>{error}</p>}
       {confirmation && <p role="status" className="text-sm mt-2" style={{ color: 'var(--muted-foreground)' }}>{confirmation}</p>}
     </form>
   );

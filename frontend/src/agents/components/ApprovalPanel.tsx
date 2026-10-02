@@ -179,7 +179,7 @@ export default function ApprovalPanel({
                 onClick={() => void doReject()}
                 disabled={busy}
                 className="text-sm font-medium px-4 py-2 rounded-md"
-                style={{ background: '#a50a24', color: '#fff' }}
+                style={{ background: 'var(--danger)', color: '#fff' }}
               >
                 {busy ? 'Cancelling…' : 'Yes, reject & cancel'}
               </button>
@@ -196,7 +196,7 @@ export default function ApprovalPanel({
           )}
         </div>
       {error && (
-        <p className="text-sm mt-2" style={{ color: '#a50a24' }} role="alert">
+        <p className="text-sm mt-2" style={{ color: 'var(--danger)' }} role="alert">
           {error}
         </p>
       )}

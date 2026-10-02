@@ -52,13 +52,13 @@ const TASK_TONE: Record<TaskDisplayStatus, { color: string; bg: string; glyph: R
     glyph: <Icon d={ALERT} label="Waiting for approval" />,
   },
   blocked: {
-    color: '#a50a24',
-    bg: '#fee2e2',
+    color: 'var(--danger)',
+    bg: 'var(--danger-bg)',
     glyph: <Icon d={PAUSE} label="Blocked" />,
   },
   failed: {
-    color: '#a50a24',
-    bg: '#fee2e2',
+    color: 'var(--danger)',
+    bg: 'var(--danger-bg)',
     glyph: <Icon d={CROSS} label="Failed" />,
   },
   completed: {
@@ -78,7 +78,7 @@ const STEP_TONE: Record<StepDisplayStatus, { color: string; glyph: ReactNode }> 
   running: { color: '#1d4ed8', glyph: <Spinner size={13} /> },
   done: { color: '#15803d', glyph: <Icon d={CHECK} label="Done" /> },
   verified: { color: '#15803d', glyph: <Icon d={CHECK} label="Verified" /> },
-  failed: { color: '#a50a24', glyph: <Icon d={CROSS} label="Failed" /> },
+  failed: { color: 'var(--danger)', glyph: <Icon d={CROSS} label="Failed" /> },
   skipped: { color: '#9a3412', glyph: <Icon d={SKIP} label="Skipped" /> },
 };
 

@@ -29,7 +29,8 @@
  */
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../auth';
-import { SectionLabel } from '../components/ui/primitives';
+import { IconButton, SectionLabel } from '../components/ui/primitives';
+import { useTheme } from '../hooks/useTheme';
 
 interface NavItem {
   to: string;
@@ -97,6 +98,7 @@ function NavEntry({ item, permissions }: { item: NavItem; permissions: string[] 
 
 export default function AppShell() {
   const { user, logout } = useAuth();
+  const [theme, toggleTheme] = useTheme();
   const permissions = user?.permissions ?? [];
   const initials = (user?.displayName ?? '?')
     .split(/\s+/)
@@ -153,6 +155,13 @@ export default function AppShell() {
               <p className="text-sm font-medium truncate" style={{ color: 'var(--foreground)' }}>{user?.displayName}</p>
               <p className="text-xs truncate" style={{ color: 'var(--muted-foreground)' }}>{user?.roleName}</p>
             </div>
+            <IconButton
+              label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+              onClick={toggleTheme}
+              className="mr-0.5"
+            >
+              {theme === 'dark' ? <IconSun /> : <IconMoon />}
+            </IconButton>
             <button
               onClick={() => void logout()}
               className="text-xs px-2 py-1.5 rounded-md hover:bg-secondary font-medium"
@@ -189,4 +198,12 @@ function IconSyteLine({ active }: { active: boolean }) {
 
 function IconLock() {
   return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5" /><path d="M5.5 7V5a2.5 2.5 0 015 0v2" /></svg>;
+}
+
+function IconSun() {
+  return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round"><circle cx="8" cy="8" r="3.25" /><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5L3.4 12.6" /></svg>;
+}
+
+function IconMoon() {
+  return <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round"><path d="M13.2 10.2A5.6 5.6 0 015.8 2.8a5.6 5.6 0 107.4 7.4z" /></svg>;
 }

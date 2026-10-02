@@ -167,7 +167,7 @@ export default function NewTaskView() {
           )}
 
           {error && (
-            <p className="text-sm" style={{ color: '#a50a24' }} role="alert">
+            <p className="text-sm" style={{ color: 'var(--danger)' }} role="alert">
               {error}
             </p>
           )}

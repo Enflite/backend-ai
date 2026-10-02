@@ -87,7 +87,7 @@ export default function PlanSteps({
                 {step.errorCode && (
                   <span
                     className="text-xs font-mono px-2 py-0.5 rounded"
-                    style={{ background: '#fee2e2', color: '#a50a24' }}
+                    style={{ background: 'var(--danger-bg)', color: 'var(--danger)' }}
                   >
                     {step.errorCode}
                   </span>

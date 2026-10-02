@@ -32,7 +32,7 @@ const BUTTON_VARIANT: Record<ButtonVariant, React.CSSProperties> = {
   secondary: { background: 'var(--secondary)', color: 'var(--foreground)' },
   outline: { background: 'transparent', color: 'var(--foreground)', border: '1px solid var(--border)' },
   ghost: { background: 'transparent', color: 'var(--muted-foreground)' },
-  danger: { background: '#cf0c2c', color: '#ffffff' },
+  danger: { background: 'var(--accent)', color: 'var(--accent-foreground)' },
 };
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -86,7 +86,7 @@ type BadgeTone = 'neutral' | 'red' | 'green' | 'blue' | 'amber' | 'purple' | 'gr
 
 const BADGE_TONE: Record<BadgeTone, { color: string; bg: string; border: string }> = {
   neutral: { color: 'var(--foreground)', bg: 'var(--secondary)', border: 'var(--border)' },
-  red: { color: '#a50a24', bg: '#cf0c2c14', border: '#cf0c2c40' },
+  red: { color: 'var(--danger)', bg: '#cf0c2c14', border: '#cf0c2c40' },
   green: { color: '#15803d', bg: '#15803d14', border: '#15803d40' },
   blue: { color: '#1d4ed8', bg: '#2563eb14', border: '#2563eb40' },
   amber: { color: '#b45309', bg: '#b4530914', border: '#b4530940' },
@@ -250,6 +250,70 @@ export function Select({ label, id, className = '', children, ...rest }: SelectP
 }
 
 /* ------------------------------------------------------------------ */
+/* Loading & status indicators                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Skeleton — shimmering placeholder block while content loads.
+ * Decorative only (aria-hidden); wrap with a labeled container when the
+ * loading state needs a name.
+ */
+export function Skeleton({
+  width = '100%',
+  height = '1rem',
+  className = '',
+  style,
+}: {
+  width?: string | number;
+  height?: string | number;
+  className?: string;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <div
+      aria-hidden="true"
+      className={`skeleton-shimmer rounded ${className}`}
+      style={{ width, height, ...style }}
+    />
+  );
+}
+
+/** Kbd — keyboard-hint chip for shortcut documentation. */
+export function Kbd({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return (
+    <kbd
+      className={`inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono leading-none ${className}`}
+      style={{
+        background: 'var(--secondary)',
+        border: '1px solid var(--border)',
+        borderBottomWidth: 2,
+        color: 'var(--foreground)',
+      }}
+    >
+      {children}
+    </kbd>
+  );
+}
+
+/** LiveDot — pulsing dot + text label for live/connected states. */
+export function LiveDot({ label = 'live', className = '' }: { label?: string; className?: string }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 text-xs font-medium ${className}`}
+      style={{ color: 'var(--muted-foreground)' }}
+      role="status"
+    >
+      <span
+        aria-hidden="true"
+        className="animate-pulse-dot w-1.5 h-1.5 rounded-full inline-block"
+        style={{ background: 'var(--class-public)' }}
+      />
+      {label}
+    </span>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Modal dialog                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -288,7 +352,7 @@ export function Modal({
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
-        className="relative rounded-xl w-full overflow-hidden outline-none"
+        className="relative rounded-xl w-full overflow-hidden outline-none animate-scale-in"
         style={{
           maxWidth: wide ? '42rem' : '28rem',
           background: 'var(--card)',

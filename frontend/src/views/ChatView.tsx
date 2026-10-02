@@ -520,7 +520,7 @@ export default function ChatView() {
             </>
           }
         />
-        {error && <div role="alert" className="px-4 py-2 text-sm flex justify-between" style={{ color: '#a50a24', background: '#cf0c2c12' }}><span>{error}</span><button onClick={() => setError('')}>Dismiss</button></div>}
+        {error && <div role="alert" className="px-4 py-2 text-sm flex justify-between" style={{ color: 'var(--danger)', background: '#cf0c2c12' }}><span>{error}</span><button onClick={() => setError('')}>Dismiss</button></div>}
         <div className="flex-1 overflow-y-auto"><div className="max-w-3xl mx-auto px-4">
           {!activeConversation || !activeConversation.messages.length ? (
             selectedModel ? <EmptyState model={selectedModel} onPrompt={(prompt) => void sendMessage(prompt, [])} /> : <p className="text-center py-20 text-sm">Still loading the AI — if this persists, refresh and try again.</p>
