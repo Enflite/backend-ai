@@ -394,7 +394,7 @@ export default function NewCustomizationForm() {
               className="rounded-lg p-4 text-sm"
               style={{
                 background: "var(--danger-bg)",
-                border: "1px solid #fecaca",
+                border: "1px solid #cf0c2c40",
                 color: "var(--danger)",
               }}
             >

@@ -344,7 +344,7 @@ export function Modal({
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-4 overflow-y-auto" onClick={onClose}>
       <div className="absolute inset-0" style={{ background: 'rgba(24,24,27,0.45)' }} aria-hidden="true" />
       <div
         ref={dialogRef}
@@ -352,7 +352,7 @@ export function Modal({
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
-        className="relative rounded-xl w-full overflow-hidden outline-none animate-scale-in"
+        className="relative rounded-xl w-full my-auto max-h-full overflow-y-auto outline-none animate-scale-in"
         style={{
           maxWidth: wide ? '42rem' : '28rem',
           background: 'var(--card)',

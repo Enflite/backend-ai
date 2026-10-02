@@ -406,7 +406,7 @@ export default function BoardPage() {
           {todayMode ? (
             <TodayView cards={cards} />
           ) : (
-            <div className="flex-1 min-h-0 flex gap-3 overflow-x-auto pb-2">
+            <div className="flex-1 min-h-0 flex gap-3 overflow-x-auto pb-2 animate-fade-up">
               {BOARD_COLUMNS.map((column) => (
                 <ColumnView key={column} column={column} cards={byColumn.get(column) ?? []} />
               ))}

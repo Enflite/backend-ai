@@ -1,13 +1,7 @@
 import type { Model } from '../types';
+import { ClassificationBadge } from './ui/primitives';
 
 const CLASSIFICATION_ORDER: Record<string, number> = { PUBLIC: 0, INTERNAL: 1, CONFIDENTIAL: 2, PROPRIETARY: 3, CUI: 4 };
-const CLASSIFICATION_COLOR: Record<string, string> = {
-  PUBLIC: '#15803d',
-  INTERNAL: '#2563eb',
-  CONFIDENTIAL: '#b45309',
-  PROPRIETARY: '#cf0c2c',
-  CUI: '#7e22ce',
-};
 
 interface ModelSelectorProps {
   models: Model[];
@@ -22,10 +16,10 @@ interface ModelSelectorProps {
 
 export default function ModelSelector({ models, selected, groupLabel, residencyNote, onSelect, onClose }: ModelSelectorProps) {
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center overflow-y-auto" onClick={onClose}>
       <div className="absolute inset-0" style={{ background: 'rgba(0,0,0,0.5)' }} />
       <div
-        className="relative rounded-xl w-full max-w-md mx-4 overflow-hidden"
+        className="relative rounded-xl w-full max-w-md mx-4 my-auto max-h-full overflow-y-auto"
         style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -65,16 +59,9 @@ export default function ModelSelector({ models, selected, groupLabel, residencyN
                   <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--muted-foreground)' }}>
                     <span>{(model.contextLength / 1000).toFixed(0)}K context</span>
                   </span>
-                  <span className="flex items-center gap-1 text-xs">
-                    <span
-                      className="px-1.5 py-0.5 rounded text-xs font-medium"
-                      style={{
-                        background: CLASSIFICATION_COLOR[model.classificationMax] + '20',
-                        color: CLASSIFICATION_COLOR[model.classificationMax],
-                      }}
-                    >
-                      Up to {model.classificationMax}
-                    </span>
+                  <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--muted-foreground)' }}>
+                    Up to
+                    <ClassificationBadge level={model.classificationMax} showDot={false} />
                   </span>
                 </div>
               </div>

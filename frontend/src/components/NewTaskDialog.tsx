@@ -177,7 +177,7 @@ export default function NewTaskDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 grid place-items-center p-5"
+      className="fixed inset-0 z-50 grid place-items-center p-5 overflow-y-auto"
       style={{ background: 'rgba(4,6,5,0.72)', backdropFilter: 'blur(10px)' }}
       onMouseDown={onClose}
     >
@@ -187,7 +187,7 @@ export default function NewTaskDialog({
         aria-labelledby="new-task-dialog-title"
         onSubmit={submitSyteline}
         onMouseDown={(event) => event.stopPropagation()}
-        className="w-full animate-scale-in"
+        className="w-full my-auto animate-scale-in"
         style={{
           maxWidth: '600px',
           background: 'var(--card)',

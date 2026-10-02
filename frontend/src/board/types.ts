@@ -23,11 +23,11 @@ export interface KindMeta {
 }
 
 export const KIND_META: Record<BoardCardKind, KindMeta> = {
-  task: { label: 'Task', color: '#1d4ed8', bg: '#dbeafe', available: true },
-  form: { label: 'Form', color: '#7c3aed', bg: '#ede9fe', available: true },
-  flow: { label: 'Flow', color: '#4a4a4a', bg: '#f0f0f0', available: false },
-  schedule: { label: 'Schedule', color: '#4a4a4a', bg: '#f0f0f0', available: false },
-  batch: { label: 'Batch', color: '#4a4a4a', bg: '#f0f0f0', available: false },
+  task: { label: 'Task', color: '#1d4ed8', bg: '#2563eb14', available: true },
+  form: { label: 'Form', color: '#7c3aed', bg: '#7c3aed14', available: true },
+  flow: { label: 'Flow', color: 'var(--muted-foreground)', bg: 'var(--secondary)', available: false },
+  schedule: { label: 'Schedule', color: 'var(--muted-foreground)', bg: 'var(--secondary)', available: false },
+  batch: { label: 'Batch', color: 'var(--muted-foreground)', bg: 'var(--secondary)', available: false },
 };
 
 export type BoardColumnId =
