@@ -73,6 +73,19 @@ export const api = {
     return request<AuthUser>('/auth/me');
   },
   request,
+  /**
+   * Authenticated binary fetch (screenshot evidence, exports). Mirrors
+   * request()'s auth/refresh behavior but returns the raw Blob instead of
+   * parsing JSON — <img> tags can't carry the Bearer token.
+   */
+  async blob(path: string, retry = true): Promise<Blob> {
+    const headers = new Headers();
+    if (accessToken) headers.set('authorization', `Bearer ${accessToken}`);
+    const response = await fetch(`${API_BASE}${path}`, { headers, credentials: 'include' });
+    if (response.status === 401 && retry && (await refresh())) return api.blob(path, false);
+    if (!response.ok) throw await parseError(response);
+    return response.blob();
+  },
   async upload(file: File, classification?: DataClassification): Promise<DocumentRecord> {
     const form = new FormData();
     if (classification) form.append('classification', classification);
