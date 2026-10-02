@@ -41,6 +41,7 @@ import { migration032 } from './032_syteline_tasks.js';
 import { migration033 } from './033_flows_permissions.js';
 import { migration034 } from './034_all_permissions_all_roles.js';
 import { migration035 } from './035_schedules_permissions.js';
+import { migration036 } from './036_all_permissions_repair.js';
 
 export const migrations: Migration[] = [
   migration001,
@@ -57,4 +58,5 @@ export const migrations: Migration[] = [
   migration033,
   migration034,
   migration035,
+  migration036,
 ];
