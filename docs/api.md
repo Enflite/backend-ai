@@ -280,12 +280,14 @@ Task audit events: `SYTELINE_TASK_CREATED` / `SYTELINE_TASK_STARTED`
 usernames and task ids in clear are fine; passwords and field values
 never.
 
-## Form customizations
+## SyteLine Form AI Agent
 
-Runtype-style dispatch over the Form-Project-Templates workflow (see
-ADR-021 and `docs/form-customizations.md`): a person or system POSTs a
-form-customization request (`{ formName, requirements }`) and the
-backend AI runs the whole template workflow server-side — scaffold the
+The **SyteLine Form AI Agent** is Runtype-style dispatch over the
+Form-Project-Templates workflow (see ADR-021 and
+`docs/form-customizations.md`): a person or system POSTs a request —
+five inputs (current form `.xml`, IDO-properties CSV, SQL-columns CSV,
+instruction list, optional attachments) — and the backend AI runs the
+whole template workflow server-side — scaffold the
 form project, record the TRN/production FormSync rollback copies,
 build `<Form>.xml` from the TRN original (UET-only `Uf_ENF_*` fields,
 purple highlighting, byte-preserved UTF-8/BOM/CRLF), write the
@@ -301,7 +303,8 @@ stay `requested` and nothing runs when off). Privacy routing treats
 the family as `syteline.*` — never offered on cloud turns when customer
 or finance categories are enforced (see `docs/privacy-routing.md`).
 
-Request lifecycle (the kanban data model for form work):
+Request lifecycle (the kanban data model for the SyteLine Form AI
+Agent):
 `requested → in_progress → awaiting_review → completed`, with
 `requested → in_progress → blocked` and `(any non-terminal) →
 cancelled`. `awaiting_review` is the agent's terminal state (work done,
@@ -323,7 +326,7 @@ not the go-live.
 |---|---|---|---|
 | POST | `/form-customizations` | auth + `syteline:forms` (10/min) | Create a request from the five-input contract: multipart file parts (`formXml`, `idoPropertiesCsv`, `sqlColumnsCsv`, `attachments[]`) or JSON-inline equivalents, plus `formName`, `title`, `instructions[]`; `202 { id, status: 'requested' }` — per-part validation (`400 VALIDATION_ERROR` names the failing part) |
 | GET | `/form-customizations/:id` | auth + `syteline:forms` | Full request record: status, step log, `resultSummary` / `blockedReason` + `blockedDetail`, and on `awaiting_review` the `evidence` completion report (`repoUrl`, `prUrl`, `<Form>.xml` and deck artifacts, recorded originals with SHA-256 prefix, `openItems`, `assumptions`) |
-| GET | `/form-customizations` | auth + `syteline:forms` | List the requester's (or, for admins, the tenant's) requests; optional `status` filter — the kanban-board query for form work |
+| GET | `/form-customizations` | auth + `syteline:forms` | List the requester's (or, for admins, the tenant's) requests; optional `status` filter — the kanban-board query for the SyteLine Form AI Agent |
 | POST | `/form-customizations/:id/cancel` | auth + `syteline:forms` | Cancel a request (ends work in flight); requester or admin only; terminal states return `409 REQUEST_ALREADY_TERMINAL` |
 
 Request audit events: `FORM_CUSTOMIZATION_REQUESTED` /

@@ -1,4 +1,4 @@
-# ADR-021: Form-customization API (Runtype-style dispatch over Form-Project-Templates)
+# ADR-021: SyteLine Form AI Agent (Runtype-style dispatch over Form-Project-Templates)
 
 **Status:** Accepted
 
@@ -20,7 +20,8 @@ imports the XML into TRN, tests, and only then launches to production
 via the launch procedure, with the original exports as the rollback
 path.
 
-The backend already has the pieces this API rides on:
+The backend already has the pieces the SyteLine Form AI Agent rides
+on:
 
 - The `syteline.form_*` tool family (see `docs/api.md`) — the port of
   the template workflow: scaffold the project, build `<Form>.xml` from
@@ -35,7 +36,8 @@ The backend already has the pieces this API rides on:
 Jake asked for "Runtype-style dispatch": typed REST endpoints that turn
 a `{ form, requirements }` request into a tracked unit of work, with a
 server-side agent executing the whole workflow and reporting back —
-POST → id → poll status → PR link. This ADR records the design
+POST → id → poll status → PR link. Jake named the product the
+**SyteLine Form AI Agent** (2026-10-02). This ADR records the design
 decisions for that dispatch layer.
 
 ## Decision
@@ -49,7 +51,7 @@ permission bar as the `syteline.form_*` tools):
 |---|---|---|
 | POST | `/api/v1/form-customizations` | Create a request from Jake's five-input contract — current form `.xml`, IDO-properties CSV, SQL-columns CSV, instruction list, optional attachments; returns `202 { id, status: 'requested' }` |
 | GET | `/api/v1/form-customizations/:id` | Full request record: status, agent progress log, `resultSummary` / `blockedReason`, completion evidence (`repoUrl`, `prUrl`, artifacts) |
-| GET | `/api/v1/form-customizations` | List the requester's (or, for admins, the tenant's) requests; optional `status` filter — the kanban-board query for form work |
+| GET | `/api/v1/form-customizations` | List the requester's (or, for admins, the tenant's) requests; optional `status` filter — the kanban-board query for the SyteLine Form AI Agent |
 | POST | `/api/v1/form-customizations/:id/cancel` | Cancel (ends work in flight); requester or admin only |
 
 *Rationale:* versioned REST, not chat, because the caller is often a
@@ -174,8 +176,9 @@ is a human decision, recorded by the human who reviewed it.
 request looks right, a reviewer merges it into `main`"), and the
 reason is load-bearing: importing `<Form>.xml` changes real users'
 forms in TRN and, after launch, in production. An auto-merged PR is a
-silent ERP change with no accountable reviewer. The API exists to do
-the *build* work automatically, not to skip the *review* work.
+silent ERP change with no accountable reviewer. The SyteLine Form AI
+Agent exists to do the *build* work automatically, not to skip the
+*review* work.
 
 ### 5. Fail-closed flags
 
@@ -286,14 +289,14 @@ only), `FORM_CUSTOMIZATION_BLOCKED` (reason),
 
 ## Consequences
 
-- The API is dark by default: `FORM_CUSTOMIZATION_API_ENABLED` and
+- The SyteLine Form AI Agent is dark by default: `FORM_CUSTOMIZATION_API_ENABLED` and
   `FORM_CUSTOMIZATION_RUNNER_ENABLED` are both `false`, and without
   `syteline:forms` the endpoints are never reachable. Two independent
-  gates before any autonomous form work can happen.
-- A form-customization request is a unit of auditable autonomy: every
-  intake, step, block, evidence artifact, and the PR link is queryable
-  from the request record — the same discipline as ADR-020's task
-  records.
+  gates before any autonomous SyteLine Form AI Agent work can happen.
+- A SyteLine Form AI Agent request is a unit of auditable autonomy:
+  every intake, step, block, evidence artifact, and the PR link is
+  queryable from the request record — the same discipline as ADR-020's
+  task records.
 - The "no auto-merge" rule is architectural, not a comment: the
   runner has no merge capability at all (it is not granted one), so
   the invariant cannot be bypassed by a prompt or a flag.

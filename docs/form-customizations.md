@@ -1,7 +1,7 @@
-# Form Customizations API — Operator Guide
+# SyteLine Form AI Agent — Operator Guide
 
 "Customize this SyteLine form for me" as a typed API call. You (or a
-system on your behalf) POST a form-customization request — form name
+system on your behalf) ask the **SyteLine Form AI Agent** — form name
 plus requirements — and the backend AI runs the **entire
 Form-Project-Templates workflow** for you: it scaffolds the form
 project, records the FormSync rollback copies, builds `<Form>.xml`
@@ -20,10 +20,11 @@ merge. Design: ADR-021.
 
 ## What it is
 
-The Runtype-style dispatch for form work: typed REST endpoints that
-turn five inputs into a tracked unit of work executed by a server-side
-agent, reporting back with a completion report and the GitHub PR link.
-It drives the same workflow as
+The **SyteLine Form AI Agent** is Runtype-style dispatch for form
+work: typed REST endpoints that turn five inputs into a tracked unit
+of work executed by a server-side agent, reporting back with a
+completion report and the GitHub PR link. It drives the same workflow
+as
 [`Enflite/Form-Project-Templates`](https://github.com/Enflite/Form-Project-Templates)
 (the template the team already uses with Claude), behind the
 `syteline:forms` permission.
@@ -104,8 +105,8 @@ steps in the generated implementation plan.
 
 ## Who can use it
 
-Form customization changes what users see and do in the ERP, so the
-bar is high: **Admin and AI Admin only** — the `syteline:forms`
+The SyteLine Form AI Agent changes what users see and do in the ERP,
+so the bar is high: **Admin and AI Admin only** — the `syteline:forms`
 permission, never the User role. Requests are owned by the requester
 (identity comes from the auth context, never from request arguments)
 and are tenant-scoped. Privacy routing treats the family as
@@ -128,7 +129,7 @@ and nothing runs.
 | `GITHUB_TOKEN` | yes (to run) | — | Token with repo + PR access in the org. Missing → requests block with `missing-github-token` |
 | `FORM_CUSTOMIZATION_RUNNER_INTERVAL_MS` | no | `15000` (15 s) | Poll interval for the runner to pick up `requested` work |
 
-## The dispatch flow
+## How it works — the SyteLine Form AI Agent dispatch flow
 
 ```
 POST /api/v1/form-customizations      → 202 { id, status: "requested" }
@@ -308,7 +309,7 @@ curl "https://api.example.com/api/v1/form-customizations?status=awaiting_review&
 
 Response (`200`): `{ "items": [ { id, status, formName, title, createdAt, updatedAt } … ], "nextCursor": "…" }`.
 Admins see the tenant's requests; others see their own. The
-kanban-board query for form work: filter by `status`.
+kanban-board query for the SyteLine Form AI Agent: filter by `status`.
 
 ### 4. Cancel — `POST /api/v1/form-customizations/:id/cancel`
 
@@ -380,7 +381,7 @@ order — it does not approximate it:
    capability; the merge is a human decision with a human's name on
    it.
 
-## OpenAPI-style reference
+## OpenAPI-style reference — SyteLine Form AI Agent endpoints
 
 Base path: `/api/v1`. All endpoints require auth + `syteline:forms`
 except as noted. Error shape:
@@ -388,8 +389,8 @@ except as noted. Error shape:
 
 ### `POST /form-customizations`
 
-Creates a form-customization request from Jake's five-input contract.
-`202` on acceptance. Two content types accepted.
+Creates a SyteLine Form AI Agent request from Jake's five-input
+contract. `202` on acceptance. Two content types accepted.
 
 **`multipart/form-data`** — preferred for large inputs. Text fields:
 
@@ -512,6 +513,6 @@ Blocked-reason codes (on the request record, not errors):
 | `blocked` with `build-check-failed` | Deterministic-rebuild check failed in the build script | Backend-team issue, not a request issue — include the step log |
 | `409 REQUEST_ALREADY_TERMINAL` on cancel | Request already finished | Read the completion report or blocked reason instead |
 
-When reporting a form-customization problem, include the request id
+When reporting a SyteLine Form AI Agent problem, include the request id
 and the relevant audit events — never paste form XML containing
 customer data into a ticket.
