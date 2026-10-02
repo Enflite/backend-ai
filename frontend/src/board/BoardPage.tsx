@@ -4,20 +4,21 @@
  * Six columns (Assigned → Cancelled). Two data sources feed cards
  * independently — SyteLine task-agent runs and form customizations — each
  * with its own health (ok / disabled / forbidden / error) rendered as a
- * source-status panel instead of a raw error. New tasks are created inline
- * and land on their own detail page. The Today view answers "what did the
- * AI complete today" with a date picker, kind filter, and a chronological
+ * source-status panel instead of a raw error. New tasks open the global
+ * new-task dialog (shell/AppShell) and land on their own detail page. The
+ * Today view answers "what did the AI complete today" with a date picker, kind filter, and a chronological
  * per-kind list.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth';
 import { ApiError } from '../api';
-import { createSytelineTask, generateSytelineTasks, generationConfirmation, listSytelineTasks } from '../api/tasks';
+import { generateSytelineTasks, generationConfirmation, listSytelineTasks } from '../api/tasks';
 import { defaultToolClassification } from '../api/tools';
 import { listFormCustomizations } from '../api/formAgent';
 import { usePolling } from '../hooks/usePolling';
 import ErrorState, { DisabledState, NotAuthorizedState } from '../components/ui/ErrorState';
+import { useNewTaskDialog } from '../shell/newTaskDialogContext';
 import StatusBadge from '../components/ui/StatusBadge';
 import Spinner from '../components/ui/Spinner';
 import {
@@ -129,103 +130,6 @@ function ColumnView({ column, cards }: { column: BoardColumnId; cards: BoardCard
         )}
       </div>
     </section>
-  );
-}
-
-/** New-task creation form: title, goal, and the writes approval toggle. */
-function NewTaskForm({ onDone, onCancel }: { onDone: (taskId: string) => void; onCancel: () => void }) {
-  const { user } = useAuth();
-  const [title, setTitle] = useState('');
-  const [goal, setGoal] = useState('');
-  const [autoApproveWrites, setAutoApproveWrites] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!title.trim() || !goal.trim() || busy) return;
-    setBusy(true);
-    setError('');
-    try {
-      const classification = defaultToolClassification(user?.clearance ?? 'PUBLIC');
-      const detail = await createSytelineTask(classification, {
-        title: title.trim(),
-        goal: goal.trim(),
-        autoApproveWrites,
-      });
-      onDone(detail._id);
-    } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : 'Could not create the task');
-      setBusy(false);
-    }
-  };
-
-  return (
-    <form
-      onSubmit={submit}
-      className="rounded-lg p-4 space-y-3 max-w-xl"
-      style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
-    >
-      <h2 className="text-sm font-semibold" style={{ color: 'var(--foreground)' }}>New SyteLine task</h2>
-      <label className="block text-sm">
-        <span className="font-medium" style={{ color: 'var(--foreground)' }}>Title</span>
-        <input
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          required
-          maxLength={200}
-          placeholder="e.g. Check why order 12345 is late"
-          className="mt-1 w-full rounded-md px-3 py-2 bg-transparent text-sm"
-          style={{ border: '1px solid var(--border)' }}
-        />
-      </label>
-      <label className="block text-sm">
-        <span className="font-medium" style={{ color: 'var(--foreground)' }}>Goal</span>
-        <textarea
-          value={goal}
-          onChange={(event) => setGoal(event.target.value)}
-          required
-          rows={3}
-          placeholder="Describe the work in plain language — the AI plans the SyteLine steps from this."
-          className="mt-1 w-full rounded-md px-3 py-2 bg-transparent text-sm"
-          style={{ border: '1px solid var(--border)' }}
-        />
-      </label>
-      <label className="flex items-start gap-2 text-sm cursor-pointer">
-        <input
-          type="checkbox"
-          checked={autoApproveWrites}
-          onChange={(event) => setAutoApproveWrites(event.target.checked)}
-          className="mt-1"
-        />
-        <span>
-          <span className="font-medium" style={{ color: 'var(--foreground)' }}>Allow the AI to make changes</span>
-          <span className="block text-xs mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
-            When on, the AI may write in SyteLine (fill fields, click buttons) for this task only.
-            When off, it only investigates and proposes a plan before anything is written.
-          </span>
-        </span>
-      </label>
-      {error && <p role="alert" className="text-sm" style={{ color: 'var(--danger)' }}>{error}</p>}
-      <div className="flex gap-2">
-        <button
-          type="submit"
-          disabled={busy || !title.trim() || !goal.trim()}
-          className="text-sm font-medium px-4 py-2 rounded-md disabled:opacity-50"
-          style={{ background: 'var(--accent)', color: 'var(--accent-foreground)' }}
-        >
-          {busy ? 'Creating…' : 'Create task'}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="text-sm px-4 py-2 rounded-md"
-          style={{ border: '1px solid var(--border)', color: 'var(--foreground)' }}
-        >
-          Cancel
-        </button>
-      </div>
-    </form>
   );
 }
 
@@ -421,7 +325,6 @@ function SourcePanel({ source, health, message, onRetry }: {
 }
 
 export default function BoardPage() {
-  const navigate = useNavigate();
   const { user } = useAuth();
   const classification = defaultToolClassification(user?.clearance ?? 'PUBLIC');
 
@@ -432,7 +335,7 @@ export default function BoardPage() {
   // Deep link: /board?today=1 (e.g. from the command palette) opens the
   // "what did the AI complete today" view directly.
   const [todayMode, setTodayMode] = useState(() => searchParams.get('today') === '1');
-  const [showNewTask, setShowNewTask] = useState(false);
+  const { openNewTask } = useNewTaskDialog();
 
   useEffect(() => {
     if (searchParams.get('today') === '1') setTodayMode(true);
@@ -465,7 +368,7 @@ export default function BoardPage() {
             {todayMode ? 'Show board' : 'Today'}
           </button>
           <button
-            onClick={() => setShowNewTask(true)}
+            onClick={() => openNewTask()}
             disabled={tasksSource.health === 'disabled' || tasksSource.health === 'forbidden'}
             className="text-sm font-medium px-3 py-1.5 rounded-md disabled:opacity-50"
             style={{ background: 'var(--accent)', color: 'var(--accent-foreground)' }}
@@ -499,15 +402,6 @@ export default function BoardPage() {
               onRetry={() => formsSource.reload()}
             />
           </div>
-
-          {showNewTask && (
-            <div className="mb-4 flex-shrink-0">
-              <NewTaskForm
-                onDone={(taskId) => navigate(`/tasks/${encodeURIComponent(taskId)}`)}
-                onCancel={() => setShowNewTask(false)}
-              />
-            </div>
-          )}
 
           {todayMode ? (
             <TodayView cards={cards} />

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { ConversationSidebarBody, ConversationSidebarCollapsed, ConversationSidebarHeader } from '../components/Sidebar';
+import { useNewTaskDialog } from '../shell/newTaskDialogContext';
 import ContextSidebar from '../shell/ContextSidebar';
 import TopBar from '../shell/TopBar';
 import MessageBubble from '../components/Message';
@@ -101,7 +102,7 @@ export default function ChatView() {
   const user = authUser as AuthUser;
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const navigate = useNavigate();
+  const { openNewTask } = useNewTaskDialog();
   const [searchParams] = useSearchParams();
   const [models, setModels] = useState<Model[]>([]);
   const [selectedModel, setSelectedModel] = useState<Model | null>(null);
@@ -534,7 +535,7 @@ export default function ChatView() {
               <button
                 className="text-sm px-3 py-1.5 rounded-md"
                 style={{ border: '1px solid var(--border)' }}
-                onClick={() => navigate(`/agents/tasks/new${activeId ? `?conversation=${encodeURIComponent(activeId)}` : ''}`)}
+                onClick={() => openNewTask(activeId ? { conversationId: activeId } : undefined)}
                 title="Turn this conversation into an agent task the AI plans and executes"
               >
                 New agent task

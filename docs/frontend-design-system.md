@@ -295,3 +295,34 @@ The pattern for presenting an agent run that ends in a human approval gate
 - Sections use `Card` + `SectionLabel` + `Badge` for counts,
   `.animate-fade-up` for entrance, `aria-labelledby` headings, and list
   markup for change rows.
+
+### New-task dialog (Relay adoption R4 — `components/NewTaskDialog.tsx`)
+
+The global creation surface, lifted from Relay's `NewTaskDialog` and bound
+to the two real pipelines. Mounted once in `shell/AppShell` and opened via
+`useNewTaskDialog()` (context in `shell/newTaskDialogContext.tsx`) — the
+workspace sidebar, board "New task" button, palette "New agent task" action,
+chat's "New agent task" button, and the task workspace all open it; the old
+`/agents/tasks/new` route now redirects to `/tasks` and the inline
+`NewTaskForm` on the board is gone.
+
+- **Anatomy:** eyebrow ("New agent task", spark icon, accent color) → big
+  title ("What should the agent do?") → goal textarea (autofocus,
+  "Describe an outcome, not a list of steps…") → static suggestion chips
+  → target cards → target-specific section → primary action.
+- **Target cards:** exactly the two real pipelines — SyteLine task
+  ("The agent drives SyteLine as you — investigate, update, validate") and
+  Form customization ("Draft a form change through the governed pipeline —
+  review the PR on GitHub"). Cards are permission-aware: lacking
+  `syteline:ui` / `syteline:forms` disables the card with a lock icon and a
+  "Requires the … permission." note. Never add a static/fake target.
+- **Suggestion chips:** plain static starters that fill the textarea — the
+  copy must never imply AI generation.
+- **SyteLine section:** task title + the writes-approval toggle (same
+  semantics as the old NewTaskView: "Allow the AI to make changes — this
+  task only"); **Start task** → `createSytelineTask` → close + navigate to
+  `/tasks/:id`. **Form section:** **Continue →** → close + `/forms/new`.
+- **Dialog mechanics:** backdrop blur (`backdrop-filter: blur(10px)`),
+  `.animate-scale-in` entrance, Esc / backdrop-mousedown close,
+  `role="dialog"` + `aria-modal` + `aria-labelledby`, focus moved to the
+  textarea on open. Follows the Motion table above for reduced-motion.

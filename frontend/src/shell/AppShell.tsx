@@ -30,18 +30,29 @@
  * /agents/*; they plug into this shell and the shared design tokens.
  */
 import { Outlet } from 'react-router-dom';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import IconRail from './IconRail';
 import { hasAnyPermission, type NavItem } from './navRegistry';
 import CommandPalette from '../components/CommandPalette';
+import NewTaskDialog, { type NewTaskDialogOptions } from '../components/NewTaskDialog';
+import { NewTaskDialogContext } from './newTaskDialogContext';
 
 /** Re-exported so existing importers (e.g. views/AgentsView) keep working. */
 export { hasAnyPermission };
 export type { NavItem };
+/** Re-exported so entry points import the hook from the shell. */
+export { useNewTaskDialog } from './newTaskDialogContext';
 
 export default function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const paletteTriggerRef = useRef<HTMLButtonElement>(null);
+  const [dialog, setDialog] = useState<(NewTaskDialogOptions & { open: boolean }) | null>(null);
+
+  const openNewTask = useCallback((options?: NewTaskDialogOptions) => {
+    setDialog({ ...(options ?? {}), open: true });
+  }, []);
+
+  const closeDialog = useCallback(() => setDialog(null), []);
 
   // Global command palette toggle: Cmd/Ctrl+K. Registered on the shell so it
   // works from every view (the palette itself owns Escape-to-close).
@@ -58,6 +69,7 @@ export default function AppShell() {
   }, []);
 
   return (
+    <NewTaskDialogContext.Provider value={{ openNewTask }}>
     <div className="app-shell-root flex h-screen overflow-hidden">
       <IconRail
         onOpenPalette={() => setPaletteOpen(true)}
@@ -71,6 +83,12 @@ export default function AppShell() {
         onClose={() => setPaletteOpen(false)}
         triggerRef={paletteTriggerRef}
       />
+      <NewTaskDialog
+        open={dialog?.open ?? false}
+        onClose={closeDialog}
+        linkedConversationId={dialog?.conversationId}
+      />
     </div>
+    </NewTaskDialogContext.Provider>
   );
 }

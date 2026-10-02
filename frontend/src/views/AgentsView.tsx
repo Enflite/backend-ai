@@ -14,7 +14,6 @@ import { useAuth } from '../auth';
 import { hasAnyPermission } from '../shell/AppShell';
 import { Badge, Card, PageHeader } from '../components/ui/primitives';
 import { NotAuthorizedState } from '../components/ui/ErrorState';
-import NewTaskView from '../agents/views/NewTaskView';
 import TaskRedirect from '../tasks/TaskRedirect';
 import WorkflowsView from '../agents/views/WorkflowsView';
 
@@ -133,7 +132,7 @@ export default function AgentsView() {
         path="tasks/new"
         element={
           <RequireTaskUi>
-            <NewTaskView />
+            <Navigate to="/tasks" replace />
           </RequireTaskUi>
         }
       />
