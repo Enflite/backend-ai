@@ -1,6 +1,12 @@
 /**
- * shell/AppShell.tsx — application shell: left navigation rail, user footer,
- * and the routed view outlet.
+ * shell/AppShell.tsx — application shell: global navigation rail, user
+ * footer, and the routed view outlet.
+ *
+ * Information architecture: one global nav for the whole platform. Views
+ * that need contextual navigation (e.g. Chat's conversation list) render
+ * it as a *secondary panel inside the view* — visually subordinate to this
+ * rail (subtle background, section label, no brand mark), so the app reads
+ * as one product instead of competing sidebars.
  *
  * Nav items are permission-aware: every item always renders so users can
  * discover what exists. Items whose required permissions the signed-in user
@@ -8,15 +14,25 @@
  * permission (no requirement = everyone, always enabled). Views themselves
  * still handle 403/disabled states from the API — the nav is a convenience,
  * not a security boundary.
+ *
+ * AGENT EXTENSION SLOT: specialized AI agents register here as NavItems with
+ * `section: 'Agents'`. The section renders only when it has items, so no
+ * dead UI ships before an agent lands. Example (APS Planning Agent):
+ *
+ *   { to: '/aps', label: 'APS Planning Agent', section: 'Agents',
+ *     permissions: ['aps:plan'], icon: (a) => <IconAps active={a} /> },
  */
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../auth';
+import { SectionLabel } from '../components/ui/primitives';
 
 interface NavItem {
   to: string;
   label: string;
   /** Render when the user holds any of these (undefined = everyone). */
   permissions?: string[];
+  /** Section grouping; items without one render above all sections. */
+  section?: string;
   icon: (active: boolean) => React.ReactNode;
 }
 
@@ -25,11 +41,52 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/board', label: 'Board', permissions: ['syteline:ui', 'syteline:forms'], icon: (a) => <IconBoard active={a} /> },
   { to: '/forms', label: 'Form AI Agent', permissions: ['syteline:forms'], icon: (a) => <IconForm active={a} /> },
   { to: '/syteline', label: 'SyteLine', permissions: ['syteline:ui'], icon: (a) => <IconSyteLine active={a} /> },
+  // 'Agents' section: specialized AI agents register here (see header comment).
 ];
 
 export function hasAnyPermission(permissions: string[], required?: string[]): boolean {
   if (!required || required.length === 0) return true;
   return required.some((p) => permissions.includes(p));
+}
+
+function NavEntry({ item, permissions }: { item: NavItem; permissions: string[] }) {
+  const allowed = hasAnyPermission(permissions, item.permissions);
+  if (!allowed) {
+    const required = (item.permissions ?? []).join(' or ');
+    return (
+      <div
+        aria-disabled="true"
+        title={`Requires ${required} permission`}
+        className="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium cursor-not-allowed select-none"
+        style={{ color: 'var(--muted-foreground)', opacity: 0.55 }}
+      >
+        <span aria-hidden="true" className="flex-shrink-0">{item.icon(false)}</span>
+        <span className="flex-1 truncate">{item.label}</span>
+        <span aria-hidden="true" title={`Requires ${required} permission`} className="flex-shrink-0"><IconLock /></span>
+      </div>
+    );
+  }
+  return (
+    <NavLink
+      to={item.to}
+      end={item.to === '/'}
+      title={item.label}
+      className="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium"
+      style={({ isActive }) => ({
+        background: isActive ? 'var(--secondary)' : 'transparent',
+        color: isActive ? 'var(--foreground)' : 'var(--secondary-foreground)',
+      })}
+    >
+      {({ isActive }) => (
+        <>
+          <span className="flex-shrink-0" style={{ color: isActive ? 'var(--accent)' : 'var(--muted-foreground)' }} aria-hidden="true">
+            {item.icon(isActive)}
+          </span>
+          <span className="truncate">{item.label}</span>
+        </>
+      )}
+    </NavLink>
+  );
 }
 
 export default function AppShell() {
@@ -42,62 +99,47 @@ export default function AppShell() {
     .slice(0, 2)
     .toUpperCase();
 
+  const topLevel = NAV_ITEMS.filter((item) => !item.section);
+  const sections = [...new Set(NAV_ITEMS.map((item) => item.section).filter(Boolean))] as string[];
+
   return (
     <div className="flex h-screen overflow-hidden" style={{ background: 'var(--background)' }}>
       <nav
         aria-label="Primary"
         className="flex flex-col flex-shrink-0 py-4"
-        style={{ width: 216, background: 'var(--card)', borderRight: '1px solid var(--border)' }}
+        style={{ width: 224, background: 'var(--card)', borderRight: '1px solid var(--border)' }}
       >
-        <div className="px-4 pb-4 flex items-center gap-2" style={{ borderBottom: '1px solid var(--border)' }}>
+        <div className="px-4 pb-4 flex items-center gap-2.5 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
           <img src="/enflite-logo.png" alt="Enflite" className="h-6 w-auto" />
-          <span className="text-sm font-semibold" style={{ color: 'var(--foreground)' }}>Enflite AI</span>
+          <span className="text-sm font-semibold tracking-tight" style={{ color: 'var(--foreground)' }}>Enflite AI</span>
         </div>
-        <div className="flex-1 px-2 py-3 space-y-1 overflow-y-auto">
-          {NAV_ITEMS.map((item) => {
-            const allowed = hasAnyPermission(permissions, item.permissions);
-            if (!allowed) {
-              const required = (item.permissions ?? []).join(' or ');
-              return (
-                <div
-                  key={item.to}
-                  aria-disabled="true"
-                  title={`Requires ${required} permission`}
-                  className="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium cursor-not-allowed select-none"
-                  style={{ color: 'var(--muted-foreground)', opacity: 0.55 }}
-                >
-                  <span aria-hidden="true">{item.icon(false)}</span>
-                  <span className="flex-1">{item.label}</span>
-                  <span aria-hidden="true" title={`Requires ${required} permission`}><IconLock /></span>
-                </div>
-              );
-            }
+        <div className="flex-1 px-2.5 py-3 space-y-0.5 overflow-y-auto">
+          {topLevel.map((item) => (
+            <NavEntry key={item.to} item={item} permissions={permissions} />
+          ))}
+          {sections.map((section) => {
+            const items = NAV_ITEMS.filter((item) => item.section === section);
+            if (items.length === 0) return null;
             return (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.to === '/'}
-                className="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium"
-                style={({ isActive }) => ({
-                  background: isActive ? 'var(--secondary)' : 'transparent',
-                  color: isActive ? 'var(--foreground)' : 'var(--secondary-foreground)',
-                })}
-              >
-                {({ isActive }) => (
-                  <>
-                    <span style={{ color: isActive ? 'var(--accent)' : 'var(--muted-foreground)' }}>{item.icon(isActive)}</span>
-                    {item.label}
-                  </>
-                )}
-              </NavLink>
+              <div key={section} className="pt-4">
+                <div className="px-3 pb-1.5">
+                  <SectionLabel>{section}</SectionLabel>
+                </div>
+                <div className="space-y-0.5">
+                  {items.map((item) => (
+                    <NavEntry key={item.to} item={item} permissions={permissions} />
+                  ))}
+                </div>
+              </div>
             );
           })}
         </div>
-        <div className="px-3 pt-3" style={{ borderTop: '1px solid var(--border)' }}>
+        <div className="px-3 pt-3 flex-shrink-0" style={{ borderTop: '1px solid var(--border)' }}>
           <div className="flex items-center gap-2.5 px-1 py-1">
             <div
-              className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold flex-shrink-0"
-              style={{ background: 'var(--accent)', color: 'var(--accent-foreground)' }}
+              className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold flex-shrink-0"
+              style={{ background: 'var(--secondary)', color: 'var(--foreground)', border: '1px solid var(--border)' }}
+              aria-hidden="true"
             >
               {initials}
             </div>
@@ -107,7 +149,7 @@ export default function AppShell() {
             </div>
             <button
               onClick={() => void logout()}
-              className="text-xs px-2 py-1 rounded-md hover:bg-secondary"
+              className="text-xs px-2 py-1.5 rounded-md hover:bg-secondary font-medium"
               style={{ color: 'var(--muted-foreground)' }}
               title="Sign out"
             >
