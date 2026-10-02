@@ -129,7 +129,7 @@ export default function ChatView() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeConversation = conversations.find((conversation) => conversation.id === activeId) ?? null;
 
-  /** Deep link from agent tasks: /?conversation=<id> opens that conversation (once). */
+  /** Deep link from agent tasks: /chat?conversation=<id> opens that conversation (once). */
   const conversationParamApplied = useRef(false);
   useEffect(() => {
     if (conversationParamApplied.current) return;

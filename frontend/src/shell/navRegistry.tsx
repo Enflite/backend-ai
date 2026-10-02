@@ -22,7 +22,8 @@ export interface NavItem {
 }
 
 export const NAV_ITEMS: NavItem[] = [
-  { to: '/', label: 'Chat', icon: (a) => <IconChat active={a} /> },
+  { to: '/', label: 'Home', icon: (a) => <IconHome active={a} /> },
+  { to: '/chat', label: 'Chat', icon: (a) => <IconChat active={a} /> },
   { to: '/agents', label: 'Agents', permissions: ['syteline:ui', 'syteline:forms'], icon: (a) => <IconAgents active={a} /> },
   { to: '/board', label: 'Board', permissions: ['syteline:ui', 'syteline:forms'], icon: (a) => <IconBoard active={a} /> },
   { to: '/forms', label: 'Form AI Agent', permissions: ['syteline:forms'], icon: (a) => <IconForm active={a} /> },
@@ -35,6 +36,9 @@ export function hasAnyPermission(permissions: string[], required?: string[]): bo
   return required.some((p) => permissions.includes(p));
 }
 
+function IconHome({ active }: { active: boolean }) {
+  return <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={active ? 1.8 : 1.5} strokeLinecap="round" strokeLinejoin="round"><path d="M2.5 7.5L8 2.5l5.5 5V13a1 1 0 01-1 1h-3.5v-4h-2v4H3.5a1 1 0 01-1-1V7.5z" /></svg>;
+}
 function IconChat({ active }: { active: boolean }) {
   return <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={active ? 1.8 : 1.5} strokeLinecap="round" strokeLinejoin="round"><path d="M2 3a1 1 0 011-1h10a1 1 0 011 1v7a1 1 0 01-1 1H6l-3 3v-3H3a1 1 0 01-1-1V3z" /></svg>;
 }
