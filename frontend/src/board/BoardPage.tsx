@@ -10,7 +10,7 @@
  * per-kind list.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth';
 import { ApiError } from '../api';
 import { createSytelineTask, generateSytelineTasks, generationConfirmation, listSytelineTasks } from '../api/tasks';
@@ -428,8 +428,15 @@ export default function BoardPage() {
   const tasksSource = useSource(() => listSytelineTasks(classification).then((items) => items.map(taskToCard)));
   const formsSource = useSource(() => listFormCustomizations().then((items) => items.map(formToCard)));
 
-  const [todayMode, setTodayMode] = useState(false);
+  const [searchParams] = useSearchParams();
+  // Deep link: /board?today=1 (e.g. from the command palette) opens the
+  // "what did the AI complete today" view directly.
+  const [todayMode, setTodayMode] = useState(() => searchParams.get('today') === '1');
   const [showNewTask, setShowNewTask] = useState(false);
+
+  useEffect(() => {
+    if (searchParams.get('today') === '1') setTodayMode(true);
+  }, [searchParams]);
 
   const cards = [...tasksSource.items, ...formsSource.items];
   const loading = tasksSource.health === 'loading' || formsSource.health === 'loading';

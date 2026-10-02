@@ -123,6 +123,38 @@ Views needing contextual navigation (Chat's conversation list) render it as
 a **secondary panel inside the view**: subtle `--secondary` background,
 `SectionLabel` header, no brand mark. Never a second white nav rail.
 
+## Command palette (`frontend/src/components/CommandPalette.tsx`)
+
+Global ⌘K (Ctrl+K) palette, mounted in `AppShell`. Grouped results, in
+order: **Go to** (destinations from the shared `shell/navRegistry.tsx`
+plus permission-gated deep links: New task, Workflows, Today board),
+**Actions** (New agent task, New chat, Toggle theme, Go to board Today
+view), **Tasks**, **Conversations**, **Forms**. Permission-aware: locked
+destinations are omitted, never shown as available.
+
+- Data lazy-loads on **first open only** (never on app mount), cached per
+  session; groups load independently — a failed group shows a retry, never
+  a raw error. Lists are capped (8 per group), "recent" ordered by
+  `updatedAt`.
+- Search is a dependency-free fuzzy subsequence match
+  (`components/fuzzy.ts`), ranked **prefix > word-boundary >
+  subsequence**, across title + keywords.
+- Styling: centered overlay in the top third, Card-like surface,
+  `.animate-scale-in`, theme tokens. `role="dialog"` + `aria-modal`,
+  `listbox`/`option` roles with `aria-activedescendant`, footer shows
+  `Kbd` hints.
+
+## Keyboard conventions
+
+- `⌘K` / `Ctrl+K` — open/close the command palette (global).
+- `↑`/`↓` (or `Ctrl+N`/`Ctrl+P`) — move through palette results;
+  `Enter`/`↵` — open the highlighted result; `Esc` — close the palette
+  (and other `Modal` dialogs).
+- New keyboard-driven surfaces follow the palette pattern: focus the
+  input on open, return focus to the trigger on close, keep hints in a
+  `Kbd` footer, respect `prefers-reduced-motion` via the shared motion
+  utilities.
+
 ## Layout rules
 
 - Chat: top bar → conversation → composer. Assistant responses are editorial
