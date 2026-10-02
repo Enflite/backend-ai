@@ -426,15 +426,15 @@ reflect the run history they summarize.
 | Method | Path | Auth / Permission | Purpose |
 |---|---|---|---|
 | POST | `/schedules` | auth + `schedules:manage` | Create a schedule: `name` (`^[a-z0-9-]+$`), `title`, `target` (`{ flow, version? \| alias? }`), `trigger` (`{ cron, timezone }` — 5-field cron, Vixie semantics, IANA timezone), `inputs` (must satisfy the target flow's required inputs), `confirmWrites?` (default `false`), `enabled?` (default `true`), `runAsUserId` (same-tenant active user); `201` with the schedule incl. `nextRunAt` (ISO) |
-| GET | `/schedules` | auth + `schedules:run` | List schedules: name, title, enabled, `nextRunAt`, target, brief stats |
-| GET | `/schedules/:name` | auth + `schedules:run` | Full schedule: definition, trigger, `nextRunAt`, stats, last run summary |
+| GET | `/schedules` | auth + `schedules:run` | List schedules: name, title, enabled, `nextRunAt`, target flow, last tick state |
+| GET | `/schedules/:name` | auth + `schedules:run` | Full schedule: definition, trigger, `inputs`, `nextRunAt`, last tick state |
 | PUT | `/schedules/:name` | auth + `schedules:manage` | Update title/target/trigger/inputs/`confirmWrites`/`enabled`/`runAsUserId`; changing the cron or timezone recomputes `nextRunAt` |
 | DELETE | `/schedules/:name` | auth + `schedules:manage` | Delete the schedule (fired runs stay in `flow_runs`; derived stats freeze at last values) |
 | POST | `/schedules/:name/pause` | auth + `schedules:manage` | Pause: `enabled=false`, no ticks claimed while paused |
 | POST | `/schedules/:name/resume` | auth + `schedules:manage` | Resume: `enabled=true`, `nextRunAt` recomputed from now — no catch-up backlog |
 | POST | `/schedules/:name/run-now` | auth + `schedules:run` | Fire immediately outside the timetable with the schedule's target/inputs/`confirmWrites`/`runAs`; the run carries a `scheduleRef`; does **not** move `nextRunAt` |
 | GET | `/schedules/:name/runs` | auth + `schedules:run` | Runs this schedule fired (the `scheduleRef` filter over flow runs), newest first; optional `status` filter — the overnight-failure triage view |
-| GET | `/schedules/:name/stats` | auth + `schedules:run` | Derived from `flow_runs`: counts by status, `lastRunAt`, `lastSuccessAt`, `nextRunAt`, `enabled`, `confirmWrites` |
+| GET | `/schedules/:name/stats` | auth + `schedules:run` | Derived from `flow_runs`: counts by status (all-time + trailing 30 days), `totalRuns`, `lastRunAt`, `lastRunId`, `lastTickStatus`, `nextRunAt`, `enabled` |
 
 Schedule audit events: `SCHEDULE_CREATED` / `SCHEDULE_UPDATED`
 (`confirmWrites` changes named with the acting admin) /
