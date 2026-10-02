@@ -29,12 +29,14 @@ export const flowStepIdSchema = z
 
 export type FlowStepId = z.infer<typeof flowStepIdSchema>;
 
-/** Registered tool names referenced by tool steps (e.g. `syteline.task.create`). */
+/** Registered tool names referenced by tool steps (e.g. `syteline.task.create`).
+ * Uppercase is allowed: the tool registry uses camelCase names
+ * (e.g. `syteline.getItem`, `aps.parseExceptionReport`). */
 export const flowToolNameSchema = z
   .string()
   .regex(
-    /^[a-z0-9][a-z0-9.:_-]{0,99}$/,
-    'tool name must match ^[a-z0-9][a-z0-9.:_-]{0,99}$',
+    /^[a-zA-Z0-9][a-zA-Z0-9.:_-]{0,99}$/,
+    'tool name must match ^[a-zA-Z0-9][a-zA-Z0-9.:_-]{0,99}$',
   );
 
 export const FLOW_INPUT_TYPES = ['string', 'number', 'boolean', 'string[]'] as const;
