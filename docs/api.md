@@ -570,6 +570,51 @@ on cloud turns when customer or finance categories are enforced
 (see `docs/privacy-routing.md`) — the tool-level checks inherit
 through the gateway.
 
+## Studio — SyteLine Automation Studio
+
+Named SyteLine connections (encrypted bearer tokens, capability probes),
+a typed action catalog bound to real upstream operations, and automations
+that compile to the Flows platform — the Studio builds no workflow engine
+(see `docs/studio/architecture.md`). An automation is a flow definition
+plus a trigger plus a deployment record; `compileAutomation()` lowers
+`action` steps to `studio.executeAction` / `studio.executeWriteAction`
+tool steps, `condition` steps to flow conditions, `verify` steps to a
+re-fetch plus per-assertion conditions with a fail step, and `log` steps
+to `studio.log`.
+
+Writes and deploys require `studio:manage`; reads, test runs, and manual
+runs require `studio:run`. The whole family is behind `FLOWS_ENABLED`
+(`403 FEATURE_DISABLED` when off); scheduled/event triggers additionally
+require `SCHEDULES_ENABLED`.
+
+| Method | Path | Auth / Permission | Purpose |
+|---|---|---|---|
+| GET | `/studio/connections` | auth + `studio:run` | List named connections (env-backed `default` first; no secrets) |
+| POST | `/studio/connections` | auth + `studio:manage` | Create a connection (token stored encrypted); probed on save — `201` with probe summary |
+| GET | `/studio/connections/:id` | auth + `studio:run` | One connection (no secrets) |
+| PATCH | `/studio/connections/:id` | auth + `studio:manage` | Update + re-probe |
+| DELETE | `/studio/connections/:id` | auth + `studio:manage` | Delete — `204` |
+| POST | `/studio/connections/:id/test` | auth + `studio:run` | Connectivity + capability probe |
+| GET | `/studio/actions[?connectionId=]` | auth + `studio:run` | Action catalog; `supported` evaluated per connection probe |
+| POST | `/studio/actions/test` | auth + `studio:run` | Execute one action against the real upstream (request + truncated response) |
+| GET | `/studio/automations` | auth + `studio:run` | List automations |
+| POST | `/studio/automations` | auth + `studio:manage` | Create: `{ name (unique/tenant), title, description?, trigger, steps[], inputs? }` — `201` |
+| GET | `/studio/automations/:id` | auth + `studio:run` | One automation incl. `destructiveSteps` and deployment record |
+| PATCH | `/studio/automations/:id` | auth + `studio:manage` | Update; editing a deployed automation returns it to draft (edits apply on next deploy) |
+| DELETE | `/studio/automations/:id` | auth + `studio:manage` | Delete — tears down triggers and studio-managed flows first — `204` |
+| POST | `/studio/automations/:id/test` | auth + `studio:run` | Dry run: non-destructive steps execute for real, destructive steps are skipped (never executed); per-step `{ stepId, kind, status, skipped, request?, response?, durationMs?, error?, detail? }` |
+| POST | `/studio/automations/:id/run` | auth + `studio:run` | Manual fire: `{ inputs?, confirmWrites? (default false) }` — `202 { runId }`; `409` without `confirmWrites` when destructive |
+| POST | `/studio/automations/:id/deploy` | auth + `studio:manage` | Compile → publish flow version → live alias → wire trigger; `409 STUDIO_DESTRUCTIVE_CONFIRM_REQUIRED` (listing the steps) without `{ "confirmDestructive": true }` when any step is destructive |
+| POST | `/studio/automations/:id/undeploy` | auth + `studio:manage` | Pause/remove the trigger (schedules paused, webhook token invalidated); deployment marked superseded |
+| POST | `/studio/automations/:id/webhook/rotate` | auth + `studio:manage` | Rotate the webhook token (old dies immediately); the new token is returned exactly once |
+| GET | `/studio/runs[?automationId=][&status=]` | auth + `studio:run` | Flow runs for studio automations (`studio-` flow-name prefix; watcher runs as `kind: 'watcher'`) |
+| GET | `/studio/runs/:id` | auth + `studio:run` | Run detail with per-step log (output shapes only, never values) |
+| POST | `/studio/hooks/:token` | token-gated (no session auth), rate-limited | Webhook fire: the unguessable token is the credential (stored hashed, looked up by hash); payload becomes the run inputs (validated against the live flow's input spec); the run executes as the deployer (live auth re-resolved, fail closed) — `202 { runId }` |
+
+Trigger kinds: `manual` (on demand), `scheduled` (`{ cron, timezone, inputs? }` — a Schedules API schedule targeting the flow), `webhook` (token issued at deploy, shown once), `event` (`{ connectionId, actionId, params?, watchPath?, pollCron, timezone }` — **V1 is poll-based**: a generated watcher flow snapshots the watched value in `studio_snapshots` and fires the automation flow via subflow on change; the watched action must be non-destructive). The deploy-time destructive approval rides the trigger as `confirmWrites`.
+
+Studio audit events: `STUDIO_CONNECTION_CREATED/UPDATED/DELETED/TESTED`, `STUDIO_ACTION_TESTED`, `STUDIO_AUTOMATION_CREATED/UPDATED/DELETED/DEPLOYED/UNDEPLOYED/TESTED/RUN`, `STUDIO_WEBHOOK_FIRED/ROTATED`, `STUDIO_AUTOMATION_LOG`. Tokens never appear in audit, logs, or responses.
+
 ## Repositories & code search
 
 Multi-repo code indexing for coding turns (see `docs/repo-indexing.md`).
