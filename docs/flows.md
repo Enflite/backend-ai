@@ -1,0 +1,333 @@
+# Flows — Operator Guide
+
+Versioned, deterministic pipelines for repeatable AI work. A flow is a
+named step graph stored as a JSON file in the repo (`flows/`,
+config-as-code, PR-reviewed), published as an immutable version, and
+executed by a server-side runner. Design: ADR-022.
+
+> **Honesty note:** this guide describes the full design. The schema,
+> registry, and run lifecycle below are the design; the implementation
+> is the parallel code PR. The schema validation, versioning,
+> idempotency, gating, and audit behavior are **VALIDATED IN CI**
+> there; `tool`-kind steps against live tools and `agent`-kind steps
+> against the model gateway are exercised against the same harnesses
+> as their underlying tools, never against production systems here.
+
+## What flows are
+
+Some work should be planned fresh every time ("check why this order
+is late") — that's what the ADR-020 task agents are for. Other work is
+a **runbook**: the same steps, in the same order, every time — the
+SyteLine Form AI Agent pipeline (scaffold → record originals →
+compare → build → docs → open PR) being the first example. A flow is
+that runbook as a reviewed JSON file: deterministic, versioned, and
+auditable, with one bounded escape hatch (an `agent` step) where a
+fuzzy sub-step genuinely needs the model.
+
+Jake's shaping (2026-10-02): flows are the first of the platform's
+"big four" (Flows → Schedules → client tokens → Batch) — versioned
+runbooks, config-as-code, PR-reviewed, with an agent-escalation seam.
+Batch will later run a flow over a record set; Schedules will trigger
+flows on a clock; client tokens will let the Ask Enflite AI button
+invoke named flows.
+
+## Concepts
+
+- **Definition** — the JSON file: name, inputs, outputs, ordered
+  steps. Reviewed in a PR, stored in the repo.
+- **Version** — an immutable, numbered, hashed snapshot of a
+  definition, published explicitly. Published versions never change,
+  so "what ran" is always answerable.
+- **Alias** — a named pointer at a version. `live` is the default
+  alias runs resolve against; moving it is a compare-and-swap
+  (`If-Match`), so two admins can't race it.
+- **Run** — one execution of a version: inputs in, steps executed in
+  order, outputs (or a blocked reason) out.
+- **Step** — one unit of work, of kind `tool`, `subflow`, `agent`,
+  or `condition`.
+
+## Who can use flows
+
+- `flows:manage` — create/edit flow definitions, publish versions,
+  move aliases, run `ensure` (Admin / AI Admin only).
+- `flows:run` — start runs, poll status, stream events, cancel.
+
+Two master kill switches, both default `false` (fail closed): with
+`FLOWS_ENABLED` off, every `/flows` endpoint fails fast with
+`FEATURE_DISABLED`; with `FLOW_RUNNER_ENABLED` off, runs stay
+`queued` and nothing executes.
+
+Permissions are the outer gate, not the whole story: every `tool`
+step still executes through the tool gateway **with the run
+requester's auth**, so each tool's own permission check applies
+exactly as if the requester had called it directly. A flow can never
+grant its requester powers they don't have. Destructive tools need
+`confirmWrites: true` on the run request or the run blocks before
+executing them — the flow equivalent of the task agents'
+`autoApproveWrites` seam.
+
+## Writing a flow
+
+A flow is one JSON file, `flows/<name>.flow.json`, with `name`
+matching `^[a-z0-9-]+$`. Full annotated example — the SyteLine Form
+AI Agent pipeline as a flow (the mapping to the ADR-021 §6 pipeline
+is spelled out in the table below):
+
+```json
+{
+  "name": "syteline-form-customization",
+  "title": "SyteLine Form AI Agent pipeline",
+  "description": "Runs the Form-Project-Templates workflow for one form-customization request: scaffold the form project, record the TRN/production FormSync rollback copies, build <Form>.xml from the TRN original (UET-only Uf_ENF_* fields, purple highlighting, byte-preserved UTF-8/BOM/CRLF), write the implementation plan and deck, and open the review PR. Never merges — the PR is human-reviewed.",
+  "onError": "stop",
+  "inputs": {
+    "formName": {
+      "type": "string",
+      "required": true,
+      "description": "The SyteLine form name, matching ^[A-Za-z0-9_]+$"
+    },
+    "requestId": {
+      "type": "string",
+      "required": true,
+      "description": "The form-customization request id this run is executing"
+    },
+    "instructions": {
+      "type": "string[]",
+      "required": true,
+      "description": "The customization requirements (add field / relabel / resize), each specific: field type, label, tab, position"
+    }
+  },
+  "outputs": {
+    "repoUrl": { "type": "string", "description": "The scaffolded form-project repo" },
+    "prUrl": { "type": "string", "description": "The review PR — opened, never auto-merged" },
+    "blockedReason": { "type": "string", "description": "Set when the run blocks instead of completing (e.g. trn-prd-drift)" }
+  },
+  "steps": [
+    {
+      "id": "scaffold",
+      "kind": "tool",
+      "tool": "syteline.form_start_project",
+      "description": "Scaffold the form project repo from the template",
+      "params": {
+        "formName": "{{inputs.formName}}",
+        "requestId": "{{inputs.requestId}}"
+      }
+    },
+    {
+      "id": "build_xml",
+      "kind": "tool",
+      "tool": "syteline.form_add_field",
+      "description": "Record the originals, stop on TRN/PRD drift, then build <Form>.xml from the TRN original",
+      "params": {
+        "formName": "{{inputs.formName}}",
+        "requestId": "{{inputs.requestId}}",
+        "instructions": "{{inputs.instructions}}"
+      },
+      "timeoutMs": 300000
+    },
+    {
+      "id": "drift_check",
+      "kind": "condition",
+      "description": "TRN/PRD drift stops the build (templates SOP: stop and ask, don't guess)",
+      "when": "'{{steps.build_xml.output.drift}}' == 'true'",
+      "then": "report_drift",
+      "else": "write_docs"
+    },
+    {
+      "id": "report_drift",
+      "kind": "agent",
+      "description": "Bounded escalation: summarize the drift for the human who must resolve it",
+      "prompt": "The TRN and production originals differ for form {{inputs.formName}}. Summarize the drift detail for the reviewer: {{steps.build_xml.output.driftDetail}}",
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "summary": { "type": "string" },
+          "blockedReason": { "type": "string" }
+        },
+        "required": ["summary", "blockedReason"]
+      },
+      "maxTokens": 1000
+    },
+    {
+      "id": "write_docs",
+      "kind": "tool",
+      "tool": "syteline.form_write_docs",
+      "description": "README, seven-phase implementation plan (UET design tables from the IDO and its SQL Tables), troubleshooting",
+      "params": {
+        "formName": "{{inputs.formName}}",
+        "requestId": "{{inputs.requestId}}",
+        "buildOutput": "{{steps.build_xml.output}}"
+      }
+    },
+    {
+      "id": "build_deck",
+      "kind": "tool",
+      "tool": "syteline.form_build_deck",
+      "description": "Generate and build the implementation-plan deck",
+      "params": {
+        "formName": "{{inputs.formName}}",
+        "requestId": "{{inputs.requestId}}"
+      }
+    },
+    {
+      "id": "open_pr",
+      "kind": "subflow",
+      "description": "Open the review PR via the shared open-pr subflow, then stop",
+      "flow": "github-open-review-pr",
+      "alias": "live",
+      "inputs": {
+        "repo": "{{steps.scaffold.output.repo}}",
+        "title": "Form customization: {{inputs.formName}}"
+      }
+    }
+  ]
+}
+```
+
+Notes on the example:
+
+- `params` use templates: `{{inputs.formName}}` reads a run input;
+  `{{steps.build_xml.output.drift}}` reads a previous step's output
+  at a path. Resolution is **strict** — an unknown path fails the
+  step with `TEMPLATE_RESOLUTION_ERROR`, never an empty string.
+  Templates carry data, never code: there is no expression language.
+- The `condition` step is deliberately inexpressive — a template, or
+  a `<template> == <literal>` comparison. Real logic lives in tools
+  (deterministic code) or `agent` steps (schema-boxed model output).
+- The `agent` step's output **must validate against `outputSchema`**;
+  a validation failure fails the step. This is the escalation seam:
+  the graph stays deterministic, but one step may use the model
+  inside a schema-shaped box.
+- The `subflow` step pins by `alias: "live"` (the default) or an
+  exact `version` number — never both, never neither-with-a-guess.
+- Step params follow the tool schemas in `docs/api.md`; the exact
+  params above are illustrative of the shape.
+
+### The step kinds at a glance
+
+| Kind | Does | Key fields |
+|---|---|---|
+| `tool` | Calls a registered platform tool via the tool gateway, with the requester's auth; each tool's own permission check applies | `tool`, `params` (templates), `timeoutMs?`, `retries?`, `continueOnError?` (default `false`) |
+| `subflow` | Runs another flow as a step | `flow`, `version?` **or** `alias?` (`"live"` default), `inputs` (templates) |
+| `agent` | Bounded LLM escalation; output must validate against `outputSchema` | `prompt` (template), `outputSchema`, `maxTokens?`, `timeoutMs?` |
+| `condition` | Deterministic branch — no LLM | `when` (template or `<template> == <literal>`), `then`, `else` (step ids) |
+
+## Publishing, versioning, aliases
+
+Merging the JSON is not deploying. The lifecycle:
+
+1. **Write / edit** `flows/<name>.flow.json` in a branch; open a PR
+   (`flows:manage` holders review it like code).
+2. **Converge** with `POST /flows/ensure` — this loads the repo's
+   `flows/*.flow.json` files into the tenant's Mongo `flows`
+   registry. (Run it from the deploy pipeline after merge, or by
+   hand in dev.)
+3. **Publish** with `POST /flows/:name/versions` — snapshots the
+   current definition as an immutable version
+   `{ number, definitionHash, publishedBy, publishedAt }`.
+4. **Move `live`** with `POST /flows/:name/alias`
+   `{ "alias": "live", "version": 3 }` and an
+   `If-Match: <revision>` header — compare-and-swap; a stale
+   revision returns `412` so two admins can't race the move.
+
+`GET /flows/:name` shows the definition plus the alias → version →
+hash chain, so "what is live right now" is always inspectable.
+`GET /flows/:name/pull` exports a definition back out of the
+registry (useful for diffing registry state against the repo).
+
+## Running a flow
+
+```
+POST /api/v1/flows/syteline-form-customization/runs
+{ "inputs": { "formName": "ServiceOrders", "requestId": "…", "instructions": […] },
+  "alias": "live", "confirmWrites": true }
+→ 202 { "runId": "…" }
+```
+
+- `version?` pins an exact published version; `alias?` (default
+  `"live"`) resolves the alias. Omit both and you get `live`.
+- `confirmWrites` (default `false`): required when the flow's steps
+  include destructive tools — without it the run blocks before the
+  first destructive step. This is the run-scoped, auditable write
+  confirmation.
+- **Async by default** — `202 { runId }`, then poll
+  `GET /flows/runs/:runId` or stream `GET /flows/runs/:runId/events`
+  (SSE). With `sync: true` the server waits up to a cap, then falls
+  back to `202` — you always end up with a `runId`.
+- **Idempotency:** send `Idempotency-Key: <key>` and a retried
+  request returns the existing run instead of starting a duplicate.
+  The same key with a *different* request body returns `409` — a
+  replay and a collision are different situations.
+- `GET /flows/runs?status=blocked` lists runs (the kanban-board
+  query for flows); `POST /flows/runs/:runId/cancel` ends a run in
+  flight.
+
+## Run lifecycle and error handling
+
+```
+queued → running → completed | blocked | cancelled
+```
+
+- `queued` — created, waiting for the runner (stays here while
+  `FLOW_RUNNER_ENABLED` is off).
+- `running` — the runner is executing steps in order.
+- `completed` — all steps succeeded; `outputs` populated per the
+  definition's `outputs` map.
+- `blocked` — stop-on-first-failure (`onError: "stop"`, the default):
+  a failed step blocks the run with a reason. A step with
+  `continueOnError: true` records its failure on the step and lets
+  the run continue instead.
+- `cancelled` — `POST /flows/runs/:runId/cancel`.
+
+Common failure reasons: `TEMPLATE_RESOLUTION_ERROR` (a template
+referenced an unknown input or step-output path), tool timeouts
+(`timeoutMs` exceeded), `agent` output failing `outputSchema`
+validation, and the writes gate (destructive step without
+`confirmWrites`).
+
+Every step is audit-logged — id, kind, status, timestamps, evidence
+by reference — with the same discipline as the ADR-020 task runner.
+A run's step log plus its published version hash is the complete
+record of what ran.
+
+## How the ADR-021 §6 pipeline becomes a flow
+
+The SyteLine Form AI Agent pipeline is the first flow. The mapping
+from the template workflow's six stages to flow steps:
+
+| ADR-021 §6 stage | Flow step(s) | Kind |
+|---|---|---|
+| 1. Scaffold the project from the template (`Enflite/<FormName>`) | `scaffold` → `syteline.form_start_project` | `tool` |
+| 2. Record the TRN and production FormSync exports in `original/` (byte-preserved: UTF-8/BOM/CRLF) | Inside `build_xml` — the build tool performs the backup-first record before building | `tool` |
+| 3. TRN/PRD comparison → drift stops the build | `drift_check` — `when: '{{steps.build_xml.output.drift}}' == 'true'` → `then: report_drift`, `else: write_docs`; `report_drift` is the bounded agent step summarizing the drift for the human | `condition` + `agent` |
+| 4. Build `<Form>.xml` from the **TRN** original via the build script (never by hand); UET-only `Uf_ENF_*` fields, purple highlighting | `build_xml` → `syteline.form_add_field` (`checkOnly` verifies the deterministic rebuild) | `tool` |
+| 5. Write the implementation plan (UET design tables from the IDO and its SQL Tables), the deck, troubleshooting, README | `write_docs` → `syteline.form_write_docs`; `build_deck` → `syteline.form_build_deck` | `tool` × 2 |
+| 6. Open the review PR — and stop (`awaiting_review`) | `open_pr` → shared `github-open-review-pr` subflow at `live` | `subflow` |
+
+Stages 2–4 collapse into one tool step plus a condition because the
+build tool already embodies the backup-first record and the drift
+check — the flow expresses the *decision point* (drift → block and
+report, else continue), not the mechanics. The "never auto-merge"
+rule is unchanged: the flow ends with the PR open; merging stays a
+human decision, and the flow has no merge capability to abuse.
+
+What stays human is unchanged too: TRN import, UET setup, staging
+checks, launch to production, and rollback remain numbered human
+runbook steps in the generated implementation plan — flows automate
+the build, not the go-live.
+
+## Design hooks (future — not built now)
+
+These are named in the design so the schema doesn't paint them out.
+None of them ship with flows:
+
+- **Schedules** will trigger flows by name + alias (the "daily SOP
+  engine" feeding the "what did the AI do today" view).
+- **Batch** will run a flow over a record set: one parent run,
+  per-record child runs, one kanban card.
+- **Client tokens** will let the Ask Enflite AI button invoke named
+  flows under a scoped, origin-bound token.
+- **Flow-to-tool conversion** will expose a published flow as a
+  callable tool in the agentic loop.
+
+Related: ADR-022 (design decisions), `docs/api.md` (endpoint
+reference), `docs/architecture.mmd` diagram (l) (request flow).

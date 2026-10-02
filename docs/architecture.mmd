@@ -534,3 +534,62 @@ flowchart TB
     TI --> TAUD
     TR --> TAUD
     TPR -.->|"tool-offering gate"| TI
+
+%% ---------------------------------------------------------------------
+%% (l) FLOWS — backend/src/flows/ + /api/v1/flows
+%% Deterministic, versioned pipelines (big-four #1). Versioned runbooks
+%% as config-as-code: flows/*.flow.json (PR-reviewed) → registry
+%% (immutable versions, live alias) → server-side runner → tool
+%% gateway (requester's auth, per-tool permission checks) → audit.
+%% First consumer: the SyteLine Form AI Agent pipeline (diagram: ADR-021
+%% §6 scaffold → record originals → compare → build → docs → open PR).
+%% See ADR-022 and docs/flows.md. Schema/lifecycle/gating are
+%% VALIDATED IN CI; tool/agent step execution is validated against the
+%% same harnesses as the underlying tools.
+%% ---------------------------------------------------------------------
+flowchart TB
+    REPO["[FUTURE] flows/*.flow.json (repo)<br/>config-as-code, PR-reviewed<br/>name ^[a-z0-9-]+$ · inputs · outputs<br/>steps[] · onError"]
+
+    subgraph FAPI["[FUTURE] Flows REST API<br/>backend/src/flows/routes.ts<br/>FLOWS_ENABLED kill switch (default false)<br/>manage: flows:manage · runs: flows:run"]
+        direction TB
+        FCRUD["POST/GET/DELETE /flows[/:name]<br/>definition CRUD (schema-validated)"]
+        FVER["POST /flows/:name/versions<br/>publish immutable version<br/>{ number, definitionHash,<br/>publishedBy, publishedAt }"]
+        FALIAS["POST /flows/:name/alias<br/>move live alias<br/>If-Match: <revision> else 412"]
+        FENS["POST /flows/ensure · GET /flows/:name/pull<br/>converge repo JSON ↔ registry"]
+        FRUNS["POST /flows/:name/runs<br/>GET /flows/runs[/:runId]<br/>GET /runs/:runId/events (SSE)<br/>POST /runs/:runId/cancel<br/>Idempotency-Key · sync? · confirmWrites?"]
+    end
+
+    subgraph FREG[(" [FUTURE] flows (Mongo, tenant-scoped)<br/>definitions · immutable versions<br/>live alias → version → hash")]
+    end
+
+    subgraph FRUN["[FUTURE] Flow runner<br/>backend/src/flows/runner.ts<br/>FLOW_RUNNER_ENABLED (default false)<br/>queued → running → completed | blocked | cancelled<br/>stop-on-first-failure unless continueOnError"]
+        direction TB
+        FSTEP["steps in order<br/>tool · subflow · agent · condition"]
+        FTPL["strict template resolution<br/>{{inputs.x}} {{steps.&lt;id&gt;.output.&lt;path&gt;}}<br/>unknown path → TEMPLATE_RESOLUTION_ERROR<br/>no arbitrary code"]
+        FBR["condition: when '<tpl>' == 'literal'<br/>then / else step ids — deterministic,<br/>no LLM, no expression language"]
+        FAG["agent: bounded LLM escalation<br/>prompt + outputSchema<br/>output must validate, else step fails"]
+    end
+
+    TGW["[CURRENT] Tool gateway<br/>backend/src/tools/gateway.ts<br/>tool steps run with the REQUESTER's auth<br/>each tool's own permission check applies<br/>destructive tools need confirmWrites"]
+    FAUD["[CURRENT] Audit<br/>backend/src/audit/audit.ts<br/>every step logged with evidence"]
+    FPR["[CURRENT] Privacy routing<br/>syteline.* flows never offered on cloud turns<br/>docs/privacy-routing.md"]
+
+    FHOOK["[FUTURE] Design hooks (NOT built now)<br/>Schedules → trigger flows · Batch → flow over<br/>record set · client tokens → scoped invocation<br/>flow-to-tool conversion"]
+
+    REPO -->|"/flows/ensure"| FENS
+    FAPI --> FREG
+    FVER --> FREG
+    FALIAS --> FREG
+    FENS --> FREG
+    FRUNS -->|"/flows/:name/runs"| FRUN
+    FRUN -->|"{ inputs, version | alias }"| FREG
+    FRUN --> FSTEP
+    FSTEP --> FTPL
+    FSTEP --> FBR
+    FSTEP --> FAG
+    FSTEP -->|"tool kind"| TGW
+    FSTEP -->|"subflow kind (version | live)"| FREG
+    FRUN --> FAUD
+    FAPI --> FAUD
+    FPR -.->|"tool-offering gate"| FAPI
+    FHOOK -.->|"future consumers<br/>of registry + runner"| FREG
