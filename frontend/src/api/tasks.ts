@@ -6,6 +6,7 @@
  * auth snapshot; dates arrive as ISO strings.
  */
 import { executeTool } from './tools';
+import { api } from '../api';
 import type { DataClassification } from '../types';
 
 export type SytelineTaskStatus = 'assigned' | 'in_progress' | 'completed' | 'blocked' | 'cancelled';
@@ -116,4 +117,32 @@ export async function requeueSytelineTask(
     approveWrites === undefined ? { taskId } : { taskId, approveWrites },
     classification,
   );
+}
+
+export interface GeneratedBoardTask {
+  id: string;
+  title: string;
+}
+
+/**
+ * Ask the AI to break a plain-language goal into board tasks
+ * (POST /syteline-tasks/generate). The server validates the model's output
+ * and creates each task through the real task path; the runner picks them
+ * up like any hand-created task. No classification parameter: the server
+ * uses the requester's clearance.
+ */
+export async function generateSytelineTasks(input: {
+  goal: string;
+  count?: number;
+}): Promise<{ tasks: GeneratedBoardTask[] }> {
+  return api.request('/syteline-tasks/generate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+/** Success copy for the generate box. Pure — unit tested. */
+export function generationConfirmation(count: number): string {
+  return `Created ${count} task${count === 1 ? '' : 's'} — the AI will pick them up from the board.`;
 }
