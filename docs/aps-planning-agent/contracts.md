@@ -129,13 +129,15 @@ sibling's store directly (mocked in tests via `overrideSubstrateClient`).
 
 ## Known limitations (this phase)
 
-- `pending-substrate` analyses do not auto-start when the pipeline
-  lands: intake records the analysis honestly instead of failing, but
-  there is no scheduler or retry endpoint yet — re-submit the intake
-  once `aps-exception-analysis` is published (a future phase can add
-  `POST /aps/analyses/:id/retry`).
-- The agent-judgment seam (`agentJudgment.ts`) is built and unit-tested
-  but has no REST trigger yet — it serves the future chat/context path.
+- `pending-substrate` analyses are retried via
+  `POST /aps/analyses/:id/retry` (idempotent, atomic claim, audited) —
+  run it after publishing the flows (see
+  `docs/aps-planning-agent/enablement.md`). There is still no scheduler
+  that auto-starts them when the pipeline lands.
+- The agent-judgment seam (`agentJudgment.ts`) now has its REST trigger:
+  `POST /aps/issues/:issueId/judgment` (explain/prioritize/recommend,
+  aggregates-only, schema-validated). It serves the chat/context path —
+  it does not duplicate the flow's pipeline agent steps.
 - Chat reaches APS through the sibling's 10 `aps.*` tools (landed, PR
   #64), offered on the `syteline` capability slot when APS patterns
   match.

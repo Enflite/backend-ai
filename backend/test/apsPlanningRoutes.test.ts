@@ -11,6 +11,8 @@ import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
 import { SubstrateUnavailableError } from '../src/apsPlanning/substrate.js';
 import { overrideSubstrateClient } from '../src/apsPlanning/substrate.js';
+import { overrideApsJudge, type ApsJudgmentResult } from '../src/apsPlanning/agentJudgment.js';
+import { claimPendingSubstrateRetry } from '../src/apsPlanning/store.js';
 import { apsPlanningRoutes } from '../src/apsPlanning/routes.js';
 import { AppError } from '../src/errors.js';
 
@@ -125,6 +127,18 @@ const { currentAuth } = vi.hoisted(() => ({
     clearance: 'INTERNAL',
     permissions: ['aps:plan', 'document:upload', 'chat:create', 'tool:use'],
   },
+}));
+
+// Mocked agent-judge (the default judge would call the AI gateway).
+// The return type is annotated (not inferred) so tests can resolve both
+// union members (ok / judge-unavailable).
+const { judgeMock } = vi.hoisted(() => ({
+  judgeMock: vi.fn(
+    async (_actor: unknown, _request: unknown, _signal: unknown): Promise<ApsJudgmentResult> => ({
+      ok: true,
+      decision: { order: ['a', 'b'], rationale: 'Customer-commit risk first.' },
+    }),
+  ),
 }));
 
 vi.mock('../src/db/mongo.js', () => ({ getDb: getDbMock }));
@@ -253,6 +267,11 @@ beforeEach(() => {
     createdAt: new Date(),
   }));
   recordAuditMock.mockReset();
+  judgeMock.mockClear();
+  judgeMock.mockResolvedValue({
+    ok: true as const,
+    decision: { order: ['a', 'b'], rationale: 'Customer-commit risk first.' },
+  });
   substrateMock.invokeAnalysisFlow.mockClear();
   substrateMock.invokeVerifyFlow.mockClear();
   substrateMock.getIssue.mockClear();
@@ -262,11 +281,13 @@ beforeEach(() => {
     outputs: { issueId: 'ISS-1', snapshotId: 'snap-1' },
   });
   overrideSubstrateClient(substrateMock as any);
+  overrideApsJudge(judgeMock as any);
   configMock.APS_PLANNING_ENABLED = true;
 });
 
 afterEach(() => {
   overrideSubstrateClient(null);
+  overrideApsJudge(null);
 });
 
 describe('POST /aps/analyses (MOCKED substrate)', () => {
@@ -521,6 +542,273 @@ describe('snapshots (MOCKED substrate)', () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/aps/snapshots?issueId=ISS-1' });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('SUBSTRATE_UNAVAILABLE');
+    await app.close();
+  });
+});
+
+describe('POST /aps/analyses/:id/retry (MOCKED substrate)', () => {
+  /** Create an analysis that landed honestly in pending-substrate. */
+  async function createPending() {
+    substrateMock.invokeAnalysisFlow.mockRejectedValueOnce(
+      new SubstrateUnavailableError('flow "aps-exception-analysis" is not published'),
+    );
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/aps/analyses',
+      payload: { documentId: 'doc-1', site: 'SITE1' },
+    });
+    expect(res.statusCode).toBe(202);
+    expect(res.json().status).toBe('pending-substrate');
+    return { app, id: res.json().id as string };
+  }
+
+  it('retries a pending-substrate analysis once the pipeline is published → 202 analyzing', async () => {
+    const { app, id } = await createPending();
+    substrateMock.invokeAnalysisFlow.mockClear();
+    const res = await app.inject({ method: 'POST', url: `/api/v1/aps/analyses/${id}/retry` });
+    expect(res.statusCode).toBe(202);
+    const body = res.json();
+    expect(body.status).toBe('analyzing');
+    expect(body.retried).toBe(true);
+    expect(body.flowRunId).toBe('run-1');
+    expect(substrateMock.invokeAnalysisFlow).toHaveBeenCalledTimes(1);
+    // The retry re-uses the STORED intake inputs — the requester's workbook.
+    expect(substrateMock.invokeAnalysisFlow).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: 'tenant-1' }),
+      { exceptionReportDocumentId: 'doc-1', issueId: '', site: 'SITE1' },
+    );
+    expect((stores.aps_analyses!)[0]!.status).toBe('analyzing');
+    expect(recordAuditMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'APS_ANALYSIS_RETRY_STARTED', success: true }),
+    );
+    await app.close();
+  });
+
+  it('stays in pending-substrate honestly when the pipeline is still unpublished', async () => {
+    const { app, id } = await createPending();
+    substrateMock.invokeAnalysisFlow.mockRejectedValueOnce(
+      new SubstrateUnavailableError('flow "aps-exception-analysis" is not published'),
+    );
+    const res = await app.inject({ method: 'POST', url: `/api/v1/aps/analyses/${id}/retry` });
+    expect(res.statusCode).toBe(202);
+    const body = res.json();
+    expect(body.status).toBe('pending-substrate');
+    expect(body.retried).toBe(false);
+    expect(body.statusNote).toMatch(/still not published/i);
+    // The claim was released: status back to pending-substrate, no flow run linked.
+    const stored = (stores.aps_analyses!)[0]!;
+    expect(stored.status).toBe('pending-substrate');
+    expect(stored.flowRunId).toBeUndefined();
+    expect(stored.retryInFlight).toBe(false);
+    expect(recordAuditMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'APS_ANALYSIS_RETRY_SKIPPED',
+        metadata: expect.objectContaining({ reason: 'substrate-unavailable' }),
+      }),
+    );
+    await app.close();
+  });
+
+  it('is idempotent: retrying an in-flight analysis starts no second run', async () => {
+    const app = await buildApp();
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/v1/aps/analyses',
+      payload: { documentId: 'doc-1', site: 'SITE1' },
+    });
+    const id = created.json().id as string;
+    expect(created.json().status).toBe('analyzing');
+    substrateMock.invokeAnalysisFlow.mockClear();
+    const res = await app.inject({ method: 'POST', url: `/api/v1/aps/analyses/${id}/retry` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: 'analyzing', retried: false, flowRunId: 'run-1' });
+    expect(substrateMock.invokeAnalysisFlow).not.toHaveBeenCalled();
+    expect(recordAuditMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'APS_ANALYSIS_RETRY_SKIPPED',
+        metadata: expect.objectContaining({ reason: 'already-in-flight' }),
+      }),
+    );
+    await app.close();
+  });
+
+  it('409s terminal analyses; awaiting-planner is not retryable', async () => {
+    const { app, id } = await createPending();
+    const db = await getDbMock();
+    await db.collection('aps_analyses').updateOne({ _id: id }, { $set: { status: 'resolved' } });
+    const terminal = await app.inject({ method: 'POST', url: `/api/v1/aps/analyses/${id}/retry` });
+    expect(terminal.statusCode).toBe(409);
+    expect(terminal.json().error.code).toBe('ANALYSIS_TERMINAL');
+
+    await db.collection('aps_analyses').updateOne({ _id: id }, { $set: { status: 'blocked' } });
+    const blocked = await app.inject({ method: 'POST', url: `/api/v1/aps/analyses/${id}/retry` });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json().error.code).toBe('ANALYSIS_TERMINAL');
+
+    // awaiting-planner is mid-lifecycle but its substrate start already
+    // happened — retrying the start is meaningless.
+    await db.collection('aps_analyses').updateOne({ _id: id }, { $set: { status: 'awaiting-planner' } });
+    const waiting = await app.inject({ method: 'POST', url: `/api/v1/aps/analyses/${id}/retry` });
+    expect(waiting.statusCode).toBe(409);
+    expect(waiting.json().error.code).toBe('ANALYSIS_NOT_RETRYABLE');
+    await app.close();
+  });
+
+  it('404s an unknown analysis', async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: 'POST', url: '/api/v1/aps/analyses/nope/retry' });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('the atomic claim is single-winner: a lost race cannot start a second run', async () => {
+    const { app, id } = await createPending();
+    const first = await claimPendingSubstrateRetry('tenant-1', id);
+    expect(first).not.toBeNull();
+    expect(first!.status).toBe('analyzing');
+    // The analysis already left pending-substrate: the second claim loses.
+    const second = await claimPendingSubstrateRetry('tenant-1', id);
+    expect(second).toBeNull();
+    await app.close();
+  });
+});
+
+describe('POST /aps/issues/:issueId/judgment (MOCKED substrate + judge)', () => {
+  it('prioritizes from the issue’s latest snapshot aggregates — never full rows', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/aps/issues/ISS-1/judgment',
+      payload: { kind: 'prioritize' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.issueId).toBe('ISS-1');
+    expect(body.kind).toBe('prioritize');
+    expect(body.judgmentRef).toBe('aps-prioritize');
+    expect(body.decision).toEqual({ order: ['a', 'b'], rationale: 'Customer-commit risk first.' });
+    // Aggregates only: the judge saw per-issue summaries (ids, types,
+    // severities), never report rows.
+    expect(judgeMock).toHaveBeenCalledTimes(1);
+    const request = judgeMock.mock.calls[0]![1] as { userMessage: string };
+    expect(request.userMessage).toContain('rcpt_projected_late|a|po-1|so-1');
+    expect(request.userMessage).not.toContain('exceptionText');
+    expect(recordAuditMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'APS_JUDGMENT_REQUESTED',
+        success: true,
+        metadata: expect.objectContaining({ kind: 'prioritize', summaryCount: 2 }),
+      }),
+    );
+    await app.close();
+  });
+
+  it('explains one issue from an explicit summary', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/aps/issues/ISS-1/judgment',
+      payload: {
+        kind: 'explain',
+        summaries: [{ id: 'ISS-1-row-1', type: 'RCPT_PROJECTED_LATE', severity: 'high', item: 'A', daysLate: 9 }],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().judgmentRef).toBe('aps-explain');
+    await app.close();
+  });
+
+  it('recommends from explicit summaries', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/aps/issues/ISS-1/judgment',
+      payload: {
+        kind: 'recommend',
+        summaries: [{ id: 'x', type: 'MOVE_IN_RCPT', severity: 'medium' }],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().judgmentRef).toBe('aps-recommend');
+    await app.close();
+  });
+
+  it('validates the judgment kind and the explain single-summary rule', async () => {
+    const app = await buildApp();
+    const badKind = await app.inject({
+      method: 'POST',
+      url: '/api/v1/aps/issues/ISS-1/judgment',
+      payload: { kind: 'correlate' },
+    });
+    expect(badKind.statusCode).toBe(400);
+    const twoSummaries = await app.inject({
+      method: 'POST',
+      url: '/api/v1/aps/issues/ISS-1/judgment',
+      payload: {
+        kind: 'explain',
+        summaries: [
+          { id: 'a', type: 'X', severity: 'high' },
+          { id: 'b', type: 'Y', severity: 'low' },
+        ],
+      },
+    });
+    expect(twoSummaries.statusCode).toBe(400);
+    expect(twoSummaries.json().error.code).toBe('VALIDATION_ERROR');
+    const noBody = await app.inject({
+      method: 'POST',
+      url: '/api/v1/aps/issues/ISS-1/judgment',
+    });
+    expect(noBody.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('404s an unknown issue', async () => {
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/aps/issues/NOPE/judgment',
+      payload: { kind: 'prioritize' },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe('ISSUE_NOT_FOUND');
+    await app.close();
+  });
+
+  it('400s when the issue has no classifiable snapshots', async () => {
+    substrateMock.getIssue.mockImplementationOnce(async (_tenantId: string, issueId: string) =>
+      issueId === 'ISS-EMPTY'
+        ? { _id: 'ISS-EMPTY', tenantId: 'tenant-1', site: 'S1', reportDocumentId: 'doc-1', status: 'open', snapshots: [], createdAt: new Date(), updatedAt: new Date() }
+        : null,
+    );
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/aps/issues/ISS-EMPTY/judgment',
+      payload: { kind: 'prioritize' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('JUDGMENT_NO_SUMMARIES');
+    await app.close();
+  });
+
+  it('502s honestly when the judge is unavailable', async () => {
+    judgeMock.mockResolvedValueOnce({
+      ok: false as const,
+      code: 'judge-unavailable' as const,
+      detail: 'No servable model is available for agent judgment.',
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/aps/issues/ISS-1/judgment',
+      payload: { kind: 'prioritize' },
+    });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error.code).toBe('JUDGE_FAILED');
+    expect(recordAuditMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'APS_JUDGMENT_REQUESTED', success: false }),
+    );
     await app.close();
   });
 });

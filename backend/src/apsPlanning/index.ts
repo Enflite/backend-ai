@@ -34,7 +34,7 @@ export type {
   ApsJudgmentResult,
   IssueSummary,
 } from './agentJudgment.js';
-export { buildExplainRequest, buildPrioritizeRequest, buildRecommendRequest } from './agentJudgment.js';
+export { buildExplainRequest, buildPrioritizeRequest, buildRecommendRequest, buildSummariesFromSnapshot } from './agentJudgment.js';
 export {
   getSubstrateClient,
   overrideSubstrateClient,
@@ -51,15 +51,17 @@ export type {
 } from './substrate.js';
 export { getProcedureGuidance, allProcedureGuidance } from './procedures.js';
 export { APS_PLANNING_KNOWLEDGE, APS_PLANNING_KNOWLEDGE_VERSION } from './knowledge.js';
-export { compareSnapshots, issueIdentityKey } from './types.js';
+export { compareSnapshots, issueIdentityKey, toPlanningRow } from './types.js';
 export type {
   AnalysisStatus,
   ApsAnalysisDoc,
+  ApsJudgmentInput,
   ColumnMap,
   ComparisonVerdict,
   Evidence,
   ExceptionType,
   ExportType,
+  JudgmentKind,
   PlanningRow,
   Recommendation,
   RootCause,

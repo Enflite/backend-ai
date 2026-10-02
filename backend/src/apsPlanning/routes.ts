@@ -16,6 +16,8 @@
  * - POST   /aps/analyses/:id/column-map     confirm/override the workbook column mapping
  * - POST   /aps/analyses/:id/verify         trigger a verification run against a newer report
  * - POST   /aps/analyses/:id/cancel         cancel (ends work in flight)
+ * - POST   /aps/analyses/:id/retry          re-attempt the substrate start for a pending-substrate analysis
+ * - POST   /aps/issues/:issueId/judgment    standalone agent judgment (explain/prioritize/recommend) on an issue's aggregates
  * - GET    /aps/snapshots                   list snapshots of one issue (?issueId=)
  * - GET    /aps/snapshots/:snapshotId       one snapshot (?issueId=)
  * - GET    /aps/snapshots/compare           per-row verdicts (?base=&other=[&issueId=])
@@ -45,30 +47,43 @@ import { grantedDocumentIds } from '../documents/grants.js';
 import {
   TERMINAL_ANALYSIS_STATUSES,
   analysisIdParamSchema,
+  apsJudgmentInputSchema,
   columnMapSchema,
   compareSnapshots,
   compareSnapshotsQuery,
   createAnalysisInput,
+  issueIdParamSchema,
   listAnalysesQuery,
-  planningRowSchema,
   productInfo,
   publicAnalysisDetailView,
   publicAnalysisListItem,
   snapshotIdParamSchema,
   snapshotsQuery,
+  toPlanningRow,
   MAX_REPORT_PART_BYTES,
   type AnalysisStatus,
   type ApsAnalysisDoc,
-  type PlanningRow,
+  type IssueSummary,
 } from './types.js';
 import {
   cancelAnalysis,
+  claimPendingSubstrateRetry,
   createAnalysis,
   getAnalysis,
   listAnalyses,
+  releaseRetryClaim,
   setAnalysisColumnMap,
   setAnalysisFlowRun,
+  setAnalysisFlowRunIds,
 } from './store.js';
+import {
+  apsJudge,
+  buildExplainRequest,
+  buildPrioritizeRequest,
+  buildRecommendRequest,
+  buildSummariesFromSnapshot,
+  type ApsJudgmentRequest,
+} from './agentJudgment.js';
 import {
   SubstrateUnavailableError,
   getSubstrateClient,
@@ -265,16 +280,6 @@ async function refreshAnalysisFromRun(doc: ApsAnalysisDoc): Promise<ApsAnalysisD
     ...(typeof patch.baselineSnapshotId === 'string' ? { baselineSnapshotId: patch.baselineSnapshotId } : {}),
   });
   return updated ?? doc;
-}
-
-/** Tolerantly coerce a sibling snapshot row into a PlanningRow (never throws). */
-function toPlanningRow(raw: unknown): PlanningRow {
-  if (raw && typeof raw === 'object') {
-    const parsed = planningRowSchema.safeParse(raw);
-    if (parsed.success) return parsed.data;
-    return raw as PlanningRow;
-  }
-  return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +542,240 @@ export async function apsPlanningRoutes(fastify: FastifyInstance): Promise<void>
       metadata: { analysisId: doc._id },
     });
     return reply.send({ id: updated._id, status: updated.status });
+  });
+
+  // -------------------------------------------------------------------------
+  // Retry — re-attempt the substrate start for analyses honestly waiting
+  // in `pending-substrate` (e.g. after the tenant published the
+  // aps-exception-analysis flow). Idempotent: the status moves out of
+  // pending-substrate only via the atomic claim in store.ts, so a
+  // concurrent or repeated retry never starts a second flow run. Retry
+  // from any other non-terminal state is a no-op that reports the
+  // current state; terminal analyses return 409.
+  // -------------------------------------------------------------------------
+
+  fastify.post('/aps/analyses/:id/retry', {
+    preHandler: apsPreHandlers,
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const params = analysisIdParamSchema.safeParse(req.params);
+    if (!params.success) validationError('Invalid analysis id', params.error.flatten());
+    const doc = await getAnalysis(auth.tenantId, params.data.id);
+    if (!doc) throw Errors.notFound('NOT_FOUND', 'Analysis not found');
+    assertAnalysisReadable(doc, auth.userId, isAnalysisAdmin(auth));
+
+    const auditBase = {
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      requestId: req.requestId,
+    };
+
+    if (TERMINAL_ANALYSIS_STATUSES.includes(doc.status)) {
+      throw Errors.conflict('ANALYSIS_TERMINAL', `Analysis is already ${doc.status}`);
+    }
+    if (doc.status === 'analyzing' || doc.status === 'verifying') {
+      // The substrate start already happened — idempotent no-op, no new run.
+      await recordAudit({
+        ...auditBase,
+        action: 'APS_ANALYSIS_RETRY_SKIPPED',
+        success: true,
+        metadata: { analysisId: doc._id, reason: 'already-in-flight', status: doc.status },
+      });
+      return reply.send({
+        id: doc._id,
+        status: doc.status,
+        retried: false,
+        ...(doc.flowRunId ? { flowRunId: doc.flowRunId } : {}),
+      });
+    }
+    if (doc.status !== 'pending-substrate') {
+      throw Errors.conflict(
+        'ANALYSIS_NOT_RETRYABLE',
+        `Only analyses waiting in pending-substrate can be retried — this one is ${doc.status}`,
+      );
+    }
+
+    // Atomic claim: exactly one retry can move the analysis out of
+    // pending-substrate. Losers of a concurrent race fall through below.
+    const claimed = await claimPendingSubstrateRetry(auth.tenantId, doc._id);
+    if (!claimed) {
+      const current = await getAnalysis(auth.tenantId, doc._id);
+      await recordAudit({
+        ...auditBase,
+        action: 'APS_ANALYSIS_RETRY_SKIPPED',
+        success: true,
+        metadata: { analysisId: doc._id, reason: 'retry-race-lost' },
+      });
+      return reply.send({ id: doc._id, status: current?.status ?? doc.status, retried: false });
+    }
+
+    const reportDocumentId = doc.sourceDocumentIds[0];
+    if (!reportDocumentId) {
+      await releaseRetryClaim(
+        auth.tenantId,
+        doc._id,
+        'Retry released: the analysis has no source document recorded.',
+      );
+      throw Errors.internal('The analysis has no source document recorded');
+    }
+
+    try {
+      const invoked = await getSubstrateClient().invokeAnalysisFlow(auth, {
+        exceptionReportDocumentId: reportDocumentId,
+        issueId: doc.issueId ?? '',
+        site: doc.site ?? '',
+      });
+      await setAnalysisFlowRunIds(auth.tenantId, doc._id, {
+        flowName: invoked.flowName,
+        flowRunId: invoked.runId,
+        statusNote: 'Retry started the aps-exception-analysis pipeline run.',
+      });
+      await recordAudit({
+        ...auditBase,
+        action: 'APS_ANALYSIS_RETRY_STARTED',
+        success: true,
+        metadata: {
+          analysisId: doc._id,
+          flowName: invoked.flowName,
+          flowRunId: invoked.runId,
+        },
+      });
+      return reply.status(202).send({
+        id: doc._id,
+        status: 'analyzing',
+        retried: true,
+        flowRunId: invoked.runId,
+      });
+    } catch (error) {
+      // The pipeline still never ran — release the claim and wait honestly.
+      if (error instanceof SubstrateUnavailableError) {
+        const statusNote =
+          'Retry attempted — the aps-exception-analysis pipeline is still not published on this tenant. ' +
+          'The analysis stays in pending-substrate.';
+        await releaseRetryClaim(auth.tenantId, doc._id, statusNote);
+        await recordAudit({
+          ...auditBase,
+          action: 'APS_ANALYSIS_RETRY_SKIPPED',
+          success: true,
+          metadata: { analysisId: doc._id, reason: 'substrate-unavailable' },
+        });
+        return reply.status(202).send({
+          id: doc._id,
+          status: 'pending-substrate',
+          retried: false,
+          statusNote,
+        });
+      }
+      await releaseRetryClaim(
+        auth.tenantId,
+        doc._id,
+        'Retry attempted — the substrate start failed before any pipeline work ran. The analysis stays in pending-substrate.',
+      );
+      throw error;
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue judgment — the REST trigger for the standalone agentJudgment seam
+  // (agentJudgment.ts: aps-explain / aps-prioritize / aps-recommend).
+  //
+  // This is NOT the flow's pipeline judgment: the flow's four agent steps
+  // (classify, root-cause, recommendation, syteline-steps) run inside the
+  // versioned flow with the pipeline's full evidence in context. This
+  // trigger answers "what should I work on first?" over an
+  // already-recorded issue, from AGGREGATES ONLY (per-issue summaries —
+  // never full report rows — to the model). Schema-validated both ways:
+  // the request body by zod, the model's decision by the builder's schema.
+  // -------------------------------------------------------------------------
+
+  fastify.post('/aps/issues/:issueId/judgment', {
+    preHandler: apsPreHandlers,
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+  }, async (req, reply) => {
+    const auth = req.auth!;
+    const params = issueIdParamSchema.safeParse(req.params);
+    if (!params.success) validationError('Invalid issue id', params.error.flatten());
+    const body = apsJudgmentInputSchema.safeParse(req.body);
+    if (!body.success) validationError('Invalid judgment request', body.error.flatten());
+
+    let issue: SubstrateIssue | null;
+    try {
+      issue = await getSubstrateClient().getIssue(auth.tenantId, params.data.issueId);
+    } catch (error) {
+      substrateErrorToHttp(error);
+    }
+    if (!issue) throw Errors.notFound('ISSUE_NOT_FOUND', 'APS issue not found');
+
+    // Aggregates only: explicit summaries from the caller, or derived
+    // server-side from the issue's latest recorded snapshot.
+    let summaries: IssueSummary[] | undefined = body.data.summaries;
+    if (!summaries) {
+      const latest = [...issue.snapshots]
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+      summaries = latest ? buildSummariesFromSnapshot(latest.issues) : [];
+    }
+    if (summaries.length === 0) {
+      throw Errors.badRequest(
+        'JUDGMENT_NO_SUMMARIES',
+        'No issue summaries to judge — the issue has no recorded snapshots with classified rows; pass summaries explicitly',
+      );
+    }
+
+    let judgment: ApsJudgmentRequest;
+    if (body.data.kind === 'explain') {
+      if (summaries.length !== 1) {
+        validationError('The explain judgment takes exactly one issue summary');
+      }
+      judgment = buildExplainRequest(summaries[0]!, []);
+    } else if (body.data.kind === 'prioritize') {
+      judgment = buildPrioritizeRequest(summaries);
+    } else {
+      judgment = buildRecommendRequest(summaries);
+    }
+
+    const result = await apsJudge(
+      {
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        roleId: auth.roleId,
+        clearance: auth.clearance,
+      },
+      judgment,
+      AbortSignal.timeout(90_000),
+    );
+
+    if (!result.ok) {
+      await recordAudit({
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        requestId: req.requestId,
+        action: 'APS_JUDGMENT_REQUESTED',
+        success: false,
+        metadata: { issueId: issue._id, kind: body.data.kind, code: result.code },
+      });
+      throw Errors.badGateway('JUDGE_FAILED', `The agent judgment failed: ${result.detail}`);
+    }
+
+    await recordAudit({
+      tenantId: auth.tenantId,
+      userId: auth.userId,
+      requestId: req.requestId,
+      action: 'APS_JUDGMENT_REQUESTED',
+      success: true,
+      metadata: {
+        issueId: issue._id,
+        kind: body.data.kind,
+        judgmentRef: judgment.judgmentRef,
+        summaryCount: summaries.length,
+      },
+    });
+    return reply.send({
+      issueId: issue._id,
+      kind: body.data.kind,
+      judgmentRef: judgment.judgmentRef,
+      decision: result.decision,
+    });
   });
 
   // -------------------------------------------------------------------------

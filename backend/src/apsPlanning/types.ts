@@ -116,6 +116,16 @@ export const planningRowSchema = z
 
 export type PlanningRow = z.infer<typeof planningRowSchema>;
 
+/** Tolerantly coerce a sibling snapshot row into a PlanningRow (never throws). */
+export function toPlanningRow(raw: unknown): PlanningRow {
+  if (raw && typeof raw === 'object') {
+    const parsed = planningRowSchema.safeParse(raw);
+    if (parsed.success) return parsed.data;
+    return raw as PlanningRow;
+  }
+  return {};
+}
+
 function keyPart(value: unknown): string {
   if (value === null || value === undefined) return '';
   const text = String(value).trim().toLowerCase();
@@ -400,12 +410,59 @@ export interface ApsAnalysisDoc {
   issueId?: string;
   baselineSnapshotId?: string;
   columnMap?: { columns: Record<string, string>; confirmed: boolean; confirmedAt?: Date };
+  /**
+   * Internal retry-claim marker: set while a POST
+   * /aps/analyses/:id/retry owns the pending-substrate → analyzing
+   * transition. Never part of the public API views.
+   */
+  retryInFlight?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
 
 export const analysisIdParamSchema = z.object({ id: analysisIdParam }).strict();
 export const snapshotIdParamSchema = z.object({ snapshotId: z.string().regex(/^[A-Za-z0-9_-]{1,120}$/) }).strict();
+
+/** Issue id param (sibling's aps_issues docs are read through the substrate seam). */
+export const issueIdParamSchema = z.object({ issueId: analysisIdParam }).strict();
+
+// ---------------------------------------------------------------------------
+// Issue-scoped agent judgment trigger
+//
+// The flow's four agent steps (classify, root-cause, recommendation,
+// syteline-steps) are the pipeline's system of record. The standalone
+// agentJudgment seam (agentJudgment.ts) explains, correlates, and
+// prioritizes findings OUTSIDE a flow run — e.g. "what should I work on
+// first?" over an already-recorded analysis. POST
+// /aps/issues/:issueId/judgment is its REST trigger: schema-validated,
+// aggregates-only (the privacy hard rule from agentJudgment.ts applies —
+// prompts carry per-issue summaries, never full report rows).
+// ---------------------------------------------------------------------------
+
+/** The judgment kinds the standalone seam offers (the flow owns pipeline prompts). */
+export const JUDGMENT_KINDS = ['explain', 'prioritize', 'recommend'] as const;
+export type JudgmentKind = (typeof JUDGMENT_KINDS)[number];
+
+/** Aggregate per-issue summary: the most detail a judgment prompt may carry. */
+export const issueSummarySchema = z.object({
+  id: z.string().max(120),
+  type: z.string().max(40),
+  severity: z.enum(['critical', 'high', 'medium', 'low']),
+  item: z.string().max(80).optional(),
+  daysLate: z.number().optional(),
+});
+
+export type IssueSummary = z.infer<typeof issueSummarySchema>;
+
+/** POST /aps/issues/:issueId/judgment body. Omit `summaries` to derive them from the issue's latest recorded snapshot. */
+export const apsJudgmentInputSchema = z
+  .object({
+    kind: z.enum(JUDGMENT_KINDS),
+    summaries: z.array(issueSummarySchema).min(1).max(200).optional(),
+  })
+  .strict();
+
+export type ApsJudgmentInput = z.infer<typeof apsJudgmentInputSchema>;
 
 export const listAnalysesQuery = z
   .object({

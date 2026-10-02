@@ -27,7 +27,18 @@ import { resolveChatDefault } from '../ai/gateway/capabilityRouter.js';
 import type { Classification } from '../authz/permissions.js';
 import { Errors } from '../errors.js';
 import { APS_PLANNING_KNOWLEDGE } from './knowledge.js';
-import { recommendationSchema, rootCauseSchema } from './types.js';
+import {
+  issueIdentityKey,
+  issueSummarySchema,
+  recommendationSchema,
+  rootCauseSchema,
+  toPlanningRow,
+} from './types.js';
+import type { IssueSummary } from './types.js';
+
+// Re-exported so existing import sites keep working (the schema lives in types.ts now).
+export { issueSummarySchema };
+export type { IssueSummary };
 
 /** The caller's auth context for a judgment call (identifiers only). */
 export interface ApsJudgmentActor {
@@ -154,16 +165,38 @@ JUDGMENT RULES
 - Never invent SyteLine records, procedures, forms, fields, or buttons.
 - Return JSON matching the requested schema exactly.`;
 
-/** Aggregate per-issue summary: the most detail a prompt may carry. */
-export const issueSummarySchema = z.object({
-  id: z.string().max(120),
-  type: z.string().max(40),
-  severity: z.enum(['critical', 'high', 'medium', 'low']),
-  item: z.string().max(80).optional(),
-  daysLate: z.number().optional(),
-});
-
-export type IssueSummary = z.infer<typeof issueSummarySchema>;
+/**
+ * Derive aggregate issue summaries from a RECORDED snapshot's rows
+ * (server-side, for the REST trigger). Aggregates only: id (the stable
+ * identity key, or `row:<index>` when the row has no identity),
+ * type, severity, item, daysLate. Full rows — exception text,
+ * quantities, supplier fields — never leave this function.
+ *
+ * Rows without a severity are skipped: severity is load-bearing for
+ * prioritize/explain, and a missing severity means the row was never
+ * classified by the pipeline.
+ */
+export function buildSummariesFromSnapshot(rows: unknown[]): IssueSummary[] {
+  const summaries: IssueSummary[] = [];
+  rows.forEach((raw, index) => {
+    const row = toPlanningRow(raw);
+    if (row.severity === undefined) return;
+    const key = issueIdentityKey(row);
+    const id = (key !== '' ? key : `row:${row.rowIndex ?? index}`).slice(0, 120);
+    const daysLate =
+      typeof row.evidence?.daysLate === 'number' && Number.isFinite(row.evidence.daysLate)
+        ? row.evidence.daysLate
+        : undefined;
+    summaries.push({
+      id,
+      type: String(row.type ?? 'UNKNOWN').slice(0, 40),
+      severity: row.severity,
+      ...(row.item ? { item: row.item } : {}),
+      ...(daysLate !== undefined ? { daysLate } : {}),
+    });
+  });
+  return summaries.slice(0, 200);
+}
 
 const explainDecisionSchema = z.object({
   explanation: z.string().trim().min(1).max(2000),
