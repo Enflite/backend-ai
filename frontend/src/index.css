@@ -463,6 +463,34 @@ body {
   background: var(--accent);
 }
 
+/* Form customization rows: Relay task-item shape on the ctx-row chassis —
+   a status dot beside the title, the form name + relative time below. Dot
+   colors mirror the formAgent statusMeta badge palette; the in-progress dot
+   pulses via .animate-pulse-dot (already prefers-reduced-motion-safe). */
+.form-row__main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.form-row__main .ctx-row__title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.form-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  flex-shrink: 0;
+  background: #9ca3af;
+}
+.form-status-dot.requested { background: #9ca3af; }
+.form-status-dot.in_progress { background: #2563eb; }
+.form-status-dot.awaiting_review { background: #d97706; }
+.form-status-dot.completed { background: #15803d; }
+.form-status-dot.blocked { background: var(--danger); }
+.form-status-dot.cancelled { background: #9ca3af; opacity: 0.45; }
+
 /* Responsive shell breakpoints (Relay reference) */
 
 @media (max-width: 1050px) {

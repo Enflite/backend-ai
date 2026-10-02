@@ -18,7 +18,7 @@
  * DisabledState; missing syteline:forms maps to NotAuthorizedState.
  */
 import { useCallback, useEffect, useState } from "react"
-import { Link, useParams } from "react-router-dom"
+import { useParams } from "react-router-dom"
 import {
   cancelFormCustomization,
   getFormCustomization,
@@ -591,17 +591,13 @@ export default function CustomizationDetail() {
   const showResult =
     detail.status === "awaiting_review" || detail.status === "completed"
 
+  // Panel layout: the FormsView workspace provides the sidebar and the
+  // scroll container; the detail constrains its own measure and keeps every
+  // section (header, review hero, Changes, Validation, Pipeline, Blocked,
+  // Actions).
   return (
-    <div className="flex-1 overflow-y-auto p-6">
-      <div className="max-w-3xl">
-        <Link
-          to="/forms"
-          className="text-sm"
-          style={{ color: "var(--accent)" }}
-        >
-          ← All customizations
-        </Link>
-
+    <div className="flex-1 overflow-y-auto">
+      <div className="max-w-3xl mx-auto px-4 py-6">
         {/* Header */}
         <div
           className="mt-3 rounded-lg p-5"
