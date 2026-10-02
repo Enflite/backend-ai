@@ -2,7 +2,8 @@
  * sytelineTasks.ts — syteline.task.* agentic tool family (DESIGN.md §11.2).
  *
  * The kanban API for the SyteLine task-agent system: create tasks in plain
- * language, list them (the board view), inspect one, cancel one. The
+ * language, list them (the board view), inspect one, cancel one, and
+ * re-queue blocked ones (with optional task-bounded write approval). The
  * server-side task runner (§11.3, syteline/tasks/) picks up `assigned`
  * tasks, plans and executes them as the requester, and reports back.
  *
@@ -24,7 +25,9 @@ import {
   createTaskInput,
   getTaskInput,
   listTasksInput,
+  requeueTaskInput,
   type CreateTaskInput,
+  type RequeueTaskInput,
   type SytelineTaskDoc,
 } from '../syteline/tasks/taskTypes.js';
 import {
@@ -33,6 +36,7 @@ import {
   createTask,
   getTask,
   listTasks,
+  requeueTask,
 } from '../syteline/tasks/taskStore.js';
 import { kickTaskRunner } from '../syteline/tasks/taskScheduler.js';
 
@@ -203,6 +207,55 @@ export const sytelineTaskToolDefinitions: readonly ToolDefinition<any>[] = [
         metadata: { taskId: task._id, title: task.title },
       });
       return { cancelled: true, taskId: task._id };
+    },
+  },
+  {
+    name: 'syteline.task.requeue',
+    description:
+      'Re-queue a blocked SyteLine task back to `assigned` so the runner picks it up again. ' +
+      'Use after a task parked as blocked/awaiting-write-approval: pass approveWrites=true as YOUR ' +
+      'explicit, task-bounded confirmation for this task\'s write steps (the runner then executes ' +
+      'the proposed write plan it recorded). Also re-queues tasks blocked on external ' +
+      'dependencies once they clear (omit approveWrites to keep the current setting). ' +
+      'Only blocked tasks can be re-queued; only the requester or an admin.',
+    action: 'requeue-task',
+    destructive: false,
+    permission: 'syteline:ui',
+    allowedClassifications: TASK_CLASSIFICATIONS,
+    schema: requeueTaskInput,
+    execute: async (
+      input: RequeueTaskInput,
+      ctx: ToolExecutionContext,
+      signal: AbortSignal,
+    ) => {
+      if (signal.aborted) throw Errors.badRequest('TOOL_ABORTED', 'Tool call aborted');
+      assertTaskUiEnabled();
+      const task = await getTask(ctx.auth.tenantId, input.taskId);
+      if (!task) throw Errors.notFound('TASK_NOT_FOUND', 'Task not found');
+      assertTaskVisible(task, ctx.auth.userId, isTaskAdmin(ctx.auth));
+      const requeued = await requeueTask(ctx.auth.tenantId, input.taskId, input.approveWrites);
+      if (!requeued) {
+        throw Errors.badRequest(
+          'TASK_NOT_BLOCKED',
+          `Only blocked tasks can be re-queued (current status: ${task.status})`,
+        );
+      }
+      await recordAudit({
+        tenantId: ctx.auth.tenantId,
+        userId: ctx.auth.userId,
+        requestId: ctx.requestId,
+        action: 'SYTELINE_TASK_REQUEUED',
+        success: true,
+        metadata: {
+          taskId: requeued._id,
+          title: requeued.title,
+          previousBlockedReason: task.blockedReason ?? null,
+          autoApproveWrites: requeued.autoApproveWrites,
+        },
+      });
+      // Nudge the runner for an out-of-band sweep (no-op when disabled).
+      kickTaskRunner();
+      return { task: publicTaskView(requeued) };
     },
   },
 ];

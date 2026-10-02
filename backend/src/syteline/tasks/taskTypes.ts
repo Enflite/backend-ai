@@ -120,5 +120,22 @@ export const getTaskInput = z.object({ taskId: taskIdParam }).strict();
 
 export const cancelTaskInput = z.object({ taskId: taskIdParam }).strict();
 
+/**
+ * Re-queue a blocked task back to `assigned` so the runner picks it up
+ * again. `approveWrites: true` is the requester's explicit, task-bounded
+ * confirmation for the task's write steps (the write-approval gate in
+ * §11.4) — typically used when the task parked as
+ * `blocked/awaiting-write-approval` after read-only reconnaissance.
+ * Re-queueing any other blocked task (e.g. an external dependency
+ * cleared) works without it.
+ */
+export const requeueTaskInput = z
+  .object({
+    taskId: taskIdParam,
+    approveWrites: z.boolean().optional(),
+  })
+  .strict();
+
 export type CreateTaskInput = z.input<typeof createTaskInput>;
+export type RequeueTaskInput = z.input<typeof requeueTaskInput>;
 export type ListTasksInput = z.infer<typeof listTasksInput>;

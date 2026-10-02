@@ -220,10 +220,12 @@ bounded to that task's plan, auditable.
 - **Default `false`:** the agent runs read-only reconnaissance
   (`gotoForm` / `readScreen`), then reports a proposed write plan and
   marks the task `blocked` with
-  `blockedReason: 'awaiting-write-approval'`. To proceed, create a
-  follow-up task with `autoApproveWrites: true`. (A dedicated
-  `syteline.task.approveWrites` tool is the future seam; out of scope
-  for this build.)
+  `blockedReason: 'awaiting-write-approval'`. To proceed, re-queue the
+  task with `syteline.task.requeue { taskId, approveWrites: true }` —
+  the requester's explicit, task-bounded confirmation for that task's
+  recorded write plan (audited as `SYTELINE_TASK_REQUEUED`). The same
+  tool re-queues tasks blocked on cleared external dependencies
+  (omit `approveWrites` to keep the current setting).
 - **`true`:** write steps (`fillField`, `clickButton`, any write in
   the plan) execute inside this task without further per-step prompts.
   The approval covers exactly this task's recorded plan — nothing
