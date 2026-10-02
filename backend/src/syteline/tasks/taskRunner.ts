@@ -26,7 +26,7 @@ import { getDb, tenantOp } from '../../db/mongo.js';
 import { recordAudit, sanitizeReason } from '../../audit/audit.js';
 import { Errors } from '../../errors.js';
 import type { AuthContext, Classification } from '../../authz/permissions.js';
-import { buildAuth, type MembershipRow } from '../../auth/routes.js';
+import { liveRequesterAuth } from '../requesterAuth.js';
 import { gatewayStream } from '../../ai/gateway/gateway.js';
 import { resolveChatDefault } from '../../ai/gateway/capabilityRouter.js';
 import {
@@ -176,45 +176,6 @@ export function authFromSnapshot(task: SytelineTaskDoc): AuthContext {
   };
 }
 
-/**
- * Resolve the requester's LIVE auth context at run time, through the same
- * permission resolution as login (buildAuth). Returns null when the user
- * is gone, deactivated, no longer a member of the task's tenant, or their
- * tenant/role records are missing. A task created before a demotion must
- * not keep driving the user's SyteLine session after revocation — the
- * runner fails closed on anything but a live `syteline:ui` grant.
- */
-async function liveRequesterAuth(task: SytelineTaskDoc): Promise<AuthContext | null> {
-  const db = await getDb();
-  const user = await db.collection<{
-    _id: string; email: string; passwordHash: string; displayName: string;
-    isActive: boolean; clearance: Classification;
-  }>('users').findOne({ _id: task.requesterUserId });
-  if (!user || user.isActive === false) return null;
-  const membership = await db.collection<{ _id: string; userId: string; tenantId: string; roleId: string }>(
-    'memberships',
-  ).findOne({ userId: task.requesterUserId, tenantId: task.tenantId });
-  if (!membership) return null;
-  const [tenant, role] = await Promise.all([
-    db.collection<{ _id: string; name: string }>('tenants').findOne({ _id: membership.tenantId }),
-    db.collection<{ _id: string; name: string }>('roles').findOne({ _id: membership.roleId }),
-  ]);
-  if (!tenant || !role) return null;
-  const row: MembershipRow = {
-    tenantId: membership.tenantId,
-    tenantName: tenant.name,
-    roleId: membership.roleId,
-    roleName: role.name,
-  };
-  const base = await buildAuth(
-    {
-      id: user._id, email: user.email, passwordHash: user.passwordHash,
-      displayName: user.displayName, isActive: user.isActive, clearance: user.clearance,
-    },
-    row,
-  );
-  return { ...base, sessionId: `task-runner:${task._id}` };
-}
 
 // ---------------------------------------------------------------------------
 // Step classification

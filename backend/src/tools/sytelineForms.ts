@@ -24,7 +24,7 @@
 
 import { z } from 'zod';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { basename, join } from 'node:path';
 import { Classification } from '../authz/permissions.js';
 import { Errors } from '../errors.js';
 import { config } from '../config.js';
@@ -38,6 +38,8 @@ import {
   sha256Hex,
 } from '../syteline/forms/formXml.js';
 import { assertUetFieldName, componentStem } from '../syteline/forms/naming.js';
+import { newFieldSchema } from '../syteline/forms/fieldSpec.js';
+import { projectDirOrThrow } from '../syteline/forms/projectPaths.js';
 import { scaffoldProject } from '../syteline/forms/scaffold.js';
 import {
   ImplementationPlanInput,
@@ -65,23 +67,6 @@ const relPathSchema = (what: string) =>
       `${what}: must be a relative path without .. escapes`,
     );
 
-/** Confine every project path under the configured projects root. */
-function projectDirOrThrow(relativeProjectDir: string): string {
-  const root = resolve(
-    config.SYTELINE_FORM_PROJECTS_DIR ??
-      join(process.cwd(), 'form-projects'),
-  );
-  const dir = resolve(root, relativeProjectDir);
-  const rel = relative(root, dir);
-  if (rel === '..' || rel.startsWith(`..${sep}`) || resolve(root, rel) !== dir) {
-    throw Errors.badRequest('INVALID_PROJECT_DIR', 'projectDir must stay under the form-projects root');
-  }
-  if (dir !== resolve(root, basename(relativeProjectDir))) {
-    throw Errors.badRequest('INVALID_PROJECT_DIR', 'projectDir must be a single folder name');
-  }
-  return dir;
-}
-
 function readExportBytes(projectDir: string, file: string): Buffer {
   const safe = basename(file);
   if (safe !== file || !file.endsWith('.xml')) {
@@ -97,21 +82,6 @@ function readExportBytes(projectDir: string, file: string): Buffer {
 // ---------------------------------------------------------------------------
 // Input schemas
 // ---------------------------------------------------------------------------
-
-const newFieldSchema = z
-  .object({
-    field: z.string().regex(/^Uf_ENF_[A-Za-z0-9]+$/),
-    caption: z.string().min(1).max(60),
-    kind: z.enum(['text', 'date', 'dropdown', 'notes']),
-    userDefinedType: z.string().max(60).optional(),
-    container: z.string().min(1).max(80),
-    top: z.number().finite(),
-    labelLeft: z.number().finite(),
-    labelWidth: z.number().finite().positive(),
-    editLeft: z.number().finite(),
-    editWidth: z.number().finite().positive(),
-  })
-  .strict();
 
 const formAddFieldInput = z
   .object({
