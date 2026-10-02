@@ -47,6 +47,13 @@ function useSource<T>(
   const [health, setHealth] = useState<SourceHealth>('loading');
   const [message, setMessage] = useState('');
   const cancelledRef = useRef(false);
+  // The callers pass inline arrow functions as `fetcher`, so its identity
+  // changes every render. Hold it in a ref so `reload` below keeps a stable
+  // identity and the mount effect below runs once — otherwise each render
+  // produces a new `reload`, the effect refires, the fetch sets state, and the
+  // board loops as fast as responses return.
+  const fetcherRef = useRef(fetcher);
+  fetcherRef.current = fetcher;
 
   useEffect(() => {
     cancelledRef.current = false;
@@ -56,7 +63,7 @@ function useSource<T>(
   const reload = useCallback(() => {
     void (async () => {
       try {
-        const next = await fetcher();
+        const next = await fetcherRef.current();
         if (cancelledRef.current) return;
         setItems(next);
         setHealth('ok');
@@ -67,7 +74,7 @@ function useSource<T>(
         setMessage(errorMessage(error));
       }
     })();
-  }, [fetcher]);
+  }, []);
 
   useEffect(() => { reload(); }, [reload]);
   // Keep polling healthy sources; a disabled/forbidden/errored source is
