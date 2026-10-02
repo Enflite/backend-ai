@@ -175,6 +175,7 @@ describe('tool registration', () => {
       'syteline.ui.clickButton',
       'syteline.ui.runTaskPlan',
       'syteline.ui.endSession',
+      'syteline.ui.listSessions',
     ]);
   });
 
@@ -326,6 +327,105 @@ describe('session flow (FakeDriver)', () => {
     expect(loginAudits).toHaveLength(1);
     expect((loginAudits[0]![0] as { success: boolean }).success).toBe(false);
     expect(JSON.stringify(loginAudits)).not.toContain('wrong-password');
+  });
+});
+
+describe('listSessions', () => {
+  async function listSessionsFor(auth: AuthContext) {
+    const result = await runToolCall({
+      auth,
+      name: 'syteline.ui.listSessions',
+      rawArguments: '{}',
+      classification: 'INTERNAL',
+      signal: new AbortController().signal,
+    });
+    expect(result.ok).toBe(true);
+    return result.data as {
+      sessions: Array<{
+        sessionId: string;
+        userId: string;
+        tenantId: string;
+        startedAt: string;
+        lastUsedAt: string;
+        idleMs: number;
+        state: string;
+      }>;
+    };
+  }
+
+  it('returns an empty list when no sessions exist', async () => {
+    const data = await listSessionsFor(ADMIN_AUTH());
+    expect(data.sessions).toEqual([]);
+  });
+
+  it('lists the caller session with metadata only — never secrets', async () => {
+    const auth = ADMIN_AUTH();
+    await saveCredential(auth, 'jsmith1', 's3cret');
+    const started = await runToolCall({
+      auth,
+      name: 'syteline.ui.startSession',
+      rawArguments: '{}',
+      classification: 'INTERNAL',
+      signal: new AbortController().signal,
+    });
+    expect(started.ok).toBe(true);
+    const data = await listSessionsFor(auth);
+    expect(data.sessions).toHaveLength(1);
+    const session = data.sessions[0]!;
+    expect(session.sessionId).toBe(
+      (started.data as { sessionId: string }).sessionId,
+    );
+    expect(session.userId).toBe(auth.userId);
+    expect(session.tenantId).toBe(auth.tenantId);
+    expect(session.state).toBe('active');
+    expect(session.idleMs).toBeGreaterThanOrEqual(0);
+    expect(new Date(session.startedAt).getTime()).not.toBeNaN();
+    expect(new Date(session.lastUsedAt).getTime()).not.toBeNaN();
+    expect(JSON.stringify(data)).not.toContain('s3cret');
+    expect(Object.keys(session).sort()).toEqual([
+      'idleMs',
+      'lastUsedAt',
+      'sessionId',
+      'startedAt',
+      'state',
+      'tenantId',
+      'userId',
+    ]);
+  });
+
+  it('is tenant-scoped: other tenants’ sessions are not listed', async () => {
+    const authA = ADMIN_AUTH();
+    const authB = authFor('user-other', ['tool:use', 'chat:create', 'syteline:ui']);
+    (authB as { tenantId: string }).tenantId = 'tenant-b';
+    await saveCredential(authA, 'jsmith1', 's3cret');
+    await saveCredential(authB, 'jsmith1', 's3cret');
+    for (const auth of [authA, authB]) {
+      const started = await runToolCall({
+        auth,
+        name: 'syteline.ui.startSession',
+        rawArguments: '{}',
+        classification: 'INTERNAL',
+        signal: new AbortController().signal,
+      });
+      expect(started.ok).toBe(true);
+    }
+    const data = await listSessionsFor(authA);
+    expect(data.sessions).toHaveLength(1);
+    expect(data.sessions[0]!.tenantId).toBe('tenant-a');
+    expect(data.sessions[0]!.userId).toBe(authA.userId);
+  });
+
+  it('fails fast while SYTELINE_UI_ENABLED=false', async () => {
+    (config as Record<string, unknown>).SYTELINE_UI_ENABLED = false;
+    const result = await runToolCall({
+      auth: ADMIN_AUTH(),
+      name: 'syteline.ui.listSessions',
+      rawArguments: '{}',
+      classification: 'INTERNAL',
+      signal: new AbortController().signal,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('SYTELINE_UI_DISABLED');
   });
 });
 
