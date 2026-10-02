@@ -21,6 +21,11 @@
  *
  *   { to: '/aps', label: 'APS Planning Agent', section: 'Agents',
  *     permissions: ['aps:plan'], icon: (a) => <IconAps active={a} /> },
+ *
+ * The top-level "Agents" entry above is the agents product area itself
+ * (views/AgentsView.tsx) — a directory of the agent surfaces in the app.
+ * Agent teams own their views and sub-routes under /agents/*; they plug
+ * into this shell and the shared design tokens.
  */
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../auth';
@@ -38,6 +43,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Chat', icon: (a) => <IconChat active={a} /> },
+  { to: '/agents', label: 'Agents', permissions: ['syteline:ui', 'syteline:forms'], icon: (a) => <IconAgents active={a} /> },
   { to: '/board', label: 'Board', permissions: ['syteline:ui', 'syteline:forms'], icon: (a) => <IconBoard active={a} /> },
   { to: '/forms', label: 'Form AI Agent', permissions: ['syteline:forms'], icon: (a) => <IconForm active={a} /> },
   { to: '/syteline', label: 'SyteLine', permissions: ['syteline:ui'], icon: (a) => <IconSyteLine active={a} /> },
@@ -167,6 +173,9 @@ export default function AppShell() {
 
 function IconChat({ active }: { active: boolean }) {
   return <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={active ? 1.8 : 1.5} strokeLinecap="round" strokeLinejoin="round"><path d="M2 3a1 1 0 011-1h10a1 1 0 011 1v7a1 1 0 01-1 1H6l-3 3v-3H3a1 1 0 01-1-1V3z" /></svg>;
+}
+function IconAgents({ active }: { active: boolean }) {
+  return <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={active ? 1.8 : 1.5} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4.5" width="10" height="7.5" rx="2.5" /><path d="M8 4.5V2.5M6 12v2M10 12v2" /><circle cx="6.4" cy="8.2" r="0.7" fill="currentColor" stroke="none" /><circle cx="9.6" cy="8.2" r="0.7" fill="currentColor" stroke="none" /></svg>;
 }
 function IconBoard({ active }: { active: boolean }) {
   return <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={active ? 1.8 : 1.5} strokeLinecap="round"><rect x="2" y="2" width="3.5" height="12" rx="1" /><rect x="6.25" y="2" width="3.5" height="8" rx="1" /><rect x="10.5" y="2" width="3.5" height="10" rx="1" /></svg>;
