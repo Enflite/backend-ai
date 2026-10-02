@@ -33,7 +33,7 @@ describe('hasAnyPermission', () => {
 });
 
 describe('railNavItems', () => {
-  it('renders the Relay rail order: Home, Chat, Tasks, Board, Forms, SyteLine', () => {
+  it('renders the Relay rail order: Home, Chat, Tasks, Board, Forms, SyteLine, Studio', () => {
     expect(railNavItems().map((item) => item.to)).toEqual([
       '/',
       '/chat',
@@ -41,6 +41,7 @@ describe('railNavItems', () => {
       '/board',
       '/forms',
       '/syteline',
+      '/studio',
     ]);
   });
 
