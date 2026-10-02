@@ -54,11 +54,17 @@ Existing `ui/` pieces still in use: `ErrorState` (+ `DisabledState`,
 
 ## Navigation model (`frontend/src/shell/AppShell.tsx`)
 
-One global nav rail. `NAV_ITEMS` supports an optional `section`; sections
-render only when they contain items.
+One global nav rail: Chat, **Agents**, Board, Form AI Agent, SyteLine.
+`NAV_ITEMS` supports an optional `section`; sections render only when they
+contain items.
 
-**Agent extension slot:** specialized AI agents register as
-`{ to, label, section: 'Agents', permissions, icon }`. Example:
+- The top-level **Agents** entry (`/agents/*`, `views/AgentsView.tsx`) is the
+  agents product area — its index is a directory of the agent surfaces
+  registered in `AGENT_SURFACES` (each a live destination with honest
+  permission-gated status). Agent teams own their views and sub-routes
+  under `/agents/*` (task-agent landing, task detail, approvals, …).
+- **Agent extension slot:** specialized AI agents register as
+  `{ to, label, section: 'Agents', permissions, icon }`. Example:
 
 ```tsx
 { to: '/aps', label: 'APS Planning Agent', section: 'Agents',
