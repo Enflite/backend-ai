@@ -29,6 +29,7 @@ import { retentionRoutes } from './retention/routes.js';
 import { learningRoutes } from './learning/routes.js';
 import { startRetentionScheduler, stopRetentionScheduler } from './retention/scheduler.js';
 import { startTaskRunnerScheduler, stopTaskRunnerScheduler } from './syteline/tasks/taskScheduler.js';
+import { sytelineTaskRoutes } from './syteline/tasks/routes.js';
 import { flowRoutes, closeFlowSseStreams } from './flows/routes.js';
 import { startFlowRunnerScheduler, stopFlowRunnerScheduler } from './flows/flowScheduler.js';
 import {
@@ -243,6 +244,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(learningRoutes);
       await api.register(flowRoutes);
       await api.register(formAgentRoutes);
+      await api.register(sytelineTaskRoutes);
     },
     { prefix: '/api/v1' }
   );

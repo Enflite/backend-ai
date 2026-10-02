@@ -158,4 +158,40 @@ describe('UiSessionManager', () => {
     const serialized = JSON.stringify(recordAuditMock.mock.calls);
     expect(serialized).not.toContain('s3cret');
   });
+
+  it('listSessions returns metadata-only snapshots, tenant-scoped', async () => {
+    const { manager } = makeManager(() => nowMs);
+    const signal = new AbortController().signal;
+    expect(manager.listSessions('tenant-a')).toEqual([]);
+    const handle = await manager.acquire(AUTH, { connect: CONNECT, signal });
+    await manager.acquire({ tenantId: 'tenant-a', userId: 'user-b' }, { connect: CONNECT, signal });
+    await manager.acquire({ tenantId: 'tenant-b', userId: 'user-a' }, { connect: CONNECT, signal });
+    nowMs += 5_000; // idle time accrues on the injectable clock
+    const listed = manager.listSessions('tenant-a');
+    expect(listed).toHaveLength(2);
+    const mine = listed.find((s) => s.userId === 'user-a')!;
+    expect(mine.sessionId).toBe(handle.record.sessionId);
+    expect(mine.tenantId).toBe('tenant-a');
+    expect(mine.startedAt).toEqual(new Date(1_000_000));
+    expect(mine.idleMs).toBe(5_000);
+    expect(mine.state).toBe('active');
+    expect(Object.keys(mine).sort()).toEqual([
+      'idleMs',
+      'lastUsedAt',
+      'sessionId',
+      'startedAt',
+      'state',
+      'tenantId',
+      'userId',
+    ]);
+    expect(manager.listSessions('tenant-b')).toHaveLength(1);
+  });
+
+  it('listSessions omits expired sessions', async () => {
+    const { manager } = makeManager(() => nowMs);
+    const signal = new AbortController().signal;
+    await manager.acquire(AUTH, { connect: CONNECT, signal });
+    nowMs += 300_001; // past the idle TTL
+    expect(manager.listSessions('tenant-a')).toEqual([]);
+  });
 });

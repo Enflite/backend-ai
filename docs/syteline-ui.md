@@ -249,8 +249,10 @@ A finished (or blocked) task carries: `status`, per-step log (`action`,
 detail, `status`, timestamps, `evidenceIds[]`), `resultSummary` or
 `blockedReason`, and — when created from chat — an assistant message
 in the originating conversation. Evidence is screenshots stored
-server-side, tenant-scoped: fetch them by `evidenceId`; the model
-never receives raw pixels. To review a day's work: `syteline.task.list`
+server-side, tenant-scoped: fetch them by `evidenceId` through
+`GET /api/v1/syteline-tasks/:id/evidence/:evidenceId` (auth +
+`syteline:ui`, requester-or-admin; anything else is `404`, never
+`403`); the model never receives raw pixels. To review a day's work: `syteline.task.list`
 filtered by status — the kanban board's API contract (the board UI
 itself is out of scope; `syteline.task.list` is what it would query).
 
@@ -325,6 +327,7 @@ Full contracts in `docs/api.md`. At a glance:
 | `syteline.ui.clickButton` | **yes** | Click a button by accessible label (may submit/save) — requires explicit confirmation |
 | `syteline.ui.runTaskPlan` | **yes** | Execute a bounded (max 25 steps), zod-validated JSON task-plan: `gotoForm` / `fillField` / `clickButton` / `readScreen` / `assertText`; sequential, stops at first failure, per-step outcomes — requires explicit confirmation |
 | `syteline.ui.endSession` | no | Close the browser; write the session-summary audit |
+| `syteline.ui.listSessions` | no | List the tenant's active sessions (`sessionId`, `userId`, `startedAt`, `idleMs`, `state`) — metadata only |
 | `syteline.ui.saveCredentials` | **yes** | Save/rotate the caller's credentials (`secretParams: ['password']`) — requires explicit confirmation |
 | `syteline.ui.deleteCredentials` | **yes** | Revoke the caller's stored credentials — requires explicit confirmation |
 | `syteline.ui.listCredentials` | no | Username/label/updatedAt only; no secret material |

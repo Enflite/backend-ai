@@ -215,6 +215,7 @@ behavior is **VALIDATED IN CI**.
 | `syteline.ui.clickButton` | **yes** | Click a button by accessible label (may submit/save): `{ label }` |
 | `syteline.ui.runTaskPlan` | **yes** | Execute a bounded (max 25 steps), zod-validated task-plan DSL: ordered steps of `{ action: 'gotoForm', form }`, `{ action: 'fillField', label, value }`, `{ action: 'clickButton', label }`, `{ action: 'readScreen' }`, `{ action: 'assertText', text }` — sequential, stops at first failure, per-step outcomes; each step audit-logged with argument keys only |
 | `syteline.ui.endSession` | no | Close the browser and write the session-summary audit |
+| `syteline.ui.listSessions` | no | List the tenant's active UI sessions (`sessionId`, `userId`, `startedAt`, `idleMs`, `state`) — metadata only, never secret material |
 | `syteline.ui.saveCredentials` | **yes** | Save/rotate the caller's own SyteLine credentials (`userId` from auth context, never arguments); `secretParams: ['password']` |
 | `syteline.ui.deleteCredentials` | **yes** | Revoke the caller's stored credentials |
 | `syteline.ui.listCredentials` | no | `username` / `label` / `updatedAt` only — never secret material |
@@ -272,6 +273,18 @@ task lifecycle, atomic claim, planning, and the approval gate are
 | `syteline.task.list` | no | List the requester's tasks (or, for admins, the tenant's); optional `status` filter |
 | `syteline.task.get` | no | Full task record: status, zod-validated plan, per-step log with `{ action, status, evidenceIds[] }`, `resultSummary` / `blockedReason` |
 | `syteline.task.cancel` | **yes** | Cancel a task (ends work in flight); requester or admin only |
+
+Per-step screenshot evidence is captured server-side (tenant-scoped) and
+referenced by id in the step log — the model only ever sees ids. The
+frontend renders the actual pixels through a dedicated REST endpoint:
+
+`GET /api/v1/syteline-tasks/:id/evidence/:evidenceId` → `200` with
+`content-type: image/png` (or `404`). Same access posture as the tools:
+auth + `syteline:ui`, fail-fast `403 FEATURE_DISABLED` while
+`SYTELINE_UI_ENABLED=false`, requester-or-admin visibility — anything else
+is `404`, never `403`, so task existence never leaks. The evidence id must
+belong to the task's steps (strict UUID shape); the access audit carries
+identifiers only — evidence bytes are never logged.
 
 Task audit events: `SYTELINE_TASK_CREATED` / `SYTELINE_TASK_STARTED`
 / `SYTELINE_TASK_STEP` (argument keys only, never values) /

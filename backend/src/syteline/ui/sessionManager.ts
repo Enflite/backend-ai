@@ -32,6 +32,21 @@ export interface UiSessionHandle {
 }
 
 /**
+ * Metadata-only snapshot of one live session. No secrets, no driver
+ * handles — safe for ops UIs and tool results.
+ */
+export interface UiSessionInfo {
+  sessionId: string;
+  userId: string;
+  tenantId: string;
+  startedAt: Date;
+  lastUsedAt: Date;
+  /** Milliseconds since last activity, per the manager's clock. */
+  idleMs: number;
+  state: 'active';
+}
+
+/**
  * Create the driver for a new session. The factory receives the fresh
  * session record; the `connect` hook (passed to acquire) performs login.
  */
@@ -157,6 +172,31 @@ export class UiSessionManager {
     const handle = this.sessions.get(sessionKey(auth.tenantId, auth.userId)) ?? null;
     if (handle && this.isExpired(handle.record, this.now())) return null;
     return handle;
+  }
+
+  /**
+   * Metadata-only snapshot of the tenant's live (non-expired) sessions.
+   * No secrets, no driver handles — safe for ops UIs and tool results.
+   * Expired sessions are omitted (they are swept on the next acquire).
+   */
+  listSessions(tenantId: string): UiSessionInfo[] {
+    const now = this.now();
+    const out: UiSessionInfo[] = [];
+    for (const handle of this.sessions.values()) {
+      const record = handle.record;
+      if (record.tenantId !== tenantId) continue;
+      if (this.isExpired(record, now)) continue;
+      out.push({
+        sessionId: record.sessionId,
+        userId: record.userId,
+        tenantId: record.tenantId,
+        startedAt: record.startedAt,
+        lastUsedAt: record.lastUsedAt,
+        idleMs: now - record.lastUsedAt.getTime(),
+        state: 'active',
+      });
+    }
+    return out;
   }
 
   /** Close and drop the caller's session. No-op when none exists. */

@@ -28,6 +28,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { config } from '../config.js';
@@ -245,6 +246,24 @@ export async function storeScreenshotEvidence(
     metadata: { evidenceId, bytes: png.length },
   });
   return { evidenceId, capturedAt };
+}
+
+/**
+ * Read evidence bytes for serving (routes layer). Returns null when the
+ * file is absent. The evidenceId is UUID-shaped by construction
+ * (randomUUID at store time); callers must still validate the shape
+ * before calling — never pass raw user input here. Bytes are never
+ * logged; only the caller's audit event records the access.
+ */
+export async function readScreenshotEvidence(
+  tenantId: string,
+  evidenceId: string,
+): Promise<Buffer | null> {
+  try {
+    return await readFile(join(evidenceDir(tenantId), `${evidenceId}.png`));
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -613,6 +632,34 @@ export const sytelineUiToolDefinitions: readonly ToolDefinition<any>[] = [
       assertUiEnabled();
       const ended = await getUiSessionManager().release(ctx.auth, 'user_requested', ctx.requestId);
       return { ended };
+    },
+  },
+  {
+    name: 'syteline.ui.listSessions',
+    description:
+      'List the tenant\'s active SyteLine UI browser sessions (session id, user, ' +
+      'started-at, idle time, state) for the SyteLine ops view. Metadata only — ' +
+      'never secret material.',
+    action: 'list-sessions',
+    destructive: false,
+    permission: 'syteline:ui',
+    allowedClassifications: UI_CLASSIFICATIONS,
+    schema: z.object({}).strict(),
+    execute: async (_input: unknown, ctx: ToolExecutionContext, signal: AbortSignal) => {
+      if (signal.aborted) throw Errors.badRequest('TOOL_ABORTED', 'Tool call aborted');
+      assertUiEnabled();
+      const sessions = getUiSessionManager().listSessions(ctx.auth.tenantId);
+      return {
+        sessions: sessions.map((s) => ({
+          sessionId: s.sessionId,
+          userId: s.userId,
+          tenantId: s.tenantId,
+          startedAt: s.startedAt.toISOString(),
+          lastUsedAt: s.lastUsedAt.toISOString(),
+          idleMs: s.idleMs,
+          state: s.state,
+        })),
+      };
     },
   },
 ];
