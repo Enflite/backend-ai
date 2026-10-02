@@ -14,6 +14,7 @@ import { sytelineUiToolDefinitions } from './sytelineUi.js';
 import { sytelineTaskToolDefinitions } from './sytelineTasks.js';
 import { formAiToolDefinitions } from '../formAgent/flowTools.js';
 import { apsToolDefinitions } from '../aps/apsTools.js';
+import { studioAutomationToolDefinitions } from '../studio/automations/tools.js';
 
 /**
  * Context handed to every tool execution. Carries the caller's auth (tenant,
@@ -257,6 +258,12 @@ export const toolRegistry: readonly ToolDefinition<any>[] = [
   // issue snapshots, verify/close). 'document:read' for the report parse;
   // 'syteline:read' for everything else.
   ...apsToolDefinitions,
+  // Studio automation flow-step tools (compiled automations execute through
+  // these): studio.executeAction / studio.executeWriteAction (the catalog's
+  // tool binding, probe-gated against named connections), studio.log,
+  // studio.fail (verify assertions), studio.snapshotCheck (poll-based event
+  // triggers). All 'studio:run'-gated.
+  ...studioAutomationToolDefinitions,
 ];
 
 export function getTool(name: string): ToolDefinition<any> {

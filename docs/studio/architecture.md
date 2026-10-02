@@ -1,8 +1,10 @@
 # SyteLine Automation Studio — Architecture
 
 **Status:** backend foundation shipped (connections, capability probe, action
-catalog, single-action test execution). The builder UI and automation
-compilation are later slices.
+catalog, single-action test execution) **plus the automation backend
+(Wave 2)**: automation model (`studio_automations`), compile-to-Flow,
+manual/scheduled/webhook/event triggers, deploy with the destructive-action
+approval gate, dry-run, and studio runs. The builder UI is a later slice.
 
 ## The one decision
 
@@ -39,6 +41,105 @@ The Studio's catalog currently lists `api`-substrate actions only. When the
 UI substrate becomes catalog-addressable, its actions get the same shape —
 typed params, `destructive` flag, probe gating — with substrate `'ui'`.
 
+## Automations (Wave 2)
+
+An automation (`studio_automations`, tenant-scoped) is `{ name, title,
+description, status: draft|active|paused|failed, trigger, steps[],
+deployment }`. Step kinds: `action` (catalog actionId + connectionId +
+params + retries/continueOnError), `condition` (a flow `when` expression
+with then/else step ids), `verify` (re-fetch action + field assertions over
+the response body), `log` (message template).
+
+**Compile** (`compileAutomation()`, `backend/src/studio/automations/`) lowers
+steps to a flow definition — it never builds a workflow engine:
+- `action` → a `tool` step calling `studio.executeAction` (reads) or
+  `studio.executeWriteAction` (destructive catalog actions — the tool
+  gateway's confirmation gate applies). Params pass through verbatim;
+  `{{inputs.x}}` / `{{steps.y.output...}}` templates resolve at run time.
+- `condition` → a flow `condition` step (then/else rewired to compiled ids).
+- `verify` → a fetch tool step, one `condition` step per assertion
+  (`{{steps.<fetch>.output.data.<path>}} == '<value>'` — assertion paths
+  are body-relative; the action tool's output envelope is
+  `{ status, data, durationMs }`), and a `studio.fail` tool step. Each
+  assertion's `then` jumps to the next assertion (or the next automation
+  step); every `else` jumps to the fail step, which blocks the run. The
+  fail step sits directly after the last assertion and the last assertion's
+  `then` jumps *over* it, so normal flow never falls through into it.
+- `log` → a `tool` step calling `studio.log` (audited as
+  `STUDIO_AUTOMATION_LOG`).
+
+Every compiled automation ends with a terminal `__complete` log step, and
+its flow name is the deterministic `studio-<automationId>`.
+
+**Triggers** — `manual` (fire on demand), `scheduled` (a Schedules API
+schedule targeting the flow — reused, not duplicated), `webhook`
+(`POST /studio/hooks/:token` fires a run; the 256-bit token is stored as a
+sha256 hash, returned exactly once at deploy, rotated via
+`POST /:id/webhook/rotate`), and `event` (**V1 is poll-based and labeled as
+such**: a schedule runs a generated `studio-<id>-watch` flow that snapshots
+the watched value in `studio_snapshots` via `studio.snapshotCheck` and
+fires the automation flow through a subflow step on detected change).
+
+**Deploy** (`POST /:id/deploy`) compiles, publishes a new flow version,
+points the live alias at it, wires the trigger, and marks the automation
+active. **Destructive gate**: when any step uses a destructive catalog
+action, deploy requires explicit `confirmDestructive: true` in the body —
+otherwise `409 STUDIO_DESTRUCTIVE_CONFIRM_REQUIRED` listing the steps.
+Destructive automations are never deployed silently; the approval rides the
+trigger as `confirmWrites`. Undeploy pauses/removes the trigger (schedules
+paused, webhook token invalidated) and marks the deployment superseded;
+published flow versions stay as immutable history. Deleting an automation
+tears down its triggers and studio-managed flows first — a deleted
+automation never keeps firing.
+
+**Dry-run** (`POST /:id/test`) executes the draft's steps without the flow
+runner: non-destructive steps run for real against the connection's
+upstream (same shared execution core as the test endpoint and the flow
+tools — probe-gated, token zero-filled); destructive steps are **skipped,
+never executed**. Returns per-step
+`{ stepId, kind, status, skipped, request?, response?, durationMs?, error?, detail? }`.
+
+**Runs** — `GET /studio/runs` lists `flow_runs` filtered to studio flow
+names (`studio-` prefix; `?automationId=` narrows to one automation, watcher
+runs included as `kind: 'watcher'`); `GET /studio/runs/:id` returns the run
+with its per-step log (output *shapes* only, per the Flows platform's
+ADR-004 rule — values never persist).
+
+**Honesty rules carried over**: an action executes only when its operation
+probed `ok` on the connection (`STUDIO_ACTION_UNPROBED` otherwise); write
+actions the upstream lacks report `STUDIO_ACTION_UNSUPPORTED` and never
+execute; tokens never appear in logs, audit, or responses. Everything is
+behind `FLOWS_ENABLED` (403 `FEATURE_DISABLED` when off); scheduled/event
+triggers additionally require `SCHEDULES_ENABLED`.
+
+## API surface (automation slice)
+
+- `GET /api/v1/studio/automations` — list (`studio:run`)
+- `POST /api/v1/studio/automations` — create (`studio:manage`)
+- `GET /api/v1/studio/automations/:id` — one automation (`studio:run`)
+- `PATCH /api/v1/studio/automations/:id` — update; editing a deployed
+  automation returns it to draft (edits take effect on next deploy)
+  (`studio:manage`)
+- `DELETE /api/v1/studio/automations/:id` — delete + trigger/flow teardown
+  (`studio:manage`)
+- `POST /api/v1/studio/automations/:id/test` — dry run (`studio:run`)
+- `POST /api/v1/studio/automations/:id/run` — manual fire (`studio:run`)
+- `POST /api/v1/studio/automations/:id/deploy` — deploy
+  (`studio:manage`; 409 without `confirmDestructive` when destructive)
+- `POST /api/v1/studio/automations/:id/undeploy` — undeploy
+  (`studio:manage`)
+- `POST /api/v1/studio/automations/:id/webhook/rotate` — rotate the webhook
+  token (`studio:manage`)
+- `GET /api/v1/studio/runs[?automationId=&status=]` — studio runs
+  (`studio:run`)
+- `GET /api/v1/studio/runs/:id` — run detail with per-step log
+  (`studio:run`)
+- `POST /api/v1/studio/hooks/:token` — webhook fire (token-gated, no
+  session auth, rate-limited)
+
+Audited: `STUDIO_AUTOMATION_CREATED/UPDATED/DELETED/DEPLOYED/UNDEPLOYED/
+TESTED/RUN`, `STUDIO_WEBHOOK_FIRED/ROTATED`, `STUDIO_AUTOMATION_LOG`.
+
 ## Connection & capability model
 
 - **Named connections** live in Mongo (`studio_connections`), tenant-scoped,
@@ -62,19 +163,18 @@ typed params, `destructive` flag, probe gating — with substrate `'ui'`.
 
 ## What's deliberately deferred
 
-- **Event triggers** (webhooks / polling for "when X changes in SyteLine"):
-  not designed here. The trigger story starts with the Schedules API (cron)
-  when the builder slice lands.
 - **Write operations** (`syteline.record.create/update/delete`,
   `syteline.ido.invoke`): defined in the catalog and flagged
-  `destructive: true`, but gated behind a successful capability probe. The
-  current upstream serves no write endpoints, so they report
-  `supported: false` with the reason. When the upstream grows write
-  endpoints, the probe flips them on — no catalog rewrite needed.
-- **Destructive enforcement**: the catalog *flags* destructive actions;
-  approval flows and execution guards come in a later slice.
-- **Automation compilation** (builder → `.flow.json` → deploy): the next
-  slice after this foundation, using the Flows API (`/api/v1/flows`).
+  `destructive: true`, gated behind a successful capability probe AND the
+  deploy/run destructive approval gate (Wave 2). The current upstream serves
+  no write endpoints, so they report `supported: false` with the reason and
+  never execute. When the upstream grows write endpoints, the probe flips
+  them on — no catalog rewrite needed.
+- **True push event triggers**: the `event` trigger is poll-based in V1
+  (honestly labeled) — a real push/event-bus trigger is future work.
+- **The builder UI**: the frontend Automation Studio views exist as shells
+  (Wave 1); the visual builder that authors automations is a later slice —
+  the backend API above is the contract it will build against.
 
 ## API surface (this slice)
 

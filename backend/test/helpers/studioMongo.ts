@@ -10,19 +10,27 @@ import { vi } from 'vitest';
 
 type Doc = Record<string, any>;
 
+/** Resolve a dotted path (e.g. 'deployment.status') against a document. */
+function getPath(doc: Doc, path: string): unknown {
+  let current: unknown = doc;
+  for (const segment of path.split('.')) {
+    if (current === null || current === undefined || typeof current !== 'object') return undefined;
+    current = (current as Doc)[segment];
+  }
+  return current;
+}
+
 function matches(doc: Doc, filter: Doc): boolean {
   for (const [key, cond] of Object.entries(filter)) {
-    if (key === '_id' || !key.includes('.')) {
-      const value = doc[key];
-      if (cond !== null && typeof cond === 'object' && !Array.isArray(cond)) {
-        if ('$regex' in cond) {
-          const re = new RegExp(cond.$regex, cond.$options ?? '');
-          if (typeof value !== 'string' || !re.test(value)) return false;
-          continue;
-        }
+    const value = getPath(doc, key);
+    if (cond !== null && typeof cond === 'object' && !Array.isArray(cond)) {
+      if ('$regex' in cond) {
+        const re = new RegExp(cond.$regex, cond.$options ?? '');
+        if (typeof value !== 'string' || !re.test(value)) return false;
+        continue;
       }
-      if (value !== cond) return false;
     }
+    if (value !== cond) return false;
   }
   return true;
 }
@@ -62,6 +70,10 @@ export function makeInMemoryDb() {
         });
         return cursor;
       },
+      limit(n: number) {
+        result = result.slice(0, n);
+        return cursor;
+      },
       toArray: async () => result,
     };
     return cursor;
@@ -83,6 +95,22 @@ export function makeInMemoryDb() {
       if (!found) return { matchedCount: 0, modifiedCount: 0 };
       if (update.$set) Object.assign(found, update.$set);
       return { matchedCount: 1, modifiedCount: 1 };
+    }),
+    findOneAndUpdate: vi.fn(async (filter: Doc, update: Doc, options?: { returnDocument?: string }) => {
+      const found = docs(name).find((d) => matches(d, filter));
+      if (!found) return null;
+      if (update.$set) Object.assign(found, update.$set);
+      if (update.$inc) {
+        for (const [k, v] of Object.entries(update.$inc)) {
+          found[k] = (typeof found[k] === 'number' ? found[k] : 0) + (v as number);
+        }
+      }
+      if (update.$push) {
+        for (const [k, v] of Object.entries(update.$push)) {
+          (found[k] ??= []).push(v);
+        }
+      }
+      return options?.returnDocument === 'after' ? { ...found } : null;
     }),
     deleteOne: vi.fn(async (filter: Doc) => {
       const arr = docs(name);

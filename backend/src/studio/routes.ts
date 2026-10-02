@@ -46,6 +46,7 @@ import {
 } from './types.js';
 import { getCatalogAction, listCatalog } from './catalog/catalog.js';
 import { testAction } from './execution/testAction.js';
+import { automationRoutes } from './automations/routes.js';
 
 function validationError(message: string, details?: unknown): never {
   throw Errors.badRequest('VALIDATION_ERROR', message, details);
@@ -352,4 +353,9 @@ export async function studioRoutes(fastify: FastifyInstance): Promise<void> {
     }
   );
 
+  // ------------------------------------------------------------------
+  // Automations (Wave 2): the automation model, compile-to-Flow, triggers,
+  // deploy with the destructive-action approval gate, dry-run, and runs.
+  // ------------------------------------------------------------------
+  await automationRoutes(fastify);
 }

@@ -256,10 +256,11 @@ describe('destructive tool confirmation gate', () => {
       .filter((t) => t.destructive)
       .map((t) => t.name)
       .sort();
-    // The only destructive production tools are the SyteLine UI write actions
-    // and the task cancel action. Each one requires the syteline:ui permission
-    // and explicit confirmation.
+    // The destructive production tools are the SyteLine UI write actions,
+    // the task cancel action, and the Studio write-action tool. Each one
+    // requires its family's permission and explicit confirmation.
     expect(destructive).toEqual([
+      'studio.executeWriteAction',
       'syteline.task.cancel',
       'syteline.ui.clickButton',
       'syteline.ui.deleteCredentials',
@@ -268,8 +269,14 @@ describe('destructive tool confirmation gate', () => {
       'syteline.ui.saveCredentials',
     ]);
     for (const tool of production.filter((t) => t.destructive)) {
-      expect(tool.permission).toBe('syteline:ui');
+      expect(['syteline:ui', 'studio:run']).toContain(tool.permission);
     }
+    // The Studio write tool is the only destructive tool outside the
+    // syteline:ui family: it executes destructive catalog actions against
+    // named Studio connections, gated on 'studio:run'.
+    expect(
+      production.find((t) => t.name === 'studio.executeWriteAction')?.permission
+    ).toBe('studio:run');
   });
 
   it('requires explicit confirmation for destructive tools', () => {
