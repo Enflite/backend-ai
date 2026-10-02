@@ -29,6 +29,11 @@ import { retentionRoutes } from './retention/routes.js';
 import { learningRoutes } from './learning/routes.js';
 import { startRetentionScheduler, stopRetentionScheduler } from './retention/scheduler.js';
 import { startTaskRunnerScheduler, stopTaskRunnerScheduler } from './syteline/tasks/taskScheduler.js';
+import {
+  formAgentRoutes,
+  startFormAgentScheduler,
+  stopFormAgentScheduler,
+} from './formAgent/index.js';
 import { recoverIngestionJobs } from './documents/queue.js';
 import { closeDb } from './db/mongo.js';
 
@@ -234,6 +239,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(evalRoutes);
       await api.register(retentionRoutes);
       await api.register(learningRoutes);
+      await api.register(formAgentRoutes);
     },
     { prefix: '/api/v1' }
   );
@@ -251,6 +257,13 @@ export async function buildServer(): Promise<FastifyInstance> {
   // The timer is unref'd and sweeps never overlap.
   startTaskRunnerScheduler();
 
+  // SyteLine Form AI Agent runner: in-process poll scheduler that claims
+  // `requested` flow runs and executes the Form-Project-Templates flow
+  // for each. Fail-closed behind FORM_CUSTOMIZATION_RUNNER_ENABLED
+  // (default false). Started here so it runs in every serving process;
+  // stopped on preClose. The timer is unref'd and sweeps never overlap.
+  startFormAgentScheduler();
+
   // Root health endpoints
   await fastify.register(healthRoutes);
   // Prometheus exposition (gated by METRICS_PUBLIC; see observability/metrics.ts)
@@ -262,6 +275,7 @@ export async function buildServer(): Promise<FastifyInstance> {
     closeActiveSseStreams();
     stopRetentionScheduler();
     stopTaskRunnerScheduler();
+    stopFormAgentScheduler();
   });
 
   return fastify;
