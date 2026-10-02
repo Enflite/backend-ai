@@ -389,6 +389,64 @@ offered on cloud turns when customer or finance categories are
 enforced (see `docs/privacy-routing.md`) — the tool-level checks
 inherit automatically through the gateway.
 
+## Schedules
+
+Cron-triggered flow runs — the daily-SOP engine (see ADR-023 and
+`docs/schedules.md`). A schedule fires a named flow on a timetable:
+`{ name, title, target: { flow, version? | alias? }, trigger: {
+cron, timezone }, inputs?, confirmWrites? (default false), enabled?
+(default true), runAsUserId }`. A schedule never runs tools directly —
+it creates a **flow run** with the schedule's inputs, the schedule's
+write approval, and a `scheduleRef: { scheduleName, tickISO }` tying
+the run back to the tick that fired it, so scheduled runs appear in
+`GET /flows/runs` and the kanban "what did the AI do today" view.
+
+Target resolution happens **at fire time** (`alias: "live"` default,
+or a pinned `version`). `runAsUserId` is re-resolved live at every
+tick: a demoted or deactivated owner means the tick is **skipped**
+(fail closed) and audited — a run never fires with stale powers.
+`confirmWrites: true` on the schedule **is** the scoped human approval
+covering writes in its fired runs (recorded in
+`SCHEDULE_CREATED`/`SCHEDULE_UPDATED` with the acting admin's
+identity); default `false` keeps scheduled runs read-only/recon, and
+a destructive step blocks per tool policy. Ticks are claimed atomically
+(compare-and-swap on `nextRunAt`, one claimer wins), fire at most once
+(idempotency key `sched:<id>:<tickISO>`), and are never caught up: a
+missed tick is skipped, `nextRunAt` always advances past now.
+
+Management requires `schedules:manage` (create/update/delete/pause/
+resume); list/view/`run-now`/runs/stats require `schedules:run`.
+Both permissions are Admin / AI Admin only. The whole family is behind
+the `SCHEDULES_ENABLED` kill switch (default `false` — `403
+FEATURE_DISABLED` when off, and the sweeper claims no ticks). Stats
+are derived from `flow_runs` (no separate ledger), so they always
+reflect the run history they summarize.
+
+| Method | Path | Auth / Permission | Purpose |
+|---|---|---|---|
+| POST | `/schedules` | auth + `schedules:manage` | Create a schedule: `name` (`^[a-z0-9-]+$`), `title`, `target` (`{ flow, version? \| alias? }`), `trigger` (`{ cron, timezone }` — 5-field cron, Vixie semantics, IANA timezone), `inputs` (must satisfy the target flow's required inputs), `confirmWrites?` (default `false`), `enabled?` (default `true`), `runAsUserId` (same-tenant active user); `201` with the schedule incl. `nextRunAt` (ISO) |
+| GET | `/schedules` | auth + `schedules:run` | List schedules: name, title, enabled, `nextRunAt`, target, brief stats |
+| GET | `/schedules/:name` | auth + `schedules:run` | Full schedule: definition, trigger, `nextRunAt`, stats, last run summary |
+| PUT | `/schedules/:name` | auth + `schedules:manage` | Update title/target/trigger/inputs/`confirmWrites`/`enabled`/`runAsUserId`; changing the cron or timezone recomputes `nextRunAt` |
+| DELETE | `/schedules/:name` | auth + `schedules:manage` | Delete the schedule (fired runs stay in `flow_runs`; derived stats freeze at last values) |
+| POST | `/schedules/:name/pause` | auth + `schedules:manage` | Pause: `enabled=false`, no ticks claimed while paused |
+| POST | `/schedules/:name/resume` | auth + `schedules:manage` | Resume: `enabled=true`, `nextRunAt` recomputed from now — no catch-up backlog |
+| POST | `/schedules/:name/run-now` | auth + `schedules:run` | Fire immediately outside the timetable with the schedule's target/inputs/`confirmWrites`/`runAs`; the run carries a `scheduleRef`; does **not** move `nextRunAt` |
+| GET | `/schedules/:name/runs` | auth + `schedules:run` | Runs this schedule fired (the `scheduleRef` filter over flow runs), newest first; optional `status` filter — the overnight-failure triage view |
+| GET | `/schedules/:name/stats` | auth + `schedules:run` | Derived from `flow_runs`: counts by status, `lastRunAt`, `lastSuccessAt`, `nextRunAt`, `enabled`, `confirmWrites` |
+
+Schedule audit events: `SCHEDULE_CREATED` / `SCHEDULE_UPDATED`
+(`confirmWrites` changes named with the acting admin) /
+`SCHEDULE_DELETED` / `SCHEDULE_PAUSED` / `SCHEDULE_RESUMED` /
+`SCHEDULE_TICK_SKIPPED` (reason: `runas-invalid`,
+`no-live-version`, `disabled`, `dst-gap`) / `SCHEDULE_RUN_FIRED`
+(`runId`, `tickISO`). Every fired run is audit-logged with the same
+per-step discipline as flow runs. Privacy routing treats schedules
+like flows: a schedule firing a `syteline.*` flow is never offered
+on cloud turns when customer or finance categories are enforced
+(see `docs/privacy-routing.md`) — the tool-level checks inherit
+through the gateway.
+
 ## Repositories & code search
 
 Multi-repo code indexing for coding turns (see `docs/repo-indexing.md`).
