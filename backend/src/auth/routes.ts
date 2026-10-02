@@ -307,20 +307,43 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
     }
   });
 
-  fastify.post('/auth/logout', { preHandler: [requireAuth] }, async (req, reply) => {
-    await revokeSession(req.auth!.tenantId, req.auth!.sessionId);
-    clearRefreshCookie(reply);
-    await recordAudit({ tenantId: req.auth!.tenantId, userId: req.auth!.userId, action: 'LOGOUT', requestId: req.requestId, ip: req.ip });
-    return reply.status(204).send();
-  });
+  // The logout routes take no body, but some clients (e.g. fetch with default
+  // JSON headers) send `content-type: application/json` with an empty payload.
+  // Fastify's default JSON parser rejects that with FST_ERR_CTP_EMPTY_JSON_BODY
+  // before the handler runs, so these routes live in an encapsulated context
+  // with a scoped parser that treats an empty JSON body as "no body" instead
+  // of a parse error. Nothing else in the app is affected.
+  await fastify.register(async function logoutRoutes(instance: FastifyInstance) {
+    instance.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+      const text = typeof body === 'string' ? body : body.toString('utf8');
+      if (text === '') {
+        done(null, undefined);
+        return;
+      }
+      try {
+        done(null, JSON.parse(text));
+      } catch (err) {
+        // Match the default JSON parser: malformed JSON is a 400, not a 500.
+        (err as { statusCode?: number }).statusCode = 400;
+        done(err as Error);
+      }
+    });
 
-  // Log out everywhere: revokes all of the user's sessions, so a stolen
-  // refresh token does not survive the victim logging out.
-  fastify.post('/auth/logout/all', { preHandler: [requireAuth] }, async (req, reply) => {
-    const revoked = await revokeAllUserSessions(req.auth!.tenantId, req.auth!.userId);
-    clearRefreshCookie(reply);
-    await recordAudit({ tenantId: req.auth!.tenantId, userId: req.auth!.userId, action: 'LOGOUT_ALL', requestId: req.requestId, ip: req.ip, metadata: { revokedSessions: revoked } });
-    return reply.send({ revokedSessions: revoked });
+    instance.post('/auth/logout', { preHandler: [requireAuth] }, async (req, reply) => {
+      await revokeSession(req.auth!.tenantId, req.auth!.sessionId);
+      clearRefreshCookie(reply);
+      await recordAudit({ tenantId: req.auth!.tenantId, userId: req.auth!.userId, action: 'LOGOUT', requestId: req.requestId, ip: req.ip });
+      return reply.status(204).send();
+    });
+
+    // Log out everywhere: revokes all of the user's sessions, so a stolen
+    // refresh token does not survive the victim logging out.
+    instance.post('/auth/logout/all', { preHandler: [requireAuth] }, async (req, reply) => {
+      const revoked = await revokeAllUserSessions(req.auth!.tenantId, req.auth!.userId);
+      clearRefreshCookie(reply);
+      await recordAudit({ tenantId: req.auth!.tenantId, userId: req.auth!.userId, action: 'LOGOUT_ALL', requestId: req.requestId, ip: req.ip, metadata: { revokedSessions: revoked } });
+      return reply.send({ revokedSessions: revoked });
+    });
   });
 
   // Session inventory: list and revoke the caller's own sessions.
