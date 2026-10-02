@@ -16,6 +16,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { useNewTaskDialog } from '../shell/newTaskDialogContext';
 import { useAuth } from '../auth';
 import { ApiError } from '../api';
 import { usePolling } from '../hooks/usePolling';
@@ -266,6 +267,7 @@ export default function TaskWorkspace({ taskId }: { taskId?: string } = {}) {
   const { id: routeId } = useParams<{ id: string }>();
   const id = taskId ?? routeId;
   const { user } = useAuth();
+  const { openNewTask } = useNewTaskDialog();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = parseTaskTab(searchParams.get('tab'));
 
@@ -660,9 +662,14 @@ export default function TaskWorkspace({ taskId }: { taskId?: string } = {}) {
         </div>
 
         <div className="mt-8 flex items-center gap-4">
-          <Link to="/agents/tasks/new" className="text-sm" style={{ color: 'var(--accent)' }}>
+          <button
+            type="button"
+            onClick={() => openNewTask()}
+            className="text-sm"
+            style={{ color: 'var(--accent)' }}
+          >
             + New task
-          </Link>
+          </button>
           <Link to="/agents/workflows" className="text-sm" style={{ color: 'var(--muted-foreground)' }}>
             Workflows
           </Link>

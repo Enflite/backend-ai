@@ -18,6 +18,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth';
 import { api } from '../api';
 import { hasAnyPermission, NAV_ITEMS } from '../shell/navRegistry';
+import { useNewTaskDialog } from '../shell/newTaskDialogContext';
 import { Icon, type IconName } from './icons';
 import { listFormCustomizations } from '../api/formAgent';
 import { listSytelineTasks, toolClassificationFor } from '../agents/api';
@@ -56,7 +57,7 @@ interface SubDestination {
 
 /** Palette-only deep destinations (real routes, permission-gated). */
 const SUB_DESTINATIONS: SubDestination[] = [
-  { to: '/agents/tasks/new', label: 'New task', keywords: 'new task agent create syteline', icon: 'plus', permissions: ['syteline:ui'] },
+  { to: '/tasks', label: 'Agent tasks', keywords: 'agent tasks syteline workspace runs', icon: 'activity', permissions: ['syteline:ui'] },
   { to: '/agents/workflows', label: 'Workflows', keywords: 'workflows flows automation runs', icon: 'activity', permissions: ['syteline:ui'] },
   { to: '/board?today=1', label: 'Today board', keywords: 'today what did the ai complete completed', icon: 'layout', permissions: ['syteline:ui', 'syteline:forms'] },
   { to: '/forms/new', label: 'New form customization', keywords: 'new form customization create', icon: 'file', permissions: ['syteline:forms'] },
@@ -118,6 +119,7 @@ export default function CommandPalette({
 }) {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { openNewTask } = useNewTaskDialog();
   const [, toggleTheme] = useTheme();
   const permissions = user?.permissions ?? [];
 
@@ -273,9 +275,9 @@ export default function CommandPalette({
     const actions: Array<{ label: string; keywords: string; permissions?: string[]; run: () => void }> = [
       {
         label: 'New agent task',
-        keywords: 'new agent task create syteline run',
-        permissions: ['syteline:ui'],
-        run: () => navigate('/agents/tasks/new'),
+        keywords: 'new agent task create syteline form run',
+        permissions: ['syteline:ui', 'syteline:forms'],
+        run: () => openNewTask(),
       },
       {
         label: 'New chat',

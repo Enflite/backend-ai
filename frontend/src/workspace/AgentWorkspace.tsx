@@ -14,12 +14,13 @@
  * status dot (via taskDisplayStatus), title, and relative updated time.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { NavLink, useNavigate, useParams } from 'react-router-dom';
+import { NavLink, useParams } from 'react-router-dom';
 import { useAuth } from '../auth';
 import { ApiError } from '../api';
 import { usePolling } from '../hooks/usePolling';
 import { relativeTime } from '../board/types';
 import ContextSidebar from '../shell/ContextSidebar';
+import { useNewTaskDialog } from '../shell/newTaskDialogContext';
 import { Icon } from '../components/icons';
 import { Button, Skeleton } from '../components/ui/primitives';
 import { DisabledState } from '../components/ui/ErrorState';
@@ -128,7 +129,7 @@ function NoSelection({ onNew }: { onNew: () => void }) {
 export default function AgentWorkspace() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
-  const navigate = useNavigate();
+  const { openNewTask } = useNewTaskDialog();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [items, setItems] = useState<SytelineTaskListItem[] | null>(null);
   const [blockedReasons, setBlockedReasons] = useState<Record<string, string | undefined>>({});
@@ -180,7 +181,7 @@ export default function AgentWorkspace() {
 
   function goNewTask(): void {
     setMobileOpen(false);
-    navigate('/agents/tasks/new');
+    openNewTask();
   }
 
   const count = items?.length ?? 0;
