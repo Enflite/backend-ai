@@ -8,11 +8,10 @@
  *   GET  {base}/v1/fine_tuning/jobs/{id}
  * — which covers OpenAI, Together AI and Fireworks AI.
  *
- * Security posture (mirrors the gateway's AI_PROVIDER_ALLOWED_ORIGINS):
- * the configured base URL's origin MUST be listed in FINETUNE_ALLOWED_ORIGINS
- * or construction throws. Training data leaves the tenant boundary here, so
- * operators must confirm the provider's data-retention terms before enabling
- * this on non-PUBLIC data.
+ * Security posture: the configured base URL's origin MUST be listed in
+ * FINETUNE_ALLOWED_ORIGINS or construction throws. Training data leaves the
+ * tenant boundary here, so operators must confirm the provider's
+ * data-retention terms before enabling this on non-PUBLIC data.
  */
 import { config } from '../../config.js';
 import { Errors } from '../../errors.js';

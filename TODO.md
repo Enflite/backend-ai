@@ -174,11 +174,12 @@ infrastructure.
   routing policies (migrations 024/025).
 
 - [~] **[P2-i] Explicit egress control plane**
-  The gateway enforces `AI_PROVIDER_ALLOWED_ORIGINS` via `assertEndpointAllowed`
-  (also applied at model registration), with `MODEL_ENDPOINT_DENIED` tests in
-  `backend/test/gateway.test.ts` and `modelAdmin.test.ts`. Tool-adapter egress
-  (e.g. SyteLine URL scheme enforcement) is being hardened in the
-  post-phase review cleanup.
+  REMOVED 2026-10-02 (Jake): the gateway's `AI_PROVIDER_ALLOWED_ORIGINS`
+  endpoint allowlist was deleted — model endpoints come from the
+  operator-controlled registry/config. Model artifact *sources* remain
+  origin-allowlisted (`MODEL_SOURCE_ALLOWLIST`).
+  Tool-adapter egress (e.g. SyteLine URL scheme enforcement) is being
+  hardened in the post-phase review cleanup.
   *Remaining:* deny-by-default egress tests proving no AI/tool code path can
   reach an unlisted origin; violations blocked and audited.
 

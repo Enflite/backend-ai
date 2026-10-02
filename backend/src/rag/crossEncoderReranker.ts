@@ -12,13 +12,13 @@
  *   reconstructed from the canonical candidate map in retrieval.ts, so this
  *   reranker can only reorder authorized chunks and propose scores.
  * - Fail-open: any endpoint failure (timeout, HTTP error, malformed
- *   response, allowlist denial, missing config) returns the hybrid order
+ *   response, missing config) returns the hybrid order
  *   unchanged, records a `reranker_fallbacks_total` metric with a reason, and
  *   logs a warning. Retrieval never hard-fails because the reranker is down.
  * - No credentials, tenant ids, or user ids are sent to the endpoint — only
  *   the query text and the chunk texts. No Authorization header is attached.
- * - The endpoint origin must be on AI_PROVIDER_ALLOWED_ORIGINS, the same
- *   egress allowlist the AI gateway enforces.
+ * - The endpoint is operator-configured (RERANKER_URL): no allowlist gate —
+ *   the operator controls the scoring service.
  */
 import { config } from '../config.js';
 import { recordRerankerFallback, type RerankerFallbackReason } from '../observability/metrics.js';
@@ -85,29 +85,6 @@ function parseScore(entry: RerankApiResult, documentCount: number): { index: num
 }
 
 /**
- * Egress allowlist check, mirroring the AI gateway's
- * `AI_PROVIDER_ALLOWED_ORIGINS` enforcement: the endpoint origin must appear
- * in the allowlist. Throws (fail-open) when the URL is invalid or the origin
- * is not allowed.
- */
-function assertEndpointAllowed(url: string): void {
-  const allowedOrigins = new Set(
-    config.AI_PROVIDER_ALLOWED_ORIGINS.split(',')
-      .map((value) => value.trim())
-      .filter((value) => value.length > 0)
-  );
-  let endpointOrigin: string;
-  try {
-    endpointOrigin = new URL(url).origin;
-  } catch {
-    throw new Error('RERANKER_URL is not a valid URL');
-  }
-  if (!allowedOrigins.has(endpointOrigin)) {
-    throw new Error('RERANKER_URL origin is outside the server allowlist');
-  }
-}
-
-/**
  * Create the cross-encoder reranker. Construction performs no network I/O;
  * everything happens (fail-open) inside rerank().
  */
@@ -132,12 +109,6 @@ export function createCrossEncoderReranker(options: CrossEncoderRerankerOptions 
       if (chunks.length === 0) return [];
       if (!url) {
         fallBack('not_configured');
-        return chunks;
-      }
-      try {
-        assertEndpointAllowed(url);
-      } catch {
-        fallBack('not_allowed');
         return chunks;
       }
 

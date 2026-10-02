@@ -528,8 +528,6 @@ export async function getApprovedModelForUser(modelId: string, tenantId: string,
  *
  * Security posture for cloud seeds (see ADR-018):
  * - Seeds are inserted only when the admin opted in with an API key.
- * - The model's endpoint origin must be on AI_PROVIDER_ALLOWED_ORIGINS;
- *   a locked-down config never gains cloud models from this path.
  * - Cloud models are default-open within the tenant (same as the vision
  *   default) via the `isProviderDefault` flag, so switching providers is
  *   one tap — but their allowed classifications cap at INTERNAL: an admin
@@ -575,13 +573,41 @@ interface CloudSeedSpec {
 }
 
 /**
- * Cloud seed endpoints come from the configured base URLs (still
- * allowlisted before insert): an operator pointing ANTHROPIC_BASE_URL at a
- * proxy gets seeds that actually use it, instead of seeds that silently
- * ignore their own config.
+ * Cloud seed endpoints come from the configured base URLs: an operator
+ * pointing ANTHROPIC_BASE_URL at a proxy gets seeds that actually use it,
+ * instead of seeds that silently ignore their own config.
  */
 function cloudSeedEndpoint(provider: 'claude' | 'openai'): string {
   return provider === 'claude' ? config.ANTHROPIC_BASE_URL : config.OPENAI_BASE_URL;
+}
+
+/**
+ * Operator-overridable chat model ID per cloud provider (ANTHROPIC_MODEL /
+ * OPENAI_MODEL in .env). The provider-default seed uses this as its
+ * modelIdentifier.
+ */
+export function providerDefaultModelIdentifier(provider: 'claude' | 'openai'): string {
+  return provider === 'claude' ? config.ANTHROPIC_MODEL : config.OPENAI_MODEL;
+}
+
+/**
+ * Registry name for a provider-default seed. Curated when the env value
+ * matches a known seed identifier; otherwise derived from the identifier
+ * so an override never wears the wrong label (e.g. an Opus override must
+ * not be called "Sonnet 4").
+ */
+export function providerDefaultSeedName(provider: 'claude' | 'openai', identifier: string): string {
+  const curated = CLOUD_SEEDS.find((s) => s.provider === provider && s.modelIdentifier === identifier);
+  if (curated) return curated.name;
+  const noDate = identifier.replace(/-\d{8}$/, '');
+  const label = provider === 'claude' ? 'Claude' : 'GPT';
+  const rest = noDate
+    .replace(/^(claude|gpt)-/i, '')
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+  return rest ? `${label} ${rest}` : label;
 }
 
 const CLOUD_SEEDS: CloudSeedSpec[] = [
@@ -661,22 +687,13 @@ export function isProviderDefaultModelDoc(doc: { name: string; isProviderDefault
   return doc.isProviderDefault === true;
 }
 
-function endpointOriginAllowlisted(endpoint: string): boolean {
-  let origin: string;
-  try {
-    origin = new URL(endpoint).origin;
-  } catch {
-    return false;
-  }
-  const allowed = new Set(config.AI_PROVIDER_ALLOWED_ORIGINS.split(',').map((v) => v.trim()));
-  return allowed.has(origin);
-}
-
 /**
  * Ensure servable seed models exist for every configured cloud provider.
  * Idempotent: inserts only when the provider has no servable model doc at
- * all. The first chat (non-vision) seed per provider is flagged
- * `isProviderDefault` for default-open serving.
+ * all. The provider-default chat seed uses ANTHROPIC_MODEL / OPENAI_MODEL;
+ * a changed env value updates the stored seed in place on restart.
+ * Exactly one seed per provider is flagged `isProviderDefault` for
+ * default-open serving (preferring the first vision-capable seed).
  */
 export async function ensureCloudProviderModels(): Promise<void> {
   const db = (await getDb()) as unknown as MinimalDb;
@@ -687,21 +704,43 @@ export async function ensureCloudProviderModels(): Promise<void> {
   ];
   for (const { provider, configured } of groups) {
     if (!configured) continue;
+    const identifier = providerDefaultModelIdentifier(provider);
+    const name = providerDefaultSeedName(provider, identifier);
+    // Env changes take effect on restart: if the stored provider-default
+    // seed's identifier differs from the env value, update it in place
+    // (identifier + name) instead of seeding around it.
+    const defaultDoc = await db.collection<ModelDoc>('models').findOne({
+      provider,
+      seededProvider: provider,
+      isProviderDefault: true,
+    });
+    if (defaultDoc) {
+      if (defaultDoc.modelIdentifier !== identifier || defaultDoc.name !== name) {
+        await db.collection<ModelDoc>('models').updateOne(
+          { _id: defaultDoc._id },
+          { $set: { modelIdentifier: identifier, name, lifecycleUpdatedAt: now } },
+        );
+      }
+      continue;
+    }
     const existing = await db.collection<ModelDoc>('models').findOne({
       provider,
       status: { $in: [...SERVABLE_STATUSES] },
       enabled: true,
     });
     if (existing) continue;
-    const seeds = CLOUD_SEEDS.filter((s) => s.provider === provider);
-    // Respect a locked-down egress config: never seed a cloud model whose
-    // endpoint the gateway would refuse to call. The endpoint is the
-    // configured base URL, not a hardcoded value.
-    if (!endpointOriginAllowlisted(cloudSeedEndpoint(provider))) continue;
+    const seeds = CLOUD_SEEDS.filter((s) => s.provider === provider).map((s) => ({ ...s }));
+    // The endpoint is the configured base URL (ANTHROPIC_BASE_URL /
+    // OPENAI_BASE_URL), not a hardcoded value. The provider-default chat
+    // seed uses the env model ID (ANTHROPIC_MODEL / OPENAI_MODEL).
     // Exactly one provider default: prefer the first vision-capable seed —
     // the flagship model, which also serves image turns without a switch —
     // else the first seed.
     const defaultSpec = seeds.find((s) => s.vision) ?? seeds[0];
+    if (defaultSpec) {
+      defaultSpec.modelIdentifier = identifier;
+      defaultSpec.name = name;
+    }
     for (const spec of seeds) {
       try {
         await db.collection<ModelDoc>('models').insertOne(cloudSeedDoc(spec, now, spec === defaultSpec));

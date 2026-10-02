@@ -176,7 +176,6 @@ sequenceDiagram
     H->>H: build system prompt;<br/>user input + RAG chunks delimited<br/>as untrusted (escapeUntrusted)
     H->>G: gatewayStream(messages, modelId)
     G->>MR: resolve approved model for user<br/>(id, endpoint, context_window,<br/>allowed_classifications)
-    G->>G: check endpoint origin ∈<br/>AI_PROVIDER_ALLOWED_ORIGINS
     G->>G: canModelProcess(classification)
     G->>V: stream POST /chat/completions
     alt provider fails (not caller-cancelled)
@@ -425,7 +424,7 @@ flowchart TB
 
     subgraph Allowed["[CURRENT] Allowed egress — allowlist only"]
         direction TB
-        M["Approved model endpoints<br/>endpoint origin ∈ AI_PROVIDER_ALLOWED_ORIGINS<br/>gateway.ts origin check before every call"]
+        M["Approved model endpoints<br/>operator-controlled registry/config<br/>(no allowlist gate)"]
         E["Approved embedding endpoints<br/>backend/src/documents/ingestion.ts"]
         T["Approved tool adapters<br/>tool registry + zod schema validation<br/>per-tool timeouts + output caps<br/>backend/src/tools/gateway.ts"]
         S["Approved malware scanner<br/>MALWARE_SCANNER_ENDPOINT<br/>backend/src/documents/malware.ts"]

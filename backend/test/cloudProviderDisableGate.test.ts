@@ -34,8 +34,6 @@ vi.mock('../src/config.js', async (importOriginal) => {
       // gates, and the Ollama leg of the serving gate is covered in
       // ollamaFlag.test.ts.
       OLLAMA_ENABLED: true,
-      AI_PROVIDER_ALLOWED_ORIGINS:
-        'https://proxy.example.test,https://api.anthropic.com,https://api.openai.com,http://localhost:11434,http://ollama:11434',
     },
   };
 });

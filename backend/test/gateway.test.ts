@@ -70,11 +70,6 @@ beforeEach(() => {
 });
 
 describe('gateway authorization', () => {
-  it('rejects models whose endpoint is outside the allowlist', async () => {
-    getApprovedModelForUser.mockResolvedValue(model({ endpoint: 'http://evil.example/v1' }));
-    await expect(gatewayStream(baseInput)).rejects.toMatchObject({ code: 'MODEL_ENDPOINT_DENIED' });
-  });
-
   it('rejects unsupported providers', async () => {
     getApprovedModelForUser.mockResolvedValue(model({ provider: 'anthropic-direct' }));
     await expect(gatewayStream(baseInput)).rejects.toMatchObject({ code: 'MODEL_PROVIDER_UNSUPPORTED' });

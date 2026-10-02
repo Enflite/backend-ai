@@ -18,7 +18,7 @@ security/correctness → eval framework → private inference → scale/reliabil
 - An OpenTelemetry exporter and metrics backend remain deployment work (in-memory metrics + Prometheus exposition exist).
 - The ingestion queue is durable across restarts but executes inside one API process. A dedicated worker is needed for multi-replica scale.
 - Extraction preserves available PDF page and spreadsheet sheet/row metadata. DOCX section fidelity depends on headings present in the file.
-- Egress control: the AI Gateway enforces an endpoint allowlist (`AI_PROVIDER_ALLOWED_ORIGINS`) with deny tests; tool-adapter egress hardening is in progress.
+- Egress control: model endpoints are operator-controlled (registry + config); model artifact sources stay origin-allowlisted (`MODEL_SOURCE_ALLOWLIST`). Tool-adapter egress hardening is in progress.
 - Tool Gateway: the SyteLine adapter is production-grade; additional production adapters are future work.
 - Destructive tool approvals: the agentic loop has an approval gate (write-capable tools never auto-execute); the human-in-the-loop review workflow and write tools are future work.
 

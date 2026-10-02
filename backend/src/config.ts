@@ -27,7 +27,8 @@ export function isValidCorsOrigin(entry: string): boolean {
   }
 }
 
-const envSchema = z.object({
+/** Exported for the .env.example rot-guard test (test/envExample.test.ts). */
+export const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(8080),
   MONGODB_URI: z.string().min(1, 'MONGODB_URI is required'),
@@ -41,6 +42,18 @@ const envSchema = z.object({
     (value) => value.split(',').every(isValidCorsOrigin),
     'CORS_ORIGIN must be a comma-separated list of valid http(s) origins; wildcards are not allowed with credentialed CORS'
   ),
+  // Access posture (Jake, 2026-10-02): every authenticated user receives
+  // every permission in the PERMISSIONS registry, resolved in code — never
+  // from the database. Default ON. Set explicitly to 'false' to restore
+  // DB-driven granularity (role_permissions -> permissions) if per-role
+  // scoping is reintroduced. Only the literal 'false' disables; any other
+  // value (including unset) keeps the all-grant posture.
+  PERMISSIONS_ALL_GRANTED: z
+    .preprocess(
+      (val) => (val === undefined || val === null || val === '' ? undefined : val !== 'false' && val !== false),
+      z.boolean()
+    )
+    .default(true),
   // Audit fail-closed: when true, a database outage that prevents persisting
   // an audit event fails the request (503) instead of silently dropping the
   // audit trail. Defaults to true in production and false elsewhere so local
@@ -60,6 +73,9 @@ const envSchema = z.object({
   // with a hint, never as a dead button.
   ANTHROPIC_API_KEY: z.string().optional().default(''),
   ANTHROPIC_BASE_URL: z.string().url().default('https://api.anthropic.com'),
+  // Model ID for the Claude provider-default chat seed. Restarts apply:
+  // changing this updates the stored seed in place (identifier + name).
+  ANTHROPIC_MODEL: z.string().min(1).default('claude-sonnet-4-20250514'),
   CLAUDE_ENABLED: z
     .preprocess(
       (val) => (val === undefined || val === null || val === '' ? undefined : val === true || val === 'true' || val === '1'),
@@ -68,6 +84,9 @@ const envSchema = z.object({
     .default(true),
   OPENAI_API_KEY: z.string().optional().default(''),
   OPENAI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
+  // Model ID for the OpenAI provider-default chat seed. Restarts apply:
+  // changing this updates the stored seed in place (identifier + name).
+  OPENAI_MODEL: z.string().min(1).default('gpt-4o'),
   OPENAI_ENABLED: z
     .preprocess(
       (val) => (val === undefined || val === null || val === '' ? undefined : val === true || val === 'true' || val === '1'),
@@ -96,9 +115,6 @@ const envSchema = z.object({
       return false;
     }, z.boolean())
     .default(false),
-  AI_PROVIDER_ALLOWED_ORIGINS: z
-    .string()
-    .default('http://localhost:8000,http://vllm:8000,http://localhost:11434,http://ollama:11434,https://api.anthropic.com,https://api.openai.com'),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(120000),
   // Prompt prefix caching (vLLM automatic prefix caching): when true, chat
   // turns assemble the system prompt through the deterministic prefix-cache
@@ -232,8 +248,7 @@ const envSchema = z.object({
   // sets RERANKER_ENABLED=true and points RERANKER_URL at a scoring endpoint.
   // The endpoint only ever receives the query text and already
   // permission-filtered chunk texts; no credentials, tenant ids, or user ids
-  // are sent. The endpoint's origin must be on AI_PROVIDER_ALLOWED_ORIGINS
-  // (same egress allowlist as the AI gateway).
+  // are sent.
   // ---------------------------------------------------------------------------
   RERANKER_ENABLED: z
     .preprocess(
@@ -512,9 +527,8 @@ const envSchema = z.object({
   FINETUNE_API_BASE_URL: z.string().url().optional(),
   FINETUNE_API_KEY: z.string().optional().default(''),
   // Egress allowlist for the external provider: the base URL's origin must be
-  // listed here or the provider refuses to construct (same posture as
-  // AI_PROVIDER_ALLOWED_ORIGINS). Deliberately default-empty: enabling
-  // `external` requires an explicit opt-in.
+  // listed here or the provider refuses to construct. Deliberately
+  // default-empty: enabling `external` requires an explicit opt-in.
   FINETUNE_ALLOWED_ORIGINS: z.string().default(''),
 });
 

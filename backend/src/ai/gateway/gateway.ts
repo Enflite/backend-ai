@@ -111,29 +111,6 @@ export function streamMetadata(status: StreamStatus): StreamMetadata {
     : { stream_status: status };
 }
 
-/**
- * Rejects endpoints whose origin is outside the server allowlist.
- * Exported for model registration: a model must never be registered with
- * an endpoint the gateway would refuse to call.
- */
-export function assertEndpointAllowed(endpoint: string): string {
-  const allowedOrigins = new Set(config.AI_PROVIDER_ALLOWED_ORIGINS.split(',').map((value) => value.trim()));
-  let endpointOrigin: string;
-  try {
-    endpointOrigin = new URL(endpoint).origin;
-  } catch {
-    throw Errors.forbidden('MODEL_ENDPOINT_INVALID', 'Approved model endpoint is invalid');
-  }
-  if (!allowedOrigins.has(endpointOrigin)) {
-    throw Errors.forbidden('MODEL_ENDPOINT_DENIED', 'Approved model endpoint is outside the server allowlist');
-  }
-  return endpointOrigin;
-}
-
-function resolveEndpoint(model: ApprovedModel): void {
-  assertEndpointAllowed(model.endpoint);
-}
-
 function checkClassification(classification: Classification, model: ApprovedModel): void {
   const decision = canModelProcess(classification, model.allowedClassifications);
   if (!decision.allowed) throw Errors.forbidden('MODEL_CLASSIFICATION_DENIED', 'Model is not approved for this data classification');
@@ -302,15 +279,14 @@ export async function gatewayStream(input: GatewayStreamInput): Promise<GatewayS
   const telemetry: GatewayTelemetry = input.telemetry ?? {};
   const primary = await getApprovedModelForUser(input.modelId, input.tenantId, input.userId, input.roleId);
 
-  // Authorize the primary up front: endpoint allowlist, provider support, and
-  // classification policy. Strip any caller-supplied `system` messages and
+  // Authorize the primary up front: provider support and classification
+  // policy. Strip any caller-supplied `system` messages and
   // prepend the trusted system prompt (per-turn prompt when the caller built
   // one, else the gateway default): stored history must never smuggle
   // instructions past it, and the provider must never see a prompt without
   // the security policy (applyContextWindow's prompt is re-added here
   // because callers cannot be trusted to have included it).
   checkProviderSupport(primary);
-  resolveEndpoint(primary);
   checkClassification(input.classification, primary);
   const systemPrompt = input.systemPrompt ?? SYSTEM_PROMPT;
   const messages: ChatMessage[] = [
@@ -358,7 +334,6 @@ export async function gatewayStream(input: GatewayStreamInput): Promise<GatewayS
       try {
         fallback = await getApprovedModelForUser(primary.fallbackModelId!, input.tenantId, input.userId, input.roleId);
         checkProviderSupport(fallback);
-        resolveEndpoint(fallback);
         checkClassification(input.classification, fallback);
         // Image turns must only fail over to vision-capable models: a
         // text-only fallback would receive image payloads it cannot read.

@@ -16,7 +16,6 @@ import {
 import { getDb, withTx } from '../../db/mongo.js';
 import { Errors } from '../../errors.js';
 import { recordAuditInTx } from '../../audit/audit.js';
-import { assertEndpointAllowed } from './gateway.js';
 import { isKnownChatProvider } from '../providers/factory.js';
 import { assertAllowedModelSource } from '../artifacts.js';
 import {
@@ -356,8 +355,8 @@ export async function modelAdminRoutes(fastify: FastifyInstance): Promise<void> 
     if (!isKnownChatProvider(body.provider)) {
       throw Errors.badRequest('MODEL_PROVIDER_UNSUPPORTED', `Unknown model provider: ${body.provider}`);
     }
-    // No arbitrary endpoints or model sources: both must be allowlisted.
-    assertEndpointAllowed(body.endpoint);
+    // Model endpoints come from the operator-controlled registry: no
+    // allowlist gate here. The model source URL must still be allowlisted.
     assertAllowedModelSource(body.source ?? null);
     try {
       const created = await withTx(async (session, db) => {

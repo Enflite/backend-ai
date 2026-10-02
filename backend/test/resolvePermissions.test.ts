@@ -1,6 +1,27 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+/**
+ * resolvePermissions.test.ts — all-grant posture is resolved in code.
+ *
+ * PERMISSIONS_ALL_GRANTED lives in the zod schema (config.ts, default
+ * true). These tests pin the flag through the repo's standard config-mock
+ * pattern (vi.mock on ../src/config.js) rather than process.env, because
+ * config is parsed once at import time.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PERMISSIONS } from '../src/authz/permissions.js';
-import { resolvePermissions } from '../src/authz/resolvePermissions.js';
+
+let allGranted = true;
+
+vi.mock('../src/config.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../src/config.js')>();
+  return {
+    ...mod,
+    get config() {
+      return { ...mod.config, PERMISSIONS_ALL_GRANTED: allGranted };
+    },
+  };
+});
+
+const { resolvePermissions } = await import('../src/authz/resolvePermissions.js');
 
 /** Minimal fake Db: records collection access, serves canned docs. */
 function fakeDb(docs: Record<string, any[]>) {
@@ -30,13 +51,8 @@ function fakeDb(docs: Record<string, any[]>) {
 }
 
 describe('resolvePermissions', () => {
-  const OLD = process.env.PERMISSIONS_ALL_GRANTED;
   beforeEach(() => {
-    delete process.env.PERMISSIONS_ALL_GRANTED;
-  });
-  afterEach(() => {
-    if (OLD === undefined) delete process.env.PERMISSIONS_ALL_GRANTED;
-    else process.env.PERMISSIONS_ALL_GRANTED = OLD;
+    allGranted = true;
   });
 
   it('returns the full PERMISSIONS registry by default without touching the DB', async () => {
@@ -47,16 +63,8 @@ describe('resolvePermissions', () => {
     expect(db.accessed).toEqual([]);
   });
 
-  it('returns the full registry when PERMISSIONS_ALL_GRANTED=true', async () => {
-    process.env.PERMISSIONS_ALL_GRANTED = 'true';
-    const db = fakeDb({}) as any;
-    const perms = await resolvePermissions(db, 'role-1');
-    expect(perms).toEqual([...PERMISSIONS]);
-    expect(db.accessed).toEqual([]);
-  });
-
   it('returns the DB-driven set when PERMISSIONS_ALL_GRANTED=false', async () => {
-    process.env.PERMISSIONS_ALL_GRANTED = 'false';
+    allGranted = false;
     const db = fakeDb({
       role_permissions: [
         { _id: 'rp1', roleId: 'role-1', permissionId: 'p1' },
@@ -75,7 +83,7 @@ describe('resolvePermissions', () => {
   });
 
   it('returns [] for a role with no grants when PERMISSIONS_ALL_GRANTED=false', async () => {
-    process.env.PERMISSIONS_ALL_GRANTED = 'false';
+    allGranted = false;
     const db = fakeDb({ role_permissions: [], permissions: [] }) as any;
     expect(await resolvePermissions(db, 'role-1')).toEqual([]);
   });

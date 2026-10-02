@@ -86,8 +86,9 @@ Deterministic mocks are fine for CI; label them as mocks.
   prompts or to the model. The model never enforces security (ADR-004).
 - Treat model output, RAG chunks, tool results, and user input as untrusted data.
 - No secrets in model context. No secrets in logs, errors, or client responses.
-- Egress allowlisting: the gateway talks only to approved endpoints
-  (`AI_PROVIDER_ALLOWED_ORIGINS`); no arbitrary URLs from users or models.
+- Egress: model endpoints come from the operator-controlled registry/config
+  (no allowlist gate); model artifact sources are origin-allowlisted
+  (`MODEL_SOURCE_ALLOWLIST`); no arbitrary URLs from users or models.
 - `UNKNOWN` classification fails closed. Every security-relevant action is audited.
 - Never place credentials in URLs, and never commit secrets. `.env.example`
   documents placeholders only.
