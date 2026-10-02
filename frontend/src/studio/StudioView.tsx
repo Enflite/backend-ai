@@ -13,9 +13,12 @@ import { useAuth } from '../auth';
 import { hasAnyPermission } from '../shell/navRegistry';
 import { NotAuthorizedState } from '../components/ui/ErrorState';
 import { STUDIO_MANAGE_PERMISSIONS, STUDIO_VIEW_PERMISSIONS } from './types';
+import './studio.css';
 import AutomationsView from './views/AutomationsView';
+import BuilderView from './views/BuilderView';
 import NewAutomationView from './views/NewAutomationView';
 import RunsView from './views/RunsView';
+import RunDetailView from './views/RunDetailView';
 import ApisView from './views/ApisView';
 import ConnectionsView from './views/ConnectionsView';
 import IdosView from './views/IdosView';
@@ -130,7 +133,9 @@ export default function StudioView() {
             <Route index element={<Navigate to="automations" replace />} />
             <Route path="automations" element={<AutomationsView />} />
             <Route path="automations/new" element={<NewAutomationView />} />
+            <Route path="automations/:id" element={<BuilderView mode="edit" />} />
             <Route path="runs" element={<RunsView />} />
+            <Route path="runs/:runId" element={<RunDetailView />} />
             <Route path="apis" element={<ApisView />} />
             <Route path="connections" element={<ConnectionsView />} />
             <Route path="idos" element={<IdosView />} />

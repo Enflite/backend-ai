@@ -1,0 +1,156 @@
+/**
+ * studio/studio.css — builder canvas + studio-specific styles.
+ *
+ * Everything here follows the Relay register: hairline borders, tiny type,
+ * one accent. The vertical canvas is a column of cards joined by a 1px
+ * connector with a small "+" insert affordance between each pair.
+ */
+
+/* Keyboard focus: 2px accent outline, 2px offset — always. */
+.studio-scope :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Vertical canvas: cards joined by a hairline connector line. */
+.studio-canvas {
+  position: relative;
+}
+
+.studio-canvas-item {
+  position: relative;
+}
+
+.studio-connector {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0;
+}
+
+.studio-connector-line {
+  width: 1px;
+  height: 14px;
+  background: var(--border);
+}
+
+/* Insert affordance between steps: a quiet "+" that brightens on hover. */
+.studio-insert {
+  display: flex;
+  justify-content: center;
+  padding: 3px 0;
+}
+
+.studio-insert-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.studio-insert-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+/* Selected step card: accent-tinted edge, not a loud fill. */
+.studio-step-selected {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* Status dots: dot + text, never color alone. */
+.studio-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  flex-shrink: 0;
+}
+
+.studio-dot-running {
+  animation: studio-pulse 2s ease-in-out infinite;
+}
+
+@keyframes studio-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Test-result strip: request/response preview in mono. */
+.studio-result-pre {
+  font-family: var(--font-mono, 'DM Mono', monospace);
+  font-size: 10.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* Add-step popover. */
+.studio-popover {
+  animation: studio-pop-in 160ms ease;
+}
+
+@keyframes studio-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Builder layout: canvas + editor panel. */
+.studio-builder-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 1050px) {
+  .studio-builder-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .studio-editor-panel {
+    position: sticky;
+    bottom: 0;
+    z-index: 20;
+    max-height: 46vh;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+    background: var(--card);
+    border-radius: 10px 10px 0 0;
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.25);
+  }
+}
+
+/* Motion safety: nothing animates when the user asks it not to. */
+@media (prefers-reduced-motion: reduce) {
+  .studio-scope *,
+  .studio-scope *::before,
+  .studio-scope *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .studio-popover {
+    animation: none;
+  }
+}
