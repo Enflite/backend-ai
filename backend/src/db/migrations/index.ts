@@ -38,6 +38,7 @@ import { migration029 } from './029_model_default_open.js';
 import { migration030 } from './030_syteline_forms_permission.js';
 import { migration031 } from './031_syteline_ui_permission.js';
 import { migration032 } from './032_syteline_tasks.js';
+import { migration033 } from './033_flows_permissions.js';
 
 export const migrations: Migration[] = [
   migration001,
@@ -51,4 +52,5 @@ export const migrations: Migration[] = [
   migration030,
   migration031,
   migration032,
+  migration033,
 ];
