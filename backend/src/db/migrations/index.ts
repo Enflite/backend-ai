@@ -43,6 +43,7 @@ import { migration034 } from './034_all_permissions_all_roles.js';
 import { migration035 } from './035_schedules_permissions.js';
 import { migration036 } from './036_all_permissions_repair.js';
 import { migration037 } from './037_aps_plan_permission.js';
+import { migration038 } from './038_studio_permissions.js';
 
 export const migrations: Migration[] = [
   migration001,
@@ -61,4 +62,5 @@ export const migrations: Migration[] = [
   migration035,
   migration036,
   migration037,
+  migration038,
 ];

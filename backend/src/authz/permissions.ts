@@ -45,6 +45,12 @@ export const PERMISSIONS = [
   'flows:run',
   'schedules:manage',
   'schedules:run',
+  // SyteLine Automation Studio: named SyteLine connections, the typed
+  // action catalog, and single-action test execution (backend foundation).
+  // All-grant posture (Jake, 2026-10-02): every role holds every
+  // permission for now; checks stay enforced.
+  'studio:manage',
+  'studio:run',
   'repo:read',
   'repo:manage',
   'audit:read',
@@ -84,6 +90,9 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     // permission for now; checks stay enforced.
     'schedules:manage',
     'schedules:run',
+    // Studio: manage connections / run test actions.
+    'studio:manage',
+    'studio:run',
   ],
   Admin: PERMISSIONS,
   'Security Admin': [
@@ -97,6 +106,9 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     // All-grant posture (Jake, 2026-10-02).
     'schedules:manage',
     'schedules:run',
+    // Studio: manage connections / run test actions.
+    'studio:manage',
+    'studio:run',
   ],
   'AI Admin': [
     'model:manage',
@@ -121,6 +133,9 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     // (seeded by migration 034).
     'schedules:manage',
     'schedules:run',
+    // Studio: manage connections / run test actions.
+    'studio:manage',
+    'studio:run',
     'feedback:curate',
     'finetune:manage',
     'repo:read',
@@ -149,6 +164,9 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     // All-grant posture (Jake, 2026-10-02).
     'schedules:manage',
     'schedules:run',
+    // Studio: manage connections / run test actions.
+    'studio:manage',
+    'studio:run',
   ],
   'Read Only': [
     'conversation:read',
@@ -158,6 +176,9 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     // All-grant posture (Jake, 2026-10-02).
     'schedules:manage',
     'schedules:run',
+    // Studio: manage connections / run test actions.
+    'studio:manage',
+    'studio:run',
   ],
 };
 

@@ -40,6 +40,7 @@ import {
   stopFormAgentScheduler,
 } from './formAgent/index.js';
 import { apsPlanningRoutes } from './apsPlanning/index.js';
+import { studioRoutes } from './studio/index.js';
 import { recoverIngestionJobs } from './documents/queue.js';
 import { closeDb } from './db/mongo.js';
 
@@ -253,6 +254,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(formAgentRoutes);
       await api.register(apsPlanningRoutes);
       await api.register(sytelineTaskRoutes);
+      await api.register(studioRoutes);
     },
     { prefix: '/api/v1' }
   );
