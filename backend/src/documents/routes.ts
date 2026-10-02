@@ -1,19 +1,18 @@
-import { createHash, randomUUID } from 'node:crypto';
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { ClientSession, Db, MongoServerError } from 'mongodb';
+import { ClientSession, Db } from 'mongodb';
 import { requireAuth } from '../auth/middleware.js';
 import { requirePermission } from '../authz/middleware.js';
 import { CLASSIFICATIONS, Classification, canAccessClassification, classificationRank } from '../authz/permissions.js';
 import { assertClassificationAllowed } from '../authz/classification.js';
-import { resolveUploadClassification } from './uploadClassification.js';
 import { getDb, withTenantTx } from '../db/mongo.js';
 import { Errors } from '../errors.js';
 import { recordAudit } from '../audit/audit.js';
-import { s3Storage } from '../storage/storage.js';
-import { detectMimeType, sanitizeFilename } from './fileValidation.js';
 import { retrieveAuthorizedContext } from '../rag/retrieval.js';
 import { enqueueIngestion, cancelIngestionJob, requeueIngestionJob } from './queue.js';
+import { s3Storage } from '../storage/storage.js';
+import { intakeUploadedDocument } from './intake.js';
+import { grantedDocumentIds, principalOrConditions } from './grants.js';
 import { config } from '../config.js';
 
 const idSchema = z.object({ id: z.string().uuid() });
@@ -76,60 +75,6 @@ function toDocumentApi(doc: DocumentDoc): Record<string, unknown> {
   };
 }
 
-/**
- * Owner-or-grant predicate pieces. MongoDB has no joins, so the old
- * `document_permissions` LEFT JOIN + EXISTS membership subqueries become
- * explicit lookups: the caller's department/group IDs are resolved first,
- * then grants match on exactly one principal field (the sparse unique index
- * convention: absent principal fields are omitted, never null).
- */
-async function principalOrConditions(
-  db: Db,
-  userId: string,
-  roleId: string | null | undefined,
-  session?: ClientSession
-): Promise<Record<string, unknown>[]> {
-  const opts = session ? { session } : undefined;
-  const [deptRows, groupRows] = await Promise.all([
-    db.collection<{ departmentId: string }>('department_memberships')
-      .find({ userId }, { ...opts, projection: { departmentId: 1 } }).toArray(),
-    db.collection<{ groupId: string }>('security_group_memberships')
-      .find({ userId }, { ...opts, projection: { groupId: 1 } }).toArray(),
-  ]);
-  const or: Record<string, unknown>[] = [{ userId }];
-  // Guarded: an unguarded `{ roleId: null }` would match every grant whose
-  // roleId is absent (sparse convention), widening access.
-  if (roleId) or.push({ roleId });
-  const departmentIds = deptRows.map((row) => row.departmentId);
-  const groupIds = groupRows.map((row) => row.groupId);
-  if (departmentIds.length > 0) or.push({ departmentId: { $in: departmentIds } });
-  if (groupIds.length > 0) or.push({ groupId: { $in: groupIds } });
-  return or;
-}
-
-/** Document IDs the caller may read via an explicit grant (owner handled separately). */
-async function grantedDocumentIds(
-  db: Db,
-  tenantId: string,
-  userId: string,
-  roleId: string | null | undefined,
-  session?: ClientSession
-): Promise<string[]> {
-  const grants = await db.collection<{ documentId: string }>('document_permissions')
-    .find(
-      { tenantId, canRead: true, $or: await principalOrConditions(db, userId, roleId, session) },
-      { ...(session ? { session } : {}), projection: { documentId: 1 } }
-    ).toArray();
-  return [...new Set(grants.map((grant) => grant.documentId))];
-}
-
-function isChecksumDuplicate(error: unknown): boolean {
-  return error instanceof MongoServerError
-    && error.code === 11000
-    && !!error.keyPattern
-    && 'checksumSha256' in error.keyPattern;
-}
-
 export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post('/documents', {
     preHandler: [requireAuth, requirePermission('document:upload')],
@@ -138,66 +83,37 @@ export async function documentRoutes(fastify: FastifyInstance): Promise<void> {
     const auth = req.auth!;
     const part = await req.file();
     if (!part) throw Errors.badRequest('FILE_REQUIRED', 'A document file is required');
-    const filename = sanitizeFilename(part.filename);
     const bytes = await part.toBuffer();
-    if (bytes.length === 0) throw Errors.badRequest('EMPTY_FILE', 'Document is empty');
-    const mimeType = detectMimeType(filename, bytes);
     const requestedClassification = part.fields.classification && 'value' in part.fields.classification
       ? String(part.fields.classification.value)
       : undefined;
-    const classification = resolveUploadClassification(
-      auth.clearance,
+    // Single upload-intake path (documents/intake.ts): malware scan,
+    // classification, S3 storage, ingestion queue. Shared with the APS
+    // Planning Agent's report intake — never a second uploader.
+    const result = await intakeUploadedDocument(auth, {
+      filename: part.filename,
+      bytes,
       requestedClassification,
-      auth.permissions.includes('document:classify')
-    );
-    const checksum = createHash('sha256').update(bytes).digest('hex');
-    const id = randomUUID();
-    const objectKey = `${auth.tenantId}/${id}`;
-    await s3Storage.put(objectKey, bytes, mimeType);
-    const now = new Date();
-    const document: DocumentDoc = {
-      _id: id,
-      tenantId: auth.tenantId,
-      ownerId: auth.userId,
-      filename,
-      mimeType,
-      sizeBytes: bytes.length,
-      checksumSha256: checksum,
-      objectKey,
-      classification,
-      status: 'PENDING',
-      errorCode: null,
-      createdAt: now,
-      updatedAt: now,
-      deletedAt: null,
-    };
-    let metadataCreated = false;
-    try {
-      const db = await getDb();
-      // UNIQUE (tenantId, checksumSha256): the same file was already uploaded.
-      // The unique index makes this insert the atomic duplicate check; a
-      // duplicate-key error below maps to DUPLICATE_DOCUMENT.
-      await db.collection<DocumentDoc>('documents').insertOne(document);
-      metadataCreated = true;
-      await recordAudit({ tenantId: auth.tenantId, userId: auth.userId, requestId: req.requestId, ip: req.ip, action: 'DOCUMENT_UPLOAD', resource: 'document', resourceId: id, classification });
-      await enqueueIngestion({ documentId: id, tenantId: auth.tenantId, requestedBy: auth.userId, requestId: req.requestId });
-      return reply.status(201).send({ document: toDocumentApi(document) });
-    } catch (error) {
-      if (isChecksumDuplicate(error)) {
-        await s3Storage.delete(objectKey).catch(() => undefined);
-        throw Errors.conflict('DUPLICATE_DOCUMENT', 'This file has already been uploaded');
-      }
-      if (metadataCreated) {
-        const db = await getDb();
-        await db.collection<DocumentDoc>('documents').updateOne(
-          { _id: id, tenantId: auth.tenantId },
-          { $set: { status: 'FAILED', errorCode: 'QUEUE_UNAVAILABLE', updatedAt: new Date() } }
-        );
-      } else {
-        await s3Storage.delete(objectKey).catch(() => undefined);
-      }
-      throw error;
-    }
+      requestId: req.requestId,
+      ip: req.ip,
+    });
+    return reply.status(201).send({
+      document: toDocumentApi({
+        _id: result.id,
+        tenantId: auth.tenantId,
+        ownerId: auth.userId,
+        filename: result.filename,
+        mimeType: result.mimeType,
+        sizeBytes: result.sizeBytes,
+        checksumSha256: result.checksumSha256,
+        objectKey: result.objectKey,
+        classification: result.classification,
+        status: result.status,
+        errorCode: result.errorCode,
+        createdAt: result.createdAt,
+        updatedAt: result.createdAt,
+      }),
+    });
   });
 
   fastify.get('/documents', { preHandler: [requireAuth, requirePermission('document:read')] }, async (req, reply) => {

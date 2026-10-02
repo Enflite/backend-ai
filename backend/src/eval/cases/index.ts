@@ -30,6 +30,7 @@ import { PHASE6_CASES } from './phase6.js';
 import { OWNERSHIP_CASES } from './ownership.js';
 import { SYTELINE_UI_CASES } from './sytelineUi.js';
 import { SYTELINE_TASK_PLANNING_CASES } from './sytelineTaskPlanning.js';
+import { APS_PLANNING_CASES } from './apsPlanning.js';
 
 export type { EvalCase, EvalCategory, QualityDimension } from '../types.js';
 
@@ -63,4 +64,5 @@ export const EVAL_CORPUS: EvalCase[] = [
   ...OWNERSHIP_CASES,
   ...SYTELINE_UI_CASES,
   ...SYTELINE_TASK_PLANNING_CASES,
+  ...APS_PLANNING_CASES,
 ];

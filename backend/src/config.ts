@@ -418,6 +418,18 @@ const envSchema = z.object({
   // Max runs claimed per scheduler sweep (bounds one tick's work).
   FORM_CUSTOMIZATION_RUNNER_SWEEP_LIMIT: z.coerce.number().int().min(1).max(100).default(5),
   // ---------------------------------------------------------------------------
+  // APS Planning Agent product surface (/api/v1/aps/*): versioned REST API
+  // where a planner uploads an APS exception-report workbook and the
+  // backend drives the aps-exception-analysis / aps-exception-verify
+  // flows, reporting analyses, snapshots, and per-row compare verdicts.
+  // V1 is READ-ONLY vs SyteLine (no SyteLine writes, no UI automation),
+  // so the single kill switch defaults ON: APS_PLANNING_ENABLED=false
+  // returns 403 FEATURE_DISABLED on the whole family.
+  // ---------------------------------------------------------------------------
+  APS_PLANNING_ENABLED: z
+    .preprocess((val) => val === true || val === 'true' || val === '1', z.boolean())
+    .default(true),
+  // ---------------------------------------------------------------------------
   // Enterprise OIDC login (Phase 5b): Authorization Code + PKCE as the
   // primary enterprise login path, alongside password login. When
   // OIDC_ENABLED, the required fields are validated at boot (fail fast);

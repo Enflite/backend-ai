@@ -380,6 +380,77 @@ only) / `FORM_CUSTOMIZATION_BLOCKED` (reason) /
 `FORM_CUSTOMIZATION_MERGED` (human actor) /
 `FORM_CUSTOMIZATION_CANCELLED`.
 
+## APS Planning Agent
+
+The **APS Planning Agent** is "your AI planner for SyteLine APS":
+a planner uploads an APS exception-report workbook and the backend
+drives the sibling-owned `aps-exception-analysis` /
+`aps-exception-verify` flows through the Flows platform (see
+`docs/aps-planning-agent/contracts.md` for the seam), reporting
+analyses, issue snapshots, and per-row compare verdicts. **V1 is
+read-only vs SyteLine** — the planner executes SyteLine steps by hand;
+nothing here writes to SyteLine, uses UI automation, or stores SyteLine
+logins. V1 covers one export type (Exception Report) and five exception
+types (Move In Rcpt, Move Out Rcpt, Rcpt Not Needed, Rcpt Projected
+Late, Expedited N Days).
+
+All endpoints require auth + `aps:plan` (granted to every role under the
+all-permissions posture; seeded by migration 037). The whole family is
+behind `APS_PLANNING_ENABLED` (default `true` — V1 is read-only;
+`403 FEATURE_DISABLED` when off). Privacy routing treats uploaded
+exports as proprietary/finance: the agent-judgment seam carries
+aggregates only, never full report rows, to cloud models (see
+`docs/privacy-routing.md`).
+
+Intake reuses the documents pipeline (malware scan, classification, S3)
+via the shared `documents/intake.ts` path — the workbook is tagged
+`exportType: EXCEPTION_REPORT` on the analysis record, never by a second
+uploader. Because SyteLine export layouts vary by version/site, the
+column mapping is confirmed per upload (`POST
+/aps/analyses/:id/column-map`); only `item` and `exceptionText` are
+required.
+
+Analysis lifecycle:
+`intake → analyzing → awaiting-planner → verifying → resolved |
+still-open`, with `analyzing/verifying → blocked` when the pipeline run
+fails. `intake → pending-substrate` is the honest waiting state while
+the `aps-exception-analysis` flow is not yet published on the tenant
+(the .flow.json ships in the repo; the live alias is per-tenant) — the
+analysis is recorded and runs once the pipeline is published.
+`(any non-terminal) → cancelled`.
+
+Snapshot compare (`GET /aps/snapshots/compare`) emits per-row verdicts
+`resolved | still-open | worsened | new` using the stable identity key
+`type|item|supplyId|demandId` (lowercased) with a documented fallback
+chain (sibling composite key `item|orderNumber|workOrderNumber|dueDate`,
+then `rowIndex`); `worsened` fires on a severity-rank rise or a growing
+`daysLate` evidence field. This is the row-level view; the sibling's
+`aps.compareSnapshots` tool answers the issue-level verify-loop
+question ("is every baseline row gone?") — see
+`docs/aps-planning-agent/contracts.md` for the mapping. Snapshots live
+inside the sibling's issue documents, so the snapshot endpoints take
+`issueId`.
+
+| Method | Path | Auth / Permission | Purpose |
+|---|---|---|---|
+| POST | `/aps/analyses` | auth + `aps:plan` + `document:upload` (10/min) | Intake: multipart workbook (`report` file part, ≤10 MB, `.xlsx`/`.xls`/`.csv`) or JSON `{ documentId, site?, issueId? }`; `202 { id, status }` — runs the workbook through the documents pipeline and invokes `aps-exception-analysis` by name (`pending-substrate` while the flow is unpublished on the tenant) |
+| GET | `/aps/analyses` | auth + `aps:plan` | List the requester's (or, for `tenant:manage`, the tenant's) analyses; optional `status` filter |
+| GET | `/aps/analyses/:id` | auth + `aps:plan` | Analysis detail (requester or admin); status refreshed from the pipeline run when mid-flight |
+| POST | `/aps/analyses/:id/column-map` | auth + `aps:plan` | Confirm/override the workbook column mapping (`{ columns: { canonical: header }, confirmed }`); requires `item` + `exceptionText` |
+| POST | `/aps/analyses/:id/verify` | auth + `aps:plan` + `document:upload` (10/min) | Trigger verification against a newer report (multipart or `documentId`); invokes `aps-exception-verify`; requires a recorded `issueId`; `202 { id, status: 'verifying' }` |
+| POST | `/aps/analyses/:id/cancel` | auth + `aps:plan` | Cancel an analysis (ends work in flight); terminal states return `409 ANALYSIS_TERMINAL` |
+| GET | `/aps/snapshots?issueId=` | auth + `aps:plan` | The issue's snapshots, newest first (row counts, no row payloads) |
+| GET | `/aps/snapshots/:snapshotId?issueId=` | auth + `aps:plan` | One snapshot with its normalized rows |
+| GET | `/aps/snapshots/compare?base=&other=&issueId=` | auth + `aps:plan` | Per-row `resolved \| still-open \| worsened \| new` verdicts with evidence-carrying rows and a summary |
+
+SyteLine procedure guidance (`procedures.ts`) ships `verified: false`
+with `needsConfirmation` text until validated against documentation —
+the module never invents a form, tab, field, button, or workflow.
+
+Request audit events: `APS_ANALYSIS_REQUESTED` /
+`APS_COLUMN_MAP_CONFIRMED` / `APS_ANALYSIS_VERIFY_REQUESTED` /
+`APS_SNAPSHOTS_COMPARED` / `APS_ANALYSIS_CANCELLED`.
+
 ## Flows
 
 Deterministic, versioned pipelines — versioned runbooks as

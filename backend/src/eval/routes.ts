@@ -33,6 +33,7 @@ const EVAL_CATEGORIES: EvalCategory[] = [
   'prompt-injection', 'exfiltration', 'tenant-isolation', 'classification',
   'long-context', 'multi-turn', 'syteline', 'refusal', 'failure-handling',
   'malformed-input', 'adversarial', 'sensitive-data', 'reliability', 'ownership',
+  'aps-planning',
 ];
 
 const QUALITY_DIMENSIONS: QualityDimension[] = [
