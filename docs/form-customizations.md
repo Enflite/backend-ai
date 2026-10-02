@@ -508,7 +508,7 @@ Blocked-reason codes (on the request record, not errors):
 | Request stuck in `requested` | `FORM_CUSTOMIZATION_RUNNER_ENABLED` is `false`/unset | Set it `true` and restart; check `FORM_CUSTOMIZATION_API_ENABLED` too |
 | `blocked` with `trn-prd-drift` | Production form has local changes the TRN export doesn't include | Per template procedure 3: decide whether production or TRN is authoritative, then create a follow-up request |
 | `blocked` with `missing-github-token` | `GITHUB_TOKEN` unset or lacking org access | Set the token (repo + PR scope in `FORM_CUSTOMIZATION_GITHUB_ORG`); the request can be retried |
-| `blocked` with `invalid-requirements` | Requirements too vague or form name not in the TRN export | Restate with field type, label, tab, position; verify `formName` against SyteLine |
+| `blocked` with `invalid-requirements` | Requirements too vague or form name not in the supplied form XML | Restate with field type, label, tab, position; verify `formName` against SyteLine |
 | `blocked` with `build-check-failed` | Deterministic-rebuild check failed in the build script | Backend-team issue, not a request issue — include the step log |
 | `409 REQUEST_ALREADY_TERMINAL` on cancel | Request already finished | Read the completion report or blocked reason instead |
 
