@@ -280,6 +280,56 @@ Task audit events: `SYTELINE_TASK_CREATED` / `SYTELINE_TASK_STARTED`
 usernames and task ids in clear are fine; passwords and field values
 never.
 
+## Form customizations
+
+Runtype-style dispatch over the Form-Project-Templates workflow (see
+ADR-021 and `docs/form-customizations.md`): a person or system POSTs a
+form-customization request (`{ formName, requirements }`) and the
+backend AI runs the whole template workflow server-side — scaffold the
+form project, record the TRN/production FormSync rollback copies,
+build `<Form>.xml` from the TRN original (UET-only `Uf_ENF_*` fields,
+purple highlighting, byte-preserved UTF-8/BOM/CRLF), write the
+implementation plan and deck, and open a **review PR**. Form-project
+PRs are **never** auto-merged — the merge is always a human decision.
+
+All endpoints require auth + `syteline:forms` (Admin / AI Admin only —
+never the User role). The whole family is behind the
+`FORM_CUSTOMIZATION_API_ENABLED` kill switch (default `false` —
+`403 FEATURE_DISABLED` when off), and the runner additionally requires
+`FORM_CUSTOMIZATION_RUNNER_ENABLED=true` (default `false` — requests
+stay `requested` and nothing runs when off). Privacy routing treats
+the family as `syteline.*` — never offered on cloud turns when customer
+or finance categories are enforced (see `docs/privacy-routing.md`).
+
+Request lifecycle (the kanban data model for form work):
+`requested → in_progress → awaiting_review → completed`, with
+`requested → in_progress → blocked` and `(any non-terminal) →
+cancelled`. `awaiting_review` is the agent's terminal state (work done,
+PR open, completion report attached); `completed` is reached only when
+a human merges the PR. Backup-first is an intake gate: the request
+requires both FormSync originals (`originals.trn`, `originals.prd`);
+missing originals or TRN/PRD drift mark the request `blocked` with an
+enumerated `blockedReason` (`missing-formsync-originals`,
+`trn-prd-drift`, `missing-github-token`, `invalid-requirements`,
+`build-check-failed`). TRN import, UET setup, staging checks,
+launch-to-production, and rollback stay numbered human runbook steps
+in the generated implementation plan — the API automates the build,
+not the go-live.
+
+| Method | Path | Auth / Permission | Purpose |
+|---|---|---|---|
+| POST | `/form-customizations` | auth + `syteline:forms` (10/min) | Create a request: `{ formName, title, requirements[], originals: { trn, prd }, requestedBy? }`; `202 { id, status: 'requested' }` — rejected (`400 FORM_SYNC_ORIGINALS_MISSING`) unless both FormSync originals are supplied |
+| GET | `/form-customizations/:id` | auth + `syteline:forms` | Full request record: status, step log, `resultSummary` / `blockedReason` + `blockedDetail`, and on `awaiting_review` the `evidence` completion report (`repoUrl`, `prUrl`, `<Form>.xml` and deck artifacts, recorded originals with SHA-256 prefix, `openItems`, `assumptions`) |
+| GET | `/form-customizations` | auth + `syteline:forms` | List the requester's (or, for admins, the tenant's) requests; optional `status` filter — the kanban-board query for form work |
+| POST | `/form-customizations/:id/cancel` | auth + `syteline:forms` | Cancel a request (ends work in flight); requester or admin only; terminal states return `409 REQUEST_ALREADY_TERMINAL` |
+
+Request audit events: `FORM_CUSTOMIZATION_REQUESTED` /
+`FORM_CUSTOMIZATION_STARTED` / `FORM_CUSTOMIZATION_STEP` (step names
+only) / `FORM_CUSTOMIZATION_BLOCKED` (reason) /
+`FORM_CUSTOMIZATION_AWAITING_REVIEW` (repo + PR urls) /
+`FORM_CUSTOMIZATION_MERGED` (human actor) /
+`FORM_CUSTOMIZATION_CANCELLED`.
+
 ## Repositories & code search
 
 Multi-repo code indexing for coding turns (see `docs/repo-indexing.md`).
