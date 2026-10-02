@@ -29,6 +29,7 @@ import {
   buildExplainRequest,
   buildPrioritizeRequest,
   buildRecommendRequest,
+  buildSummariesFromSnapshot,
 } from '../src/apsPlanning/agentJudgment.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -46,6 +47,17 @@ const SYNC_ANCHORS = [
   'FIRMING a PLN order',
   'Never invent SyteLine records or procedures',
   'needsConfirmation',
+  // Enriched 2026-10-02 from the planner's APS training materials.
+  'Reschedule Tolerance',
+  'Days Supply',
+  'Exception Code',
+  'For Planning',
+  'Alt Group Rank',
+  'Identify Red Flags',
+  'supplier on-time performance',
+  'Use Latest Pull',
+  'Infinite APS Mode',
+  'Keep Data Accurate',
 ];
 
 describe('APS planning types', () => {
@@ -162,12 +174,17 @@ describe('compareSnapshots', () => {
 });
 
 describe('procedure guidance honesty', () => {
-  it('ships every V1 procedure unverified with needsConfirmation', () => {
+  it('ships every V1 procedure verified (sourced) with needsConfirmation for mechanics', () => {
+    // Sourced 2026-10-02 from the planner's APS training materials
+    // (workbooks, transcript, flowcharts, live exports, daily SOP): the
+    // WHAT is verified. The exact field-level mechanics still vary by
+    // SyteLine version and tenant setup, so they stay behind
+    // needsConfirmation.
     const all = allProcedureGuidance();
     expect(Object.keys(all)).toHaveLength(5);
     for (const type of EXCEPTION_TYPES) {
       const proc = getProcedureGuidance(type);
-      expect(proc.verified, type).toBe(false);
+      expect(proc.verified, type).toBe(true);
       expect(proc.needsConfirmation, type).toBeTruthy();
       expect(proc.steps.length).toBeGreaterThan(0);
     }
@@ -240,5 +257,70 @@ describe('agent judgment builders (aggregates only)', () => {
     expect(
       req.schema.safeParse({ recommendations: [{ action: 'x', priority: 'p9', expectedImpact: 'y' }] }).success,
     ).toBe(false);
+  });
+});
+
+describe('buildSummariesFromSnapshot (aggregates only)', () => {
+  const rows = [
+    {
+      type: 'RCPT_PROJECTED_LATE',
+      item: 'WIDGET-1',
+      supplyId: 'PO-100',
+      demandId: 'SO-1-1',
+      severity: 'high',
+      exceptionText: 'Rcpt Projected Late 9 Days',
+      quantity: 500,
+      evidence: { daysLate: 9, promisedDate: '2026-09-30' },
+    },
+    {
+      type: 'MOVE_IN_RCPT',
+      item: 'WIDGET-2',
+      supplyId: 'PO-101',
+      demandId: 'SO-2-1',
+      severity: 'medium',
+      exceptionText: 'Move In Rcpt',
+    },
+    // No severity: never classified by the pipeline — skipped.
+    { item: 'WIDGET-3', exceptionText: 'On Hand below Safety Stock' },
+  ];
+
+  it('derives per-issue summaries from the stable identity key', () => {
+    const summaries = buildSummariesFromSnapshot(rows);
+    expect(summaries).toHaveLength(2);
+    expect(summaries[0]).toEqual({
+      id: 'rcpt_projected_late|widget-1|po-100|so-1-1',
+      type: 'RCPT_PROJECTED_LATE',
+      severity: 'high',
+      item: 'WIDGET-1',
+      daysLate: 9,
+    });
+    expect(summaries[1]).toEqual({
+      id: 'move_in_rcpt|widget-2|po-101|so-2-1',
+      type: 'MOVE_IN_RCPT',
+      severity: 'medium',
+      item: 'WIDGET-2',
+    });
+  });
+
+  it('never leaks full report rows into the summaries', () => {
+    const summaries = buildSummariesFromSnapshot(rows);
+    const text = JSON.stringify(summaries);
+    expect(text).not.toContain('exceptionText');
+    expect(text).not.toContain('Rcpt Projected Late 9 Days');
+    expect(text).not.toContain('promisedDate');
+    expect(text).not.toContain('500');
+  });
+
+  it('falls back to a row index id when the row has no identity', () => {
+    const summaries = buildSummariesFromSnapshot([
+      { severity: 'low', exceptionText: 'Expedited 4 Days' },
+    ]);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]!.id).toBe('row:0');
+  });
+
+  it('bounds the batch at 200 summaries', () => {
+    const many = new Array(250).fill({ severity: 'low', item: 'X' });
+    expect(buildSummariesFromSnapshot(many)).toHaveLength(200);
   });
 });

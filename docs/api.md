@@ -416,7 +416,10 @@ still-open`, with `analyzing/verifying → blocked` when the pipeline run
 fails. `intake → pending-substrate` is the honest waiting state while
 the `aps-exception-analysis` flow is not yet published on the tenant
 (the .flow.json ships in the repo; the live alias is per-tenant) — the
-analysis is recorded and runs once the pipeline is published.
+analysis is recorded and runs once the pipeline is published. `POST
+/aps/analyses/:id/retry` re-attempts the substrate start idempotently
+after the tenant publishes the flows (see
+`docs/aps-planning-agent/enablement.md`).
 `(any non-terminal) → cancelled`.
 
 Snapshot compare (`GET /aps/snapshots/compare`) emits per-row verdicts
@@ -439,6 +442,8 @@ inside the sibling's issue documents, so the snapshot endpoints take
 | POST | `/aps/analyses/:id/column-map` | auth + `aps:plan` | Confirm/override the workbook column mapping (`{ columns: { canonical: header }, confirmed }`); requires `item` + `exceptionText` |
 | POST | `/aps/analyses/:id/verify` | auth + `aps:plan` + `document:upload` (10/min) | Trigger verification against a newer report (multipart or `documentId`); invokes `aps-exception-verify`; requires a recorded `issueId`; `202 { id, status: 'verifying' }` |
 | POST | `/aps/analyses/:id/cancel` | auth + `aps:plan` | Cancel an analysis (ends work in flight); terminal states return `409 ANALYSIS_TERMINAL` |
+| POST | `/aps/analyses/:id/retry` | auth + `aps:plan` (10/min) | Re-attempt the substrate start for an analysis waiting in `pending-substrate` (e.g. after the tenant publishes `aps-exception-analysis`); re-uses the stored intake inputs. Idempotent: the status moves out of `pending-substrate` only via an atomic claim, so a repeated or concurrent retry never starts a second flow run. `202 { id, status: 'analyzing', retried: true, flowRunId }` on start; `202 { id, status: 'pending-substrate', retried: false }` while the pipeline is still unpublished; `200 { retried: false }` when the start already happened; `409 ANALYSIS_TERMINAL` / `ANALYSIS_NOT_RETRYABLE` otherwise |
+| POST | `/aps/issues/:issueId/judgment` | auth + `aps:plan` (10/min) | Standalone agent judgment (the REST trigger for `agentJudgment.ts`): `{ kind: 'explain' \| 'prioritize' \| 'recommend', summaries?: [...] }`. When `summaries` is omitted they are derived server-side from the issue's latest recorded snapshot as aggregates only (id, type, severity, item, daysLate — never full report rows). The model's decision is schema-validated before it is returned. `200 { issueId, kind, judgmentRef, decision }`; `502 JUDGE_FAILED` when no judge is servable. This is the chat-context seam — it does not duplicate the flow's pipeline agent steps (classify, root-cause, recommendation, syteline-steps) |
 | GET | `/aps/snapshots?issueId=` | auth + `aps:plan` | The issue's snapshots, newest first (row counts, no row payloads) |
 | GET | `/aps/snapshots/:snapshotId?issueId=` | auth + `aps:plan` | One snapshot with its normalized rows |
 | GET | `/aps/snapshots/compare?base=&other=&issueId=` | auth + `aps:plan` | Per-row `resolved \| still-open \| worsened \| new` verdicts with evidence-carrying rows and a summary |
@@ -449,7 +454,9 @@ the module never invents a form, tab, field, button, or workflow.
 
 Request audit events: `APS_ANALYSIS_REQUESTED` /
 `APS_COLUMN_MAP_CONFIRMED` / `APS_ANALYSIS_VERIFY_REQUESTED` /
-`APS_SNAPSHOTS_COMPARED` / `APS_ANALYSIS_CANCELLED`.
+`APS_SNAPSHOTS_COMPARED` / `APS_ANALYSIS_CANCELLED` /
+`APS_ANALYSIS_RETRY_STARTED` / `APS_ANALYSIS_RETRY_SKIPPED` /
+`APS_JUDGMENT_REQUESTED`.
 
 ## Flows
 

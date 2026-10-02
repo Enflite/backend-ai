@@ -113,6 +113,82 @@ export async function setAnalysisColumnMap(
 }
 
 /**
+ * Atomically claim a `pending-substrate` analysis for retry: transitions
+ * pending-substrate → analyzing with the internal `retryInFlight` marker.
+ * Returns null when the analysis is not in pending-substrate — i.e. the
+ * caller lost a concurrent retry race and must NOT start a second flow
+ * run (idempotency lives here).
+ */
+export async function claimPendingSubstrateRetry(
+  tenantId: string,
+  id: string,
+): Promise<ApsAnalysisDoc | null> {
+  const db = await getDb();
+  return db.collection<ApsAnalysisDoc>('aps_analyses').findOneAndUpdate(
+    { _id: id, tenantId, status: 'pending-substrate' },
+    {
+      $set: {
+        status: 'analyzing',
+        statusNote: 'Retry: invoking the aps-exception-analysis pipeline.',
+        retryInFlight: true,
+        updatedAt: new Date(),
+      },
+    },
+    { returnDocument: 'after' },
+  );
+}
+
+/**
+ * Release a retry claim when the substrate start failed: the analysis
+ * goes back to `pending-substrate` honestly — the pipeline never ran.
+ * Guarded by the claim marker so a claim that already progressed is
+ * never clobbered.
+ */
+export async function releaseRetryClaim(
+  tenantId: string,
+  id: string,
+  statusNote: string,
+): Promise<ApsAnalysisDoc | null> {
+  const db = await getDb();
+  return db.collection<ApsAnalysisDoc>('aps_analyses').findOneAndUpdate(
+    { _id: id, tenantId, status: 'analyzing', retryInFlight: true },
+    {
+      $set: {
+        status: 'pending-substrate',
+        statusNote,
+        retryInFlight: false,
+        updatedAt: new Date(),
+      },
+    },
+    { returnDocument: 'after' },
+  );
+}
+
+/**
+ * Record the flow run after a successful retry start. The status is
+ * left untouched (the claim already moved it to `analyzing`).
+ */
+export async function setAnalysisFlowRunIds(
+  tenantId: string,
+  id: string,
+  ids: { flowName: string; flowRunId: string; statusNote?: string },
+): Promise<ApsAnalysisDoc | null> {
+  const db = await getDb();
+  const $set: Record<string, unknown> = {
+    flowName: ids.flowName,
+    flowRunId: ids.flowRunId,
+    retryInFlight: false,
+    updatedAt: new Date(),
+  };
+  if (ids.statusNote !== undefined) $set.statusNote = ids.statusNote;
+  return db.collection<ApsAnalysisDoc>('aps_analyses').findOneAndUpdate(
+    { _id: id, tenantId },
+    { $set },
+    { returnDocument: 'after' },
+  );
+}
+
+/**
  * Cancel an analysis: only from a non-terminal status. A cancelled
  * analysis never drives a flow run — callers check the status before
  * invoking the substrate.
